@@ -50,3 +50,22 @@ Get-Command Update-M365DSCAzureAdApplication -Syntax
 
 
 Get-Help Update-M365DSCAzureAdApplication -Examples
+
+
+
+
+
+$creds = Get-Credential
+
+Update-M365DSCAzureAdApplication `
+    -ApplicationName "Microsoft365DSC" `
+    -Permissions $((Get-M365DSCCompiledPermissionList `
+        -ResourceNameList (Get-M365DSCAllResources) `
+        -PermissionType Application `
+        -AccessType Read).Permissions) `
+    -Type Certificate `
+    -CreateSelfSignedCertificate `
+    -AdminConsent `
+    -MonthsValid 12 `
+    -Credential $creds `
+    -CertificatePath C:\Temp\M365DSC.cer

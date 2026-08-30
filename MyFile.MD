@@ -69,3 +69,7 @@ Update-M365DSCAzureAdApplication `
     -MonthsValid 12 `
     -Credential $creds `
     -CertificatePath C:\Temp\M365DSC.cer
+
+
+
+Connect-MgGraph -Scopes "RoleManagement.Read.Directory"

@@ -73,3 +73,9 @@ Update-M365DSCAzureAdApplication `
 
 
 Connect-MgGraph -Scopes "RoleManagement.Read.Directory"
+
+
+
+Connect-MgGraph -Scopes "Application.ReadWrite.All"
+
+New-MgApplication -DisplayName "TestApp"

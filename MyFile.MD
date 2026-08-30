@@ -43,3 +43,6 @@ Update-M365DSCAzureAdApplication `
     -Permissions @("All") `
     -AdminConsent `
     -Type Certificate
+
+
+Get-Command Update-M365DSCAzureAdApplication -Syntax

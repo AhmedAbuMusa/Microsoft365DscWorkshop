@@ -36,3 +36,10 @@ Update-M365DSCAzureAdApplication `
     -ApplicationName "Microsoft365DSC" `
     -AdminConsent `
     -Type Certificate
+
+
+Update-M365DSCAzureAdApplication `
+    -ApplicationName "Microsoft365DSC" `
+    -Permissions @("All") `
+    -AdminConsent `
+    -Type Certificate

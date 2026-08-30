@@ -3,6 +3,8 @@ Hi Again
 admin@M365CPI39455860.onmicrosoft.com
 ^b426~bHASw]0al[gnuU[L2M711$$^PH
 
+Get-InstalledModule Microsoft.Graph* | Uninstall-Module -AllVersions -Force
+
 
 Uninstall-Module Microsoft.Graph.Authentication -AllVersions -Force
 

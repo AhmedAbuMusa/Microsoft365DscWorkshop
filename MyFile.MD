@@ -21,3 +21,11 @@ Connect-MgGraph
 Connect-MgGraph -Scopes `
 "DeviceManagementConfiguration.Read.All",
 "DeviceManagementManagedDevices.Read.All"
+
+
+Connect-MgGraph -Scopes `
+"Directory.Read.All",
+"Policy.Read.All",
+"Application.Read.All",
+"Agreement.Read.All",
+"AdministrativeUnit.Read.All"

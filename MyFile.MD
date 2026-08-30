@@ -29,3 +29,10 @@ Connect-MgGraph -Scopes `
 "Application.Read.All",
 "Agreement.Read.All",
 "AdministrativeUnit.Read.All"
+
+
+
+Update-M365DSCAzureAdApplication `
+    -ApplicationName "Microsoft365DSC" `
+    -AdminConsent `
+    -Type Certificate

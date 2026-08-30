@@ -82,3 +82,48 @@ New-MgApplication -DisplayName "TestApp"
 
 
 Get-MgContext | Select Account,Scopes
+
+
+
+(Get-MgContext).Scopes
+
+Disconnect-MgGraph
+
+Connect-MgGraph -Scopes `
+"Application.ReadWrite.All",
+"Directory.ReadWrite.All",
+"AppRoleAssignment.ReadWrite.All",
+"RoleManagement.ReadWrite.Directory"
+
+(Get-MgContext).Scopes
+
+
+$creds = Get-Credential
+
+Update-M365DSCAzureAdApplication `
+    -ApplicationName "Microsoft365DSC" `
+    -Permissions $((Get-M365DSCCompiledPermissionList `
+        -ResourceNameList (Get-M365DSCAllResources) `
+        -PermissionType Application `
+        -AccessType Read).Permissions) `
+    -Type Certificate `
+    -CreateSelfSignedCertificate `
+    -AdminConsent `
+    -MonthsValid 12 `
+    -Credential $creds `
+    -CertificatePath C:\Temp\M365DSC.cer
+
+$creds = Get-Credential
+
+Update-M365DSCAzureAdApplication `
+    -ApplicationName "Microsoft365DSC" `
+    -Permissions $((Get-M365DSCCompiledPermissionList `
+        -ResourceNameList (Get-M365DSCAllResources) `
+        -PermissionType Application `
+        -AccessType Read).Permissions) `
+    -Type Certificate `
+    -CreateSelfSignedCertificate `
+    -MonthsValid 12 `
+    -Credential $creds `
+    -CertificatePath C:\Temp\M365DSC.cer
+

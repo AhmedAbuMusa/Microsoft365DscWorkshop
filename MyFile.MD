@@ -46,3 +46,7 @@ Update-M365DSCAzureAdApplication `
 
 
 Get-Command Update-M365DSCAzureAdApplication -Syntax
+
+
+
+Get-Help Update-M365DSCAzureAdApplication -Examples

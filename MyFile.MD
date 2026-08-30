@@ -10,3 +10,8 @@ Uninstall-Module Microsoft.Graph.Authentication -AllVersions -Force
 
 
 Uninstall-Module Microsoft.Graph -AllVersions -Force
+
+
+Import-Module Microsoft.Graph.Auth*ntication -Force
+Connect-MgGraph
+`*

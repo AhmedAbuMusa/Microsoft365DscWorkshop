@@ -61,7 +61,7 @@ In the PowerShell prompt, please call the script [.\lab\00 Prep.ps1](../lab//00%
 
 Call the script [.\lab\00 Prep.ps1](../lab//00%20Prep.ps1). It does the following steps:
 
-- It then installs the following modules to your machine:
+- Installs the following modules to your machine:
   - [VSTeam](https://github.com/MethodsAndPractices/vsteam)
   - [AutomatedLab](https://automatedlab.org/en/latest/) and dependencies
 - This script set the project name in the [ProjectSettings.yml](../source/Global//ProjectSettings.yml) file to the name of your Azure DevOps project. You should see the change to the file in the source control panel. It will be committed later to the Git repository.

@@ -1,6 +1,6 @@
 # M365DscWorkshop - Controlling your Entra ID and Microsoft 365 with DSC
 
-## Where do we come from??
+## Where do we come from?
 
 ### The [DscWorkshop](https://github.com/dsccommunity/DscWorkshop)
 

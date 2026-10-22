@@ -45,7 +45,7 @@ Clone the project using the Source Control view in Visual Studio Code or the `gi
 > :information_source: Select **Clone** in your Azure DevOps repository to get its HTTPS URL.
 
 ```powershell
-git clone <Azure DevOps repository URL> <local path>
+git clone "https://dev.azure.com/ORGANIZATION/PROJECT/_git/REPOSITORY" "C:\path\to\local\repository"
 ```
 
 ## 1.3. Run the Lab Setup Scripts
@@ -54,7 +54,13 @@ After cloning the project to your development machine, open it in Visual Studio 
 
 ### 1.3.1. `00 Prep.ps1`
 
-From a PowerShell prompt in the repository root, run [00 Prep.ps1](../lab/00%20Prep.ps1). All setup scripts other than the build script are in the [lab](../lab/) folder, so you will need to switch between that folder and the repository root.
+Run all commands in this guide from a PowerShell prompt opened at the repository root. All setup scripts other than the build script are in the [lab](../lab/) folder.
+
+Run [00 Prep.ps1](../lab/00%20Prep.ps1):
+
+```powershell
+& '.\lab\00 Prep.ps1'
+```
 
 > :information_source: This script may kill the PowerShell session when setting local policies required for AutomatedLab. In this case, just try again.
 
@@ -141,6 +147,10 @@ After [00 Prep.ps1](../lab/00%20Prep.ps1) and [build.ps1](../build.ps1) finish, 
 
 Run [10 Setup App Registrations.ps1](../lab/10%20Setup%20App%20Registrations.ps1). It creates the required applications in each tenant defined in [Azure.yml](../source/Global/Azure.yml) and grants them permissions to manage and export the tenant.
 
+```powershell
+& '.\lab\10 Setup App Registrations.ps1'
+```
+
 > :warning: The script connects to Microsoft Graph and Exchange Online, so you will see two authentication prompts for each tenant. One prompt opens in Microsoft Edge; the other opens in a separate window, which may be in the background. If the script appears to hang while waiting for the second prompt, check for another window.
 
 > :warning: Git authentication with Azure DevOps at the end of the script requires JavaScript to be enabled in your browser. Add the sites when prompted.
@@ -149,7 +159,11 @@ Run [10 Setup App Registrations.ps1](../lab/10%20Setup%20App%20Registrations.ps1
 - The `M365DscLcmApplication` app is used by the Azure DevOps build agent(s) to put your tenant into the desired state. A service principal is also created in Exchange Online for each app.
 - The `M365DscExportApplication` app is used by the export pipeline. For details, see the [export guide](../export/readme.md).
 
-> :information_source: To remove the app registrations if you no longer want to use the project, run [98 Cleanup App Registrations.ps1](../lab/98%20Cleanup%20App%20Registrations.ps1).
+> :information_source: To remove the app registrations if you no longer want to use the project, run [98 Cleanup App Registrations.ps1](../lab/98%20Cleanup%20App%20Registrations.ps1) from the repository root:
+>
+> ```powershell
+> & '.\lab\98 Cleanup App Registrations.ps1'
+> ```
 
 Before doing any Exchange Online prep work, the script reads the `HasExchangeOnline` setting of the environment from the [Azure.yml](../source/Global/Azure.yml) file. Set it to `false` for a tenant without an Exchange Online license: such a tenant cannot create the Exchange service principals and cannot be added to the Exchange role groups, so these steps are skipped. The same setting removes the Exchange layers from the Datum hierarchy, so no `cEXO*` configuration is compiled and no Exchange component is exported for that tenant. If the setting claims Exchange Online but the tenant is not licensed for it, the script stops with an explicit error.
 
@@ -165,7 +179,13 @@ The app IDs are shown in the console. The secrets are also displayed there in pl
 
 The previous step created applications and stored their authentication credentials in [Azure.yml](../source/Global/Azure.yml). Now test whether authentication with the new applications works.
 
-Run [11 Test Connection.ps1](../lab/11%20Test%20Connection.ps1). The last line of its output should be `Connection test completed`.
+Run [11 Test Connection.ps1](../lab/11%20Test%20Connection.ps1):
+
+```powershell
+& '.\lab\11 Test Connection.ps1'
+```
+
+The last line of its output should be `Connection test completed`.
 
 ---
 
@@ -187,7 +207,7 @@ Run [20 Configure AzDo Project.ps1](../lab/20%20Configure%20AzDo%20Project.ps1).
 2. Run [20 Configure AzDo Project.ps1](../lab/20%20Configure%20AzDo%20Project.ps1) and provide the requested information.
 
 ```powershell
-& '.\20 Configure AzDo Project.ps1'
+& '.\lab\20 Configure AzDo Project.ps1'
 ```
 
 The script:
@@ -217,7 +237,13 @@ BuildAgents:
   Password: <Password>
 ```
 
-Run [30 Create Agent VMs.ps1](../lab/30%20Create%20Agent%20VMs.ps1). You will be prompted to choose a password for the build-agent VMs. You can use the default password shown in the prompt or enter a different one.
+Run [30 Create Agent VMs.ps1](../lab/30%20Create%20Agent%20VMs.ps1):
+
+```powershell
+& '.\lab\30 Create Agent VMs.ps1'
+```
+
+You will be prompted to choose a password for the build-agent VMs. You can use the default password shown in the prompt or enter a different one.
 
 > :warning: Please make sure the password meets the Windows standard complexity.
 
@@ -232,6 +258,12 @@ The script [31 Agent Setup.ps1](../lab/31%20Agent%20Setup.ps1) connects to each 
 - Visual Studio Code
 - Azure DevOps Build Agent
 - The latest PowerShellGet module and NuGet package provider
+
+Run the script:
+
+```powershell
+& '.\lab\31 Agent Setup.ps1'
+```
 
 The script then connects each agent to the specified Azure DevOps organization and adds it to the configured agent pool. It also creates a self-signed client-authentication certificate on the agent and writes the certificate thumbprint to [Azure.yml](../source/Global/Azure.yml).
 

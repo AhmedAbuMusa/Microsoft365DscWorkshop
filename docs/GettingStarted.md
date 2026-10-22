@@ -83,6 +83,18 @@ Test the build locally by running the build script from a PowerShell prompt in t
 
 > :information_source: [ModuleFast](https://github.com/JustinGrote/ModuleFast) may not download all required modules on the first try. If modules are missing or you see errors, close the PowerShell session and run the command again.
 
+If ModuleFast repeatedly fails, for example with a gallery connection timeout, use PSResourceGet instead:
+
+```powershell
+.\build.ps1 -UsePSResourceGet -ResolveDependency
+```
+
+To resolve dependencies without running the build tasks, add `-Tasks noop`:
+
+```powershell
+.\build.ps1 -UsePSResourceGet -ResolveDependency -Tasks noop
+```
+
 The first build usually takes 15 to 20 minutes because it downloads the dependencies listed in [RequiredModules.psd1](../RequiredModules.psd1) and discovers the DSC resources in [Microsoft365DSC](https://microsoft365dsc.com/).
 
 After the build finishes, verify that it created artifacts, such as MOF files in the [MOF](../output/MOF/) folder.

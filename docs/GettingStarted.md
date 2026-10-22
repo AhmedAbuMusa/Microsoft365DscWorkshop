@@ -2,7 +2,7 @@
 
 - [The quick guide to the Microsoft365DscWorkshop](#the-quick-guide-to-the-microsoft365dscworkshop)
   - [1. Getting started](#1-getting-started)
-    - [1.0.1. :warning: You must be a local administrator one the machine you run the setup scripts on](#101-warning-you-must-be-a-local-administrator-one-the-machine-you-run-the-setup-scripts-on)
+    - [1.0.1. :warning: You must be a local administrator on the machine where you run the setup scripts](#101-warning-you-must-be-a-local-administrator-on-the-machine-where-you-run-the-setup-scripts)
   - [1.1. Import the Project into Azure DevOps](#11-import-the-project-into-azure-devops)
   - [1.2. Cloning the Project](#12-cloning-the-project)
   - [1.3. Run the Lab Setup Scripts](#13-run-the-lab-setup-scripts)
@@ -11,8 +11,8 @@
   - [1.4. Set your Azure Tenant Details](#14-set-your-azure-tenant-details)
     - [1.4.1. Initialize the session (Init task)](#141-initialize-the-session-init-task)
     - [1.4.2. `10 Setup App Registrations.ps1`](#142-10-setup-app-registrationsps1)
-    - [1.4.3. 1.5.3 `11 Test Connection.ps1`](#143-153-11-test-connectionps1)
-    - [1.4.4. `20 Setup AzDo Project.ps1`](#144-20-setup-azdo-projectps1)
+    - [1.4.3. `11 Test Connection.ps1`](#143-11-test-connectionps1)
+    - [1.4.4. `20 Configure AzDo Project.ps1`](#144-20-configure-azdo-projectps1)
     - [1.4.5. `30 Create Agent VMs.ps1`](#145-30-create-agent-vmsps1)
     - [1.4.6. `31 Agent Setup.ps1`](#146-31-agent-setupps1)
   - [1.5. Running the Pipeline](#15-running-the-pipeline)
@@ -20,89 +20,88 @@
 
 ## 1. Getting started
 
-> Note: If you are only interested in exporting your Microsoft Azure tenant configuration with [Microsoft365DSC](https://microsoft365dsc.com/) and you do not want to configure your tenants, please refer to [Export your Azure Tenant Configuration](../export/readme.md).
+> :information_source: If you only want to export your tenant configuration with [Microsoft365DSC](https://microsoft365dsc.com/), see the [export guide](../export/readme.md).
 
-### 1.0.1. :warning: You must be a local administrator one the machine you run the setup scripts on
+### 1.0.1. :warning: You must be a local administrator on the machine where you run the setup scripts
 
 ## 1.1. Import the Project into Azure DevOps
 
-For this project to work it is required to change the content of some files. Hence, it is required to create yourself a
-writable copy of the project. Please import the content of this project into a project hosted on Azure DevOps.
+To use this project, you need to change some files, so first create a writable copy. Import this repository into a project hosted on Azure DevOps.
 
-1. Create a new project in your Azure DevOps Organization with the name of your choice.
-2. In the new project, click on 'Repos'.
-3. As there is no content yet, you are asked to add some code. Please press the 'Import' button.
-4. Please use the URL `https://github.com/dsccommunity/Microsoft365DscWorkshop.git` as the 'Clone URL' and click on 'Import' (it may take a view seconds to copy the content).
+1. Create a new project in your Azure DevOps organization.
+2. In the new project, open **Repos**.
+3. Select **Import** to add the repository.
+4. Enter `https://github.com/dsccommunity/Microsoft365DscWorkshop.git` as the clone URL and select **Import**. It may take a few seconds to copy the content.
 
-This guide expects you have created a new project on Azure DevOps and imported the content from here. Alternatively, you can create a fork on GitHub, but then some scripts won't work and you have to make the required tasks manually.
+This guide assumes that you have created an Azure DevOps project and imported this repository. Alternatively, you can fork it on GitHub, but some scripts will not work and you will need to perform the related tasks manually.
 
 > :warning: You can run the project on any code management / automation platform of your choice, but for the standard setup to work, it is expected
 > to host it on Azure DevOps.
 
 ## 1.2. Cloning the Project
 
-Clone the project in Visual Studio Code Source Control Activity Bar or use the command `git.exe`. With the following command you clone the Git repository to your local machine. Please change the link according to your Azure DevOps Organization and project name.
+Clone the project using the Source Control view in Visual Studio Code or the `git` command. Replace the placeholders below with your Azure DevOps repository URL and the local path where you want to clone it.
 
-> :information_source: By clicking on the clone button in your repository on Azure DevOps you get the HTTPS link to clone from. The git command could look like this:
+> :information_source: Select **Clone** in your Azure DevOps repository to get its HTTPS URL.
 
 ```powershell
-git clone <Link to you Azure DevOps project> <The local path of your choice>
+git clone <Azure DevOps repository URL> <local path>
 ```
 
 ## 1.3. Run the Lab Setup Scripts
 
-After having cloned the project to your development machine, please open the solution in Visual Studio Code.
+After cloning the project to your development machine, open it in Visual Studio Code.
 
 ### 1.3.1. `00 Prep.ps1`
 
-In the PowerShell prompt, please call the script [.\lab\00 Prep.ps1](../lab//00%20Prep.ps1). All script except the build script are in the folder [lab](../lab/), so you have to jump between the lab folder and the project root folder from time to time.
+From a PowerShell prompt in the repository root, run [00 Prep.ps1](../lab/00%20Prep.ps1). All setup scripts other than the build script are in the [lab](../lab/) folder, so you will need to switch between that folder and the repository root.
 
 > :information_source: This script may kill the PowerShell session when setting local policies required for AutomatedLab. In this case, just try again.
 
-Call the script [.\lab\00 Prep.ps1](../lab//00%20Prep.ps1). It does the following steps:
+The script performs the following steps:
 
 - Installs the following modules to your machine:
   - [VSTeam](https://github.com/MethodsAndPractices/vsteam)
   - [AutomatedLab](https://automatedlab.org/en/latest/) and dependencies
-- This script set the project name in the [ProjectSettings.yml](../source/Global//ProjectSettings.yml) file to the name of your Azure DevOps project. You should see the change to the file in the source control panel. It will be committed later to the Git repository.
+- Sets the project name in [ProjectSettings.yml](../source/Global/ProjectSettings.yml) to the name of your Azure DevOps project. You should see the change in the Source Control view; it will be committed later.
 
 ---
 
 ### 1.3.2. Test the Build and Download Dependencies
 
-Now test the build locally. In the PowerShell prompt, call the build script:
+Test the build locally by running the build script from a PowerShell prompt in the repository root:
 
 ```powershell
 .\build.ps1 -UseModuleFast -ResolveDependency
 ```
 
-> :information_source: [ModuleFast](https://github.com/JustinGrote/ModuleFast) sometimes has a problem and does not download all the modules it should. If something is missing and you see error messages, please close the PowerShell session and try again. Usually everything works after the second time.
+> :information_source: [ModuleFast](https://github.com/JustinGrote/ModuleFast) may not download all required modules on the first try. If modules are missing or you see errors, close the PowerShell session and run the command again.
 
-This build process takes around 15 to 20 minutes to complete the first time. Downloading all the required dependencies defined in the file [RequiredModules.psd1](../RequiredModules.psd1) takes time and discovering the many DSC resources in [Microsoft365DSC](https://microsoft365dsc.com/).
+The first build usually takes 15 to 20 minutes because it downloads the dependencies listed in [RequiredModules.psd1](../RequiredModules.psd1) and discovers the DSC resources in [Microsoft365DSC](https://microsoft365dsc.com/).
 
-After the build finished, please verify the artifacts created by the build pipeline, for example the MOF files in the [MOF](../output/MOF/) folder.
+After the build finishes, verify that it created artifacts, such as MOF files in the [MOF](../output/MOF/) folder.
 
-> :information_source: The [MOF](../output/MOF/) folder is not part of the project. It is created by the build process. If you don't find it after having run the build, something went wrong and you probably see errors in the console output of the build process.
+> :information_source: The [MOF](../output/MOF/) folder is generated by the build process and is not part of the repository. If it is missing after the build, check the console output for errors.
 
 ---
 
 ## 1.4. Set your Azure Tenant Details
 
-This solution can configure as many Azure tenants as you want. You configure the tenants you want to control in the [.\source\Azure.yml](../source//Global/Azure.yml) file. The file contains a usual environment setup, a dev, test and prod tenant.
+This solution can configure multiple Azure tenants. Configure the tenants you want to manage in [Azure.yml](../source/Global/Azure.yml), which includes example Dev, Test, and Prod environments.
 
-- For each environment / tenant, please update the settings `AzTenantId`, `AzTenantName` and `AzSubscriptionId`. The `AzApplicationId`, `AzApplicationSecret` and `CertificateThumbprint` will be handled by the setup scripts you are going to run next.
+- For each environment/tenant, update `AzTenantId`, `AzTenantName`, and `AzSubscriptionId`. The setup scripts you run next will populate the application IDs, secrets, and certificate thumbprints.
 
-- Remove the environments you don't want from the [Azure.yml](../source/Global//Azure.yml) file. For this introduction, only the Dev environment is needed.
+- Remove any environments you do not need from [Azure.yml](../source/Global/Azure.yml). For this guide, keep only the Dev environment.
 
-- Please also remove the build agent yaml-definition including the folders that are not required for this introduction:
-  - [Test](../source//BuildAgents/Test/)
-  - [Prod](../source//BuildAgents/Prod/)
+- Also remove the build-agent configuration folders you do not need for this guide:
+  - [Test](../source/BuildAgents/Test/)
+  - [Prod](../source/BuildAgents/Prod/)
 
 > :warning: Please don't forget to remove the environments you do not need.
 >
-> :information_source: For getting used with the project it is recommended to focus on one tenant only. This reduces the runtime of your tests and the complexity.
+> :information_source: When getting familiar with the project, it is recommended to start with one tenant. This reduces test run times and complexity.
 
-The file can look like this for example if you want to configure only one tenant:
+For example, the file could look like this if you want to configure only one tenant:
 
 ```yml
 Environments:
@@ -126,11 +125,11 @@ Environments:
 
 ### 1.4.1. Initialize the session (Init task)
 
-> :warning: Please start a new PowerShell session and do not use the old one. This is because there is a kind of Azure PowerShell module hell (Déjà vu of [Dll Hell](https://en.wikipedia.org/wiki/DLL_hell)) and usually at this point in the process a module is loaded that prevents a newer version from being loaded.
+> :warning: Start a new PowerShell session rather than reusing the old one. A module loaded during setup may prevent a newer version of an Azure PowerShell module from loading (a familiar issue known as [DLL Hell](https://en.wikipedia.org/wiki/DLL_hell)).
 >
 > And don't forget: Sometimes just retrying a failed task is the best and easiest solution.
 
-After the preparation script [.\lab\00 Prep.ps1](../lab//00%20Prep.ps1) and the [build.ps1](../build.ps1) finished, we have all modules and dependencies on the machine to get going. Please run the build script again, but this time just only for initializing the new shell:
+After [00 Prep.ps1](../lab/00%20Prep.ps1) and [build.ps1](../build.ps1) finish, all required modules and dependencies should be available. In the new PowerShell session, run the build script again to initialize the shell:
 
 ```powershell
 .\build.ps1 -Tasks init
@@ -140,89 +139,85 @@ After the preparation script [.\lab\00 Prep.ps1](../lab//00%20Prep.ps1) and the 
 
 ### 1.4.2. `10 Setup App Registrations.ps1`
 
-Please run the script [10 Setup App Registrations.ps1](../lab/10%20Setup%20App%20Registrations.ps1). It creates all the required applications in each Azure tenant defined in the [Azure.yml](../source/Global/Azure.yml) file. Then it assigns these apps very high privileges as they are used to control and export the tenant later.
+Run [10 Setup App Registrations.ps1](../lab/10%20Setup%20App%20Registrations.ps1). It creates the required applications in each tenant defined in [Azure.yml](../source/Global/Azure.yml) and grants them permissions to manage and export the tenant.
 
-> :warning: The script connects to the Graph API and Exchange, hence you get two authentication prompts per tenant you want to configure. At the time of writing the guide, one authentication request is in the Edge browser, the other one in a separate window that might be in the background. If the script hangs and you are waiting for the second authentication prompt, please check for another window in the background.
+> :warning: The script connects to Microsoft Graph and Exchange Online, so you will see two authentication prompts for each tenant. One prompt opens in Microsoft Edge; the other opens in a separate window, which may be in the background. If the script appears to hang while waiting for the second prompt, check for another window.
 
-> :warning: The Git authentication with Azure DevOps at the end of the script requires Java Script to be enabled in the browser. Please add the sites as requested.
+> :warning: Git authentication with Azure DevOps at the end of the script requires JavaScript to be enabled in your browser. Add the sites when prompted.
 
-- The app `M365DscSetupApplication` is used to do the initial setup of the environment. In theory it is also possible to do this with a Entra ID user but usually authentication requirements interfere or stop the automation process.
-- The app `M365DscLcmApplication` will be used by the Azure DevOps build agent(s) to put your tenant into the desired state. For each app, a service principal is created in Exchange Online as well.
-- The `M365DscExportApplication` application will be only used by the export pipeline. Exporting will be explained in #TODO.
+- The `M365DscSetupApplication` app performs the initial environment setup. Although an Entra ID user could be used instead, authentication requirements may prevent the process from being automated.
+- The `M365DscLcmApplication` app is used by the Azure DevOps build agent(s) to put your tenant into the desired state. A service principal is also created in Exchange Online for each app.
+- The `M365DscExportApplication` app is used by the export pipeline. For details, see the [export guide](../export/readme.md).
 
-> :information_source: To clean up the tenant if you don't want to continue the project, use the script [98 Cleanup App Registrations.ps1](../lab//98%20Cleanup%20App%20Registrations.ps1).
+> :information_source: To remove the app registrations if you no longer want to use the project, run [98 Cleanup App Registrations.ps1](../lab/98%20Cleanup%20App%20Registrations.ps1).
 
 Before doing any Exchange Online prep work, the script reads the `HasExchangeOnline` setting of the environment from the [Azure.yml](../source/Global/Azure.yml) file. Set it to `false` for a tenant without an Exchange Online license: such a tenant cannot create the Exchange service principals and cannot be added to the Exchange role groups, so these steps are skipped. The same setting removes the Exchange layers from the Datum hierarchy, so no `cEXO*` configuration is compiled and no Exchange component is exported for that tenant. If the setting claims Exchange Online but the tenant is not licensed for it, the script stops with an explicit error.
 
-The setting `HasSharePointOnline` works the same way for SharePoint Online. Set it to `false` for a tenant without a SharePoint Online license: SharePoint is then not provisioned at all, `https://<TenantName>-admin.sharepoint.com` does not even exist, and every `cSPO*` resource fails during the enact with `The current connection holds no SharePoint context`. With the setting at `false` the SharePoint layers are removed from the Datum hierarchy, so no `cSPO*` configuration is compiled and no SharePoint component is exported for that tenant.
+The `HasSharePointOnline` setting works similarly. Set it to `false` for a tenant that should not use SharePoint Online. This removes the SharePoint layers from the Datum hierarchy, so no `cSPO*` configuration is compiled or exported. If SharePoint Online is enabled but not provisioned, its admin URL (`https://<TenantName>-admin.sharepoint.com`) may not exist, and `cSPO*` resources can fail during enactment with `The current connection holds no SharePoint context`.
 
-The App ID and the plain-text secrets are shown on the console in case you want to copy them. They are also written to the [Azure.yml](../source/Global/Azure.yml) file but  encrypted. The file is then committed and pushed to the code repository.
+The app IDs are shown in the console. The secrets are also displayed there in plain text and are written encrypted to [Azure.yml](../source/Global/Azure.yml). The script commits and pushes the updated file to the repository.
 
-> :warning: The password for encrypting the app secrets is taken from the [Datum.yml](../source//Datum.yml) file. This is not a secure solution and only meant to be used in a proof of concept. For any production related tenant, the pass phrase should be replaced by a certificate.
-
-After the script has created the applications and added the information to the [Azure.yml](../source/Global/Azure.yml) file, it will commit and push the changes to the Git repository.
+> :warning: The password used to encrypt the app secrets is taken from [Datum.yml](../source/Datum.yml). This is not a secure solution; it is intended only for proof-of-concept use. For production tenants, replace the passphrase with a certificate.
 
 ---
 
-### 1.4.3. 1.5.3 `11 Test Connection.ps1`
+### 1.4.3. `11 Test Connection.ps1`
 
-In the last task we have created some applications and stored the credentials for authentication to the [Azure.yml](../source/Global/Azure.yml) file. Now it is time to test if the authentication with the new applications work.
+The previous step created applications and stored their authentication credentials in [Azure.yml](../source/Global/Azure.yml). Now test whether authentication with the new applications works.
 
-Please call the script [11 Test Connection.ps1](../lab/11%20Test%20Connection.ps1). The last line of the output should be `Connection test completed`.
+Run [11 Test Connection.ps1](../lab/11%20Test%20Connection.ps1). The last line of its output should be `Connection test completed`.
 
 ---
 
-### 1.4.4. `20 Setup AzDo Project.ps1`
+### 1.4.4. `20 Configure AzDo Project.ps1`
 
-This script prepares the Azure DevOps project and stores the information in the [ProjectSettings.yml](../source//Global/ProjectSettings.yml) file. The script will sak for data if there are placeholders in the config file.
+This script configures the Azure DevOps project and stores its settings in [ProjectSettings.yml](../source/Global/ProjectSettings.yml). It prompts for any required values that are still placeholders in the file.
 
 ```yml
 OrganizationName: <OrganizationName>
 PersonalAccessToken: <PersonalAccessToken>
-ProjectName: Microsoft365DscWorkshop
-AgentPoolName: DSC
+ProjectName: <ProjectName>
+AgentPoolName: <AgentPoolName>
 ```
 
-If you are ok with the name of the new agent pool, you don't have to change anything here. The script [20 Setup AzDo Project.ps1](../lab/20%20Setup%20AzDo%20Project.ps1) will ask for the required information and update the file [ProjectSettings.yml](../source//Global/ProjectSettings.yml) for you.
+Run [20 Configure AzDo Project.ps1](../lab/20%20Configure%20AzDo%20Project.ps1). It prompts for each value that is still a placeholder in [ProjectSettings.yml](../source/Global/ProjectSettings.yml). Press Enter to accept the suggested project and agent-pool names.
 
-1. Please create an Personal Access Token (PAT) for your Azure DevOps organization with the required access level to manage the project. Copy the PAT to the clipboard.
+1. Create a personal access token (PAT) for your Azure DevOps organization with the permissions required to manage the project. Copy the PAT to the clipboard.
 
-2. Then call the script [20 Setup AzDo Project.ps1](../lab/20%20Setup%20AzDo%20Project.ps1) and provide the required information the script asks for.
+2. Run [20 Configure AzDo Project.ps1](../lab/20%20Configure%20AzDo%20Project.ps1) and provide the requested information.
 
 ```powershell
-& '.\20 Setup AzDo Project.ps1'
+& '.\20 Configure AzDo Project.ps1'
 ```
 
-The script will:
+The script:
 
-- Ask for Azure DevOps organization name.
-- Ask for the Azure DevOps project name.
-- Ask for the Azure DevOps personal access token.
-- Update the file [ProjectSettings.yml](../source/Global/ProjectSettings.yml) according to the data you provided.
-- Creates an agent pool named `DSC`.
-- Disables non-required features in the project.
-- Creates build environments as defined in [Azure.yml](../source/Global/Azure.yml) file.
-- Creates the pipelines for full build, apply and test.
+- Prompts for the Azure DevOps organization name, project name, and PAT.
+- Updates [ProjectSettings.yml](../source/Global/ProjectSettings.yml) with the information you provide.
+- Creates the configured agent pool (named `DSC` by default).
+- Disables non-required project features.
+- Creates Azure DevOps environments based on [Azure.yml](../source/Global/Azure.yml).
+- Creates the `M365DSC build`, `M365DSC export`, `M365DSC push`, `M365DSC reapply`, and `M365DSC test` pipelines.
 
-Please inspect the project. You should see the new environment(s) as well as the new agent pool and the pipelines now.
+Inspect the Azure DevOps project. You should now see the environments, agent pool, and pipelines.
 
 ---
 
 ### 1.4.5. `30 Create Agent VMs.ps1`
 
-The script [30 Create Agent VMs.ps1](../lab//20%20Create%20Agent%20VMs.ps1) creates one VM in each tenant. It then assigns a Managed Identity to each VM and gives that managed identity the required permissions to control the Azure tenant with Microsoft365DSC.
+The script [30 Create Agent VMs.ps1](../lab/30%20Create%20Agent%20VMs.ps1) creates one VM for each configured environment. It assigns a managed identity to each VM and grants that identity the permissions Microsoft365DSC needs to manage the tenant.
 
-Later we connect that VM to Azure DevOps as a build agent. It will be used later to build the DSC configuration and push it to the respective Azure tenant.
+The next step connects each VM to Azure DevOps as a build agent. The agents build the DSC configuration and apply it to their respective tenants.
 
-For creating the VMs, we use [AutomatedLab](https://automatedlab.org/en/latest/). All the complexity of that task is handled by that AutomatedLab. The script should run 20 to 30 minutes.
+The VMs are created using [AutomatedLab](https://automatedlab.org/en/latest/), which handles the setup details. The script typically takes 20 to 30 minutes to run. The relevant settings in `ProjectSettings.yml` are:
 
 ```yml
 BuildAgents:
   UserName: worker
-  Password: Somepass1
+  Password: <Password>
 ```
 
-Please run the script [30 Create Agent VMs.ps1](../lab/20%20Create%20Agent%20VMs.ps1). You will be prompted to chose a password for the build worker VMs. Time to grab a coffee...
+Run [30 Create Agent VMs.ps1](../lab/30%20Create%20Agent%20VMs.ps1). You will be prompted to choose a password for the build-agent VMs. You can use the default password shown in the prompt or enter a different one.
 
 > :warning: Please make sure the password meets the Windows standard complexity.
 
@@ -230,49 +225,50 @@ Please run the script [30 Create Agent VMs.ps1](../lab/20%20Create%20Agent%20VMs
 
 ### 1.4.6. `31 Agent Setup.ps1`
 
-The script [31 Agent Setup.ps1](../lab//31%20Agent%20Setup.ps1) connects to each build worker VM created in the previous step. It installs
+The script [31 Agent Setup.ps1](../lab/31%20Agent%20Setup.ps1) connects to each build-agent VM created in the previous step and installs:
 
 - PowerShell 7
 - Git
-- VSCode. After that it installs
+- Visual Studio Code
 - Azure DevOps Build Agent
-- Latest PowerShellGet and NuGet package provider
-- Then the Azure Build Agent is connected to the specified Azure DevOps Organization and is added to the `DSC` agent pool.
-- A self-signed client authentication certificate is created on the build agent. The certificate's thumbprint is written to the [Azure.yml](../source/Global/Azure.yml) file.
+- The latest PowerShellGet module and NuGet package provider
 
-Please check the DSC Azure DevOps Agent Pool to see if the new worker appears there. Please also check its capabilities. There should be a capability named `BuildEnvironment` with the value of the respective environment.
+The script then connects each agent to the specified Azure DevOps organization and adds it to the configured agent pool. It also creates a self-signed client-authentication certificate on the agent and writes the certificate thumbprint to [Azure.yml](../source/Global/Azure.yml).
+
+Check the configured Azure DevOps agent pool to confirm that the new agents appear. Each agent should have a `BuildEnvironment` capability set to its corresponding environment.
 
 ---
 
 ## 1.5. Running the Pipeline
 
-The script [20 Configure AzDo Project.ps1](../lab//30%20Setup%20AzDo%20Project.ps1) has created these pipelines:
+The [20 Configure AzDo Project.ps1](../lab/20%20Configure%20AzDo%20Project.ps1) script created these pipelines:
 
-- M365DSC push
-- M365DSC test
-- M365DSC apply
-- M365DSC build
+- `M365DSC build`
+- `M365DSC export`
+- `M365DSC push`
+- `M365DSC reapply`
+- `M365DSC test`
 
-Only the pipeline `M365DSC push` has triggers for continuous integration and is executed every time something is committed to the main branch. The pipeline creates the artifacts required for DSC, applies them to the configured tenants and tests whether the configuration has been applied successfully.
+The `M365DSC push` pipeline runs for changes to the `main` branch, except changes limited to `CHANGELOG.md`, and for tags that start with `v` and do not contain a hyphen. It builds the DSC artifacts, applies the configuration to the configured tenants, and validates the result.
 
-The pipeline `M365DSC push` should have been triggered by now but cannot continue as some permissions are missing.
+The `M365DSC push` pipeline may have started automatically. If no run appears, start it manually from the Pipelines page in Azure DevOps, then open the run.
 
-- Go to the pipelines panel in your Azure DevOps project.
-- You should now see the details of the pipeline run that was automatically triggered. You should see the message 'This pipeline needs permission to access a resource before this run can continue to Build of environment Dev'.
+- Open the Pipelines page in your Azure DevOps project.
+- If the run is waiting for permission to access a resource, Azure DevOps displays a message such as: `This pipeline needs permission to access a resource before this run can continue to Build of environment Dev`.
 
-Click the `View` button next to the message `This pipeline needs permission to access a resource before this run can continue to Build of environment Dev` and then the button `Permit` in the `Waiting for review` dialog.
+Select **View** next to the permission message, then select **Permit** in the **Waiting for review** dialog.
 
-After some more seconds, your build worker will take the job and start the work.
+After a few seconds, a build agent should pick up the job.
 
-> If you want to see in more detail what the build agent is doing, click on the stage `Build of environment Dev`. In [1.3.2. Test the Build and Download Dependencies](###1.3.2.TesttheBuildandDownloadDependencies) you started the build script on your machine. It created some artifacts like the RSOP and MOF files. Now the same process in running on the build server, hence the output should look like familiar.
+> To see what the build agent is doing, open the `Build of environment Dev` stage. In [Test the Build and Download Dependencies](#132-test-the-build-and-download-dependencies), you ran the build script locally and created artifacts such as RSOP and MOF files. The agent performs the same process, so the output should look familiar.
 
-After the first stage (`Build of environment Dev`) is finished, please go to the next stage named `Deployment in Dev`. As this is the first time the pipeline runs, the pipeline needs to be granted permission to deploy to the Dev environment.
+After the `Build of environment Dev` stage finishes, open the `Deployment in Dev` stage. The first time the pipeline deploys to the Dev environment, Azure DevOps may ask you to grant it permission.
 
-Please click on the `View` button next to the message `This pipeline needs permission to access a resource before this run can continue to Start DSC Configuration of environment Dev` and then on `Permit` like you did in the stage before.
+If a permission message appears, select **View** next to it and then select **Permit**, as you did in the previous step.
 
-The stage `Deployment in Dev` does the actual job: It compares the current state of your Azure tenant with the desired state defined in the yaml files.For each setting that is not in the desired state, Microsoft365DSC will try to move it into the desired state.
+The `Deployment in Dev` stage applies the desired state defined in the YAML files to the tenant. Microsoft365DSC changes settings that do not match the desired state.
 
-The last stage is `Validating DSC Configuration`. We expect the current state of the Azure tenant(s) to be as defined in the Yaml database as the `Deployment in Dev` just finished its job. To make sure that this is really the case, this pipeline stage compares the current to the desired state once again and reports any differences between them. If this stage does not fail, we know that everything is we expect it to be.
+The final stage is `Validating DSC Configuration of environment Dev`. It compares the tenant's current state with the desired state again and reports any differences. If this stage succeeds, the configuration matches the desired state.
 
 ## All done
 

@@ -33,6 +33,8 @@ To use this project, you need to change some files, so first create a writable c
 3. Select **Import** to add the repository.
 4. Enter `https://github.com/dsccommunity/Microsoft365DscWorkshop.git` as the clone URL and select **Import**. It may take a few seconds to copy the content.
 
+![alt text](image.png)
+
 This guide assumes that you have created an Azure DevOps project and imported this repository. Alternatively, you can fork it on GitHub, but some scripts will not work and you will need to perform the related tasks manually.
 
 > :warning: You can run the project on any code management / automation platform of your choice, but for the standard setup to work, it is expected
@@ -47,6 +49,8 @@ Clone the project using the Source Control view in Visual Studio Code or the `gi
 ```powershell
 git clone "https://dev.azure.com/ORGANIZATION/PROJECT/_git/REPOSITORY" "C:\path\to\local\repository"
 ```
+
+![alt text](image-1.png)
 
 ## 1.3. Run the Lab Setup Scripts
 
@@ -201,6 +205,7 @@ Run [11 Test Connection.ps1](../lab/11%20Test%20Connection.ps1):
 
 The last line of its output should be `Connection test completed`.
 
+![alt text](image-2.png)
 ---
 
 ### 1.4.4. `20 Configure AzDo Project.ps1`
@@ -235,7 +240,11 @@ The script:
 
 Inspect the Azure DevOps project. You should now see the environments, agent pool, and pipelines.
 
+![alt text](image-3.png)
+
+![alt text](image-4.png)
 ---
+
 
 ### 1.4.5. `30 Create Agent VMs.ps1`
 
@@ -257,9 +266,45 @@ Run [30 Create Agent VMs.ps1](../lab/30%20Create%20Agent%20VMs.ps1):
 & '.\lab\30 Create Agent VMs.ps1'
 ```
 
+By default, the script tells AutomatedLab to use its stable Azure resource
+provider API versions. To have AutomatedLab select the latest API versions
+reported by the Azure provider in the target region instead, pass
+`-UseLatestAzureProviderApi`:
+
+```powershell
+& '.\lab\30 Create Agent VMs.ps1' -UseLatestAzureProviderApi
+```
+
+The latest API version is not necessarily available in every region. In
+AutomatedLab 5.61.0, the stable API version used for managed disks is
+`2022-01-01`, while the latest-provider mode can select `2026-10-02`. Both
+versions have been rejected for managed disks in South Africa North. The
+troubleshooting section below describes the error; in this case, simply
+switching this parameter on or off does not resolve it.
+
 You will be prompted to choose a password for the build-agent VMs. You can use the default password shown in the prompt or enter a different one.
 
 > :warning: Please make sure the password meets the Windows standard complexity.
+
+#### Troubleshooting: unsupported managed disk API version (older script versions)
+
+Older versions of `30 Create Agent VMs.ps1` created an additional 250-GB managed
+data disk for each agent. In some Azure regions, deployment of that disk failed
+because the API version selected by AutomatedLab was not available there. In
+South Africa North, both API-version selection modes in AutomatedLab 5.61.0
+have produced this error (with the applicable API version varying by mode):
+
+```text
+No registered resource provider found for location 'southafricanorth' and API version '2026-10-02' for type 'disks'. The supported api-versions are '2016-04-30-preview, 2017-03-30, 2018-04-01, 2018-06-01, 2018-09-30, 2019-03-01, 2019-07-01, 2019-11-01, 2020-05-01, 2020-06-30, 2020-09-30, 2020-12-01, 2021-04-01, 2021-08-01, 2021-12-01, 2022-03-02, 2022-07-02, 2023-01-02, 2023-04-02, 2023-10-02, 2024-03-02, 2025-01-02, 2026-03-02'.
+Disk LcmDSCDevData1 is not found. (Code:NotFound)
+```
+
+The current script no longer creates this additional data disk, so update to
+the current version of the script and rerun VM creation. The VM will use its
+operating-system disk only; it will not have the separate 250-GB data disk.
+Switching `-UseLatestAzureProviderApi` on or off is not a workaround for this
+error in AutomatedLab 5.61.0: the stable version `2022-01-01` and the latest
+version `2026-10-02` have both been rejected.
 
 ---
 

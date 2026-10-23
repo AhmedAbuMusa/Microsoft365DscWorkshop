@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param (
     [Parameter()]
-    [string[]]$EnvironmentName
+    [string[]]$EnvironmentName,
+
+    [Parameter()]
+    [switch]$UseLatestAzureProviderApi
 )
 
 $requiredModulesPath = (Resolve-Path -Path $PSScriptRoot\..\output\RequiredModules).Path
@@ -117,10 +120,9 @@ foreach ($envName in $environments)
         'Add-LabMachineDefinition:OperatingSystem' = 'Windows Server 2022 Datacenter (Desktop Experience)'
     }
 
-    Add-LabDiskDefinition -Name "Lcm$($datum.Global.ProjectSettings.ProjectName)$($envName)Data1" -DiskSizeInGb 250 -Label Data
+    Add-LabMachineDefinition -Name "Lcm$($datum.Global.ProjectSettings.ProjectName)$($envName)" -AzureRoleSize $datum.Global.ProjectSettings.BuildAgents.AzureRoleSize
 
-    Add-LabMachineDefinition -Name "Lcm$($datum.Global.ProjectSettings.ProjectName)$($envName)" -AzureRoleSize $datum.Global.ProjectSettings.BuildAgents.AzureRoleSize -DiskName "Lcm$($datum.Global.ProjectSettings.ProjectName)$($envName)Data1"
-
+    Set-PSFConfig -Module AutomatedLab -Name UseLatestAzureProviderApi -Value $UseLatestAzureProviderApi.IsPresent
     Install-Lab
 
     Write-Host "Finished creating lab for environment '$envName'."

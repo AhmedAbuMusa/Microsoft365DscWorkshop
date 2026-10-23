@@ -107,6 +107,8 @@ After the build finishes, verify that it created artifacts, such as MOF files in
 
 This solution can configure multiple Azure tenants. Configure the tenants you want to manage in [Azure.yml](../source/Global/Azure.yml), which includes example Dev, Test, and Prod environments.
 
+One Azure DevOps project can be used for multiple tenants. For this setup, each tenant needs its own Azure subscription to host that tenant's agent VM; the VM must be created in a subscription associated with the tenant it will manage.
+
 - For each environment/tenant, update `AzTenantId`, `AzTenantName`, and `AzSubscriptionId`. The setup scripts you run next will populate the application IDs, secrets, and certificate thumbprints.
 
 - Remove any environments you do not need from [Azure.yml](../source/Global/Azure.yml). For this guide, keep only the Dev environment.
@@ -229,7 +231,7 @@ The script:
 - Creates the configured agent pool (named `DSC` by default).
 - Disables non-required project features.
 - Creates Azure DevOps environments based on [Azure.yml](../source/Global/Azure.yml).
-- Creates the `M365DSC build`, `M365DSC export`, `M365DSC push`, `M365DSC reapply`, and `M365DSC test` pipelines.
+- Creates the `M365DSC build`, `M365DSC deltaReport`, `M365DSC export`, `M365DSC push`, `M365DSC reapply`, and `M365DSC test` pipelines.
 
 Inspect the Azure DevOps project. You should now see the environments, agent pool, and pipelines.
 
@@ -237,7 +239,7 @@ Inspect the Azure DevOps project. You should now see the environments, agent poo
 
 ### 1.4.5. `30 Create Agent VMs.ps1`
 
-The script [30 Create Agent VMs.ps1](../lab/30%20Create%20Agent%20VMs.ps1) creates one VM for each configured environment. It assigns a managed identity to each VM and grants that identity the permissions Microsoft365DSC needs to manage the tenant.
+The script [30 Create Agent VMs.ps1](../lab/30%20Create%20Agent%20VMs.ps1) creates one VM for each configured environment in that tenant's Azure subscription. It assigns a managed identity to each VM and grants that identity the permissions Microsoft365DSC needs to manage the tenant.
 
 The next step connects each VM to Azure DevOps as a build agent. The agents build the DSC configuration and apply it to their respective tenants.
 
@@ -285,13 +287,16 @@ Check the configured Azure DevOps agent pool to confirm that the new agents appe
 
 ## 1.5. Running the Pipeline
 
-The [20 Configure AzDo Project.ps1](../lab/20%20Configure%20AzDo%20Project.ps1) script created these pipelines:
+The [20 Configure AzDo Project.ps1](../lab/20%20Configure%20AzDo%20Project.ps1) script creates these six runnable pipelines:
 
 - `M365DSC build`
+- `M365DSC deltaReport`
 - `M365DSC export`
 - `M365DSC push`
 - `M365DSC reapply`
 - `M365DSC test`
+
+The [pipelines folder](../pipelines/) also contains YAML templates used by these pipelines. Template files such as `buildTemplate.yml` and `testDscTemplate.yml` are building blocks, not additional pipelines to run directly.
 
 The `M365DSC push` pipeline runs for changes to the `main` branch, except changes limited to `CHANGELOG.md`, and for tags that start with `v` and do not contain a hyphen. It builds the DSC artifacts, applies the configuration to the configured tenants, and validates the result.
 

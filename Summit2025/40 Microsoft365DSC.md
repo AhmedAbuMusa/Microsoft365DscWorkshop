@@ -34,7 +34,7 @@ In this task we want to create a DSC configuration that control a group in Entra
 
 First we need to install Microsoft365DSC. Please do so by calling in Windows PowerShell 5.1 and not PowerShell 7.
 
-> :warning: The Local Configuration Manager runs a Windows PowerShell 5.1 runspace in the security context of the local machine. This is why the modules have to be installed in the `AllUsers` context **and** in `C:\Program Files\WindowsPowerShell\Modules` and not `C:\Program Files\PowerShell\Modules`.
+> **Warning:** The Local Configuration Manager runs a Windows PowerShell 5.1 runspace in the security context of the local machine. This is why the modules have to be installed in the `AllUsers` context **and** in `C:\Program Files\WindowsPowerShell\Modules` and not `C:\Program Files\PowerShell\Modules`.
 
 Start a Windows PowerShell 5.1 and run the following lines:
 
@@ -48,7 +48,7 @@ Update-M365DSCDependencies #this installs another ~30 modules to 'C:\Program Fil
 
 The next tasks will be done in VSCode and not the PowerShell terminal.
 
-> :warning: Please open VSCode as admin as we are interacting with the `Program Files` folder.
+> **Warning:** Please open VSCode as admin as we are interacting with the `Program Files` folder.
 
 To understand how the `AADGroup` resource should be use, let's have a look at its syntax:
 

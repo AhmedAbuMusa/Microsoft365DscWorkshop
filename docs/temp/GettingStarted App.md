@@ -28,7 +28,7 @@ We consider this single tenant we configure as the Dev environment. Other tenant
 
 ### 1.1.1. Cloning the Project
 
-> :warning: Do not download the project as a Zip file. The build process will not work if you don't clone the project.
+> **Warning:** Do not download the project as a Zip file. The build process will not work if you don't clone the project.
 
 With the following command you clone the Git repository to your local machine.
 
@@ -50,7 +50,7 @@ We need some files from the repository to setup the resources in Azure.
 
 :ballot_box_with_check: Create a key vault in the tenant with the name `M365Demo1` in the resource group named also `M365Demo1`.
 
-> :warning: You can name the vault as you wish if the name is already in use. In this guide we except the vault is names `M365Demo1`.
+> **Warning:** You can name the vault as you wish if the name is already in use. In this guide we except the vault is names `M365Demo1`.
 
 :ballot_box_with_check: Then go to 'access policies' and create a new access policy granting the app `DscKeyVaultReaderDev` the 'Secret permissions' -> 'Secret Management Operations' 'Get' and 'List'.
 
@@ -85,7 +85,7 @@ TODO: Check if required.
 
 :ballot_box_with_check: Then go to 'Roles and administrators' in Azure Active Directory and add the `DscWorkerDev` to the 'Global Administrator' group.
 
-> :warning: Don't forget to 'Grant admin consent' after assigning the permissions.
+> **Warning:** Don't forget to 'Grant admin consent' after assigning the permissions.
 >
 > :pencil2: Please make a note of the App ID as well.
 
@@ -159,7 +159,7 @@ Import-PfxCertificate -FilePath C:\DscWorkerDev.pfx -Password $password -CertSto
 
 :ballot_box_with_check: For running the DSC configuration, you need to install the required modules to the virtual machine that runs the LCM. The following scripts does the job.
 
-> :warning: Please change the version of the `Microsoft365DSC` module according to what is defined in [RequiredModules.psd1](/RequiredModules.psd1).
+> **Warning:** Please change the version of the `Microsoft365DSC` module according to what is defined in [RequiredModules.psd1](/RequiredModules.psd1).
 
 ```powershell
 Install-Module -Name Microsoft365DSC -RequiredVersion 1.23.315.1 -Force
@@ -178,7 +178,7 @@ In this easy lab scenario, we use DSC in push mode to keep things simple. Hence,
 
 :ballot_box_with_check: Copy the MOF file that you have previously build by calling the [build.ps1](/build.ps1) script to the virtual machine (`C:\DSC`). You find the MOF files in folder [MOF](/output/MOF/).
 
-> :warning: Make sure the MOF file has the same name as the machine or is named `localhost.mof`.
+> **Warning:** Make sure the MOF file has the same name as the machine or is named `localhost.mof`.
 
 :ballot_box_with_check: Then please push the configuration by calling this command:
 

@@ -46,7 +46,7 @@ If you are interested of testing out the [Microsoft365DscWorkshop](https://githu
 
 Let's say, someone in our company has already done the setup mentioned in the previous paragraph. Now we want to do a change to the tenant which is under source control.
 
-First, we need to logon to go with a browser to the lab repository [M365RA1](https://dev.azure.com/randre/M365RA1/_git/M365RA1). You will be asked to authenticate yourself. Please use the username (like <SummitTestUser2@MngEnvMCAP167509.onmicrosoft.com>) and the previously decrypted user password. :warning: Without this step, your user account is not initialized in Azure DevOps and you will not be able to do the next step.
+First, we need to logon to go with a browser to the lab repository [M365RA1](https://dev.azure.com/randre/M365RA1/_git/M365RA1). You will be asked to authenticate yourself. Please use the username (like <SummitTestUser2@MngEnvMCAP167509.onmicrosoft.com>) and the previously decrypted user password. **Warning:** Without this step, your user account is not initialized in Azure DevOps and you will not be able to do the next step.
 
 Then we have to clone the project so we can make changes its content. Please open VSCode and clone the project from the this link: <https://dev.azure.com/randre/M365RA1/_git/M365RA1>. When you are asked for credentials, use the same ones as you did in the previous step.
 
@@ -111,7 +111,7 @@ git checkout -b <Choose a name>
 
 Open the file [/source/1-AllTenantsConfig/AzureAd/cAADGroup.yml](/source/1-AllTenantsConfig/AzureAd/cAADGroup.yml). It contains a list of groups. PLease add another one by just copy and paste an already existing group definition. Please change the `MailNickname`, `DisplayName` and the `Description` to something that is hopefully unique.
 
-> :warning: The indentation in yaml is very important. Usually VSCode will highlight syntax errors.
+> **Warning:** The indentation in yaml is very important. Usually VSCode will highlight syntax errors.
 
 Save the file and commit it to the local git repository:
 

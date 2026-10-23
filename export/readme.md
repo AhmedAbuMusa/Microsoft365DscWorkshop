@@ -12,7 +12,7 @@
 
 For exporting your tenant configuration with [Microsoft365DSC](https://microsoft365dsc.com/) there is not much required. The following lines will guide you through.
 
-> :warning: You must be a local administrator one the machine you run the setup scripts on.
+> **Warning:** You must be a local administrator one the machine you run the setup scripts on.
 
 ## 1.1. Preparations on your Local Machine
 
@@ -26,7 +26,7 @@ This guide expects you have created a new project on Azure DevOps and imported t
 
 ### 1.1.2. Cloning the Project
 
-> :warning: Do not download the project as a Zip file. The build process will not work if you don't clone the project.
+> **Warning:** Do not download the project as a Zip file. The build process will not work if you don't clone the project.
 
 Clone the project in Visual Studio Code Source Control Activity Bar or use the command `git.exe`. With the following command you clone the Git repository to your local machine. **Please change the link according to your fork / project on your code management solution.**
 

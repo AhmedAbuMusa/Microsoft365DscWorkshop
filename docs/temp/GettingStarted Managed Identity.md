@@ -26,7 +26,7 @@ We consider this single tenant we configure as the Dev environment. Other tenant
 
 ### 1.1.1. Cloning the Project
 
-> :warning: Do not download the project as a Zip file. The build process will not work if you don't clone the project.
+> **Warning:** Do not download the project as a Zip file. The build process will not work if you don't clone the project.
 
 With the following command you clone the Git repository to your local machine.
 
@@ -111,7 +111,7 @@ Import-PfxCertificate -FilePath C:\DscWorkerDev.pfx -Password $password -CertSto
 
 :ballot_box_with_check: For running the DSC configuration, you need to install the required modules to the virtual machine that runs the LCM. The following scripts does the job.
 
-> :warning: Please change the version of the `Microsoft365DSC` module according to what is defined in [RequiredModules.psd1](/RequiredModules.psd1).
+> **Warning:** Please change the version of the `Microsoft365DSC` module according to what is defined in [RequiredModules.psd1](/RequiredModules.psd1).
 
 ```powershell
 Install-Module -Name Microsoft365DSC -RequiredVersion 1.23.315.1 -Force
@@ -130,7 +130,7 @@ In this easy lab scenario, we use DSC in push mode to keep things simple. Hence,
 
 :ballot_box_with_check: Copy the MOF file that you have previously build by calling the [build.ps1](/build.ps1) script to the virtual machine (`C:\DSC`). You find the MOF files in folder [MOF](/output/MOF/).
 
-> :warning: Make sure the MOF file has the same name as the machine or is named `localhost.mof`.
+> **Warning:** Make sure the MOF file has the same name as the machine or is named `localhost.mof`.
 
 :ballot_box_with_check: Then please push the configuration by calling this command:
 

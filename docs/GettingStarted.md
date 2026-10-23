@@ -2,7 +2,7 @@
 
 - [The quick guide to the Microsoft365DscWorkshop](#the-quick-guide-to-the-microsoft365dscworkshop)
   - [1. Getting started](#1-getting-started)
-    - [1.0.1. :warning: You must be a local administrator on the machine where you run the setup scripts](#101-warning-you-must-be-a-local-administrator-on-the-machine-where-you-run-the-setup-scripts)
+    - [1.0.1. Prerequisite: You must be a local administrator on the machine where you run the setup scripts](#101-prerequisite-you-must-be-a-local-administrator-on-the-machine-where-you-run-the-setup-scripts)
   - [1.1. Import the Project into Azure DevOps](#11-import-the-project-into-azure-devops)
   - [1.2. Cloning the Project](#12-cloning-the-project)
   - [1.3. Run the Lab Setup Scripts](#13-run-the-lab-setup-scripts)
@@ -22,7 +22,7 @@
 
 > :information_source: If you only want to export your tenant configuration with [Microsoft365DSC](https://microsoft365dsc.com/), see the [export guide](../export/readme.md).
 
-### 1.0.1. :warning: You must be a local administrator on the machine where you run the setup scripts
+### 1.0.1. Prerequisite: You must be a local administrator on the machine where you run the setup scripts
 
 ## 1.1. Import the Project into Azure DevOps
 
@@ -37,7 +37,7 @@ To use this project, you need to change some files, so first create a writable c
 
 This guide assumes that you have created an Azure DevOps project and imported this repository. Alternatively, you can fork it on GitHub, but some scripts will not work and you will need to perform the related tasks manually.
 
-> :warning: You can run the project on any code management / automation platform of your choice, but for the standard setup to work, it is expected
+> **Warning:** You can run the project on any code management / automation platform of your choice, but for the standard setup to work, it is expected
 > to host it on Azure DevOps.
 
 ## 1.2. Cloning the Project
@@ -121,7 +121,7 @@ One Azure DevOps project can be used for multiple tenants. For this setup, each 
   - [Test](../source/BuildAgents/Test/)
   - [Prod](../source/BuildAgents/Prod/)
 
-> :warning: Please don't forget to remove the environments you do not need.
+> **Warning:** Please don't forget to remove the environments you do not need.
 >
 > :information_source: When getting familiar with the project, it is recommended to start with one tenant. This reduces test run times and complexity.
 
@@ -149,7 +149,7 @@ Environments:
 
 ### 1.4.1. Initialize the session (Init task)
 
-> :warning: Start a new PowerShell session rather than reusing the old one. A module loaded during setup may prevent a newer version of an Azure PowerShell module from loading (a familiar issue known as [DLL Hell](https://en.wikipedia.org/wiki/DLL_hell)).
+> **Warning:** Start a new PowerShell session rather than reusing the old one. A module loaded during setup may prevent a newer version of an Azure PowerShell module from loading (a familiar issue known as [DLL Hell](https://en.wikipedia.org/wiki/DLL_hell)).
 >
 > And don't forget: Sometimes just retrying a failed task is the best and easiest solution.
 
@@ -169,9 +169,9 @@ Run [10 Setup App Registrations.ps1](../lab/10%20Setup%20App%20Registrations.ps1
 & '.\lab\10 Setup App Registrations.ps1'
 ```
 
-> :warning: The script connects to Microsoft Graph and Exchange Online, so you will see two authentication prompts for each tenant. One prompt opens in Microsoft Edge; the other opens in a separate window, which may be in the background. If the script appears to hang while waiting for the second prompt, check for another window.
+> **Warning:** The script connects to Microsoft Graph and Exchange Online, so you will see two authentication prompts for each tenant. One prompt opens in Microsoft Edge; the other opens in a separate window, which may be in the background. If the script appears to hang while waiting for the second prompt, check for another window.
 
-> :warning: Git authentication with Azure DevOps at the end of the script requires JavaScript to be enabled in your browser. Add the sites when prompted.
+> **Warning:** Git authentication with Azure DevOps at the end of the script requires JavaScript to be enabled in your browser. Add the sites when prompted.
 
 - The `M365DscSetupApplication` app performs the initial environment setup. Although an Entra ID user could be used instead, authentication requirements may prevent the process from being automated.
 - The `M365DscLcmApplication` app is used by the Azure DevOps build agent(s) to put your tenant into the desired state. A service principal is also created in Exchange Online for each app.
@@ -189,7 +189,7 @@ The `HasSharePointOnline` setting works similarly. Set it to `false` for a tenan
 
 The app IDs are shown in the console. The secrets are also displayed there in plain text and are written encrypted to [Azure.yml](../source/Global/Azure.yml). The script commits and pushes the updated file to the repository.
 
-> :warning: The password used to encrypt the app secrets is taken from [Datum.yml](../source/Datum.yml). This is not a secure solution; it is intended only for proof-of-concept use. For production tenants, replace the passphrase with a certificate.
+> **Warning:** The password used to encrypt the app secrets is taken from [Datum.yml](../source/Datum.yml). This is not a secure solution; it is intended only for proof-of-concept use. For production tenants, replace the passphrase with a certificate.
 
 ---
 
@@ -284,7 +284,7 @@ switching this parameter on or off does not resolve it.
 
 You will be prompted to choose a password for the build-agent VMs. You can use the default password shown in the prompt or enter a different one.
 
-> :warning: Please make sure the password meets the Windows standard complexity.
+> **Warning:** Please make sure the password meets the Windows standard complexity.
 
 #### Troubleshooting: unsupported managed disk API version (older script versions)
 

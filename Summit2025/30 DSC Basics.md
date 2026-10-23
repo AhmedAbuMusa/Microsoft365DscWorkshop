@@ -45,7 +45,7 @@ When applied, the LCM on the target node reads the MOF file and uses DSC resourc
 
 ## 3. One more thing before we can get started
 
-> :warning: Please open VSCode as admin as we are interacting with the `Program Files` folder and the DSC Local Configuration Manager.
+> **Warning:** Please open VSCode as admin as we are interacting with the `Program Files` folder and the DSC Local Configuration Manager.
 
 To use DSC in PowerShell 7, the module [PSDesiredStateConfiguration](https://www.powershellgallery.com/packages/PSDesiredStateConfiguration) is required. Please install it with the following command:
 
@@ -85,7 +85,7 @@ The Windows [Local Configuration Manager](https://learn.microsoft.com/en-us/powe
 
 Next we need to point the [Local Configuration Manager](https://learn.microsoft.com/en-us/powershell/dsc/managing-nodes/metaconfig?view=dsc-1.1) or LCM to the MOF-file. Please run the next command and append it to your script file.
 
-> :warning: If you get the error `ConnectionError: The client cannot connect to the destination specified in the request.`, it is pretty likely because the `Windows Remote Management (WS-Management)` windows service is stopped. Please start with with `Start-Service -Name WinRM`.
+> **Warning:** If you get the error `ConnectionError: The client cannot connect to the destination specified in the request.`, it is pretty likely because the `Windows Remote Management (WS-Management)` windows service is stopped. Please start with with `Start-Service -Name WinRM`.
 
 ```powershell
 Start-DscConfiguration -Path C:\DSC\ -Wait -Verbose -Force

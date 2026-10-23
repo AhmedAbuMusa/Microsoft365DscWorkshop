@@ -45,7 +45,7 @@ $data.EncSecret | Unprotect-Datum -Password $pass
 $data.UserPassword | Unprotect-Datum -Password $pass
 ```
 
-> :warning: Please note down both, the user password and the plain text secret for later use in notepad or VSCode.
+> **Warning:** Please note down both, the user password and the plain text secret for later use in notepad or VSCode.
 
 ---
 

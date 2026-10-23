@@ -42,7 +42,7 @@ This concept is used for the export to make the tasks easily accessible and run 
 
 The following steps guide you through the process of customizing and running the export based on the framework provided by [Sampler](https://github.com/gaelcolas/Sampler) and the [Microsoft365DscWorkshop](https://github.com/dsccommunity/Microsoft365DscWorkshop).
 
-> :warning: It is expected that you have created an application in the tenant you want to export. The steps to do that are described in [Export your Azure Tenant Configuration](./readme.md).
+> **Warning:** It is expected that you have created an application in the tenant you want to export. The steps to do that are described in [Export your Azure Tenant Configuration](./readme.md).
 
 ### 1.3.1. Configuring the configuration file
 

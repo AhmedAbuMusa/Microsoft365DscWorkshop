@@ -2,7 +2,7 @@
 
 - [The quick guide to the Microsoft365DscWorkshop](#the-quick-guide-to-the-microsoft365dscworkshop)
   - [1. Getting started](#1-getting-started)
-    - [1.0.1. Prerequisite: You must be a local administrator on the machine where you run the setup scripts](#101-prerequisite-you-must-be-a-local-administrator-on-the-machine-where-you-run-the-setup-scripts)
+    - [1.0.1. Prerequisite](#101-prerequisite)
   - [1.1. Import the Project into Azure DevOps](#11-import-the-project-into-azure-devops)
   - [1.2. Cloning the Project](#12-cloning-the-project)
   - [1.3. Run the Lab Setup Scripts](#13-run-the-lab-setup-scripts)
@@ -22,7 +22,10 @@
 
 > :information_source: If you only want to export your tenant configuration with [Microsoft365DSC](https://microsoft365dsc.com/), see the [export guide](../export/readme.md).
 
-### 1.0.1. Prerequisite: You must be a local administrator on the machine where you run the setup scripts
+### 1.0.1. Prerequisite
+
+> [!WARNING]
+> You must be a local administrator on the machine where you run the setup scripts.
 
 ## 1.1. Import the Project into Azure DevOps
 

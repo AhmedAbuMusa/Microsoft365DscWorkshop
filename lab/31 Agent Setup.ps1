@@ -5,6 +5,13 @@ param (
 )
 
 $requiredModulesPath = (Resolve-Path -Path $PSScriptRoot\..\output\RequiredModules).Path
+$requiredModules = Import-PowerShellDataFile -Path $PSScriptRoot\..\RequiredModules.psd1
+$m365DscVersion = $requiredModules.Microsoft365DSC
+if ($m365DscVersion -isnot [string] -or [string]::IsNullOrWhiteSpace($m365DscVersion) -or $m365DscVersion -eq 'latest')
+{
+    throw "Microsoft365DSC must have a pinned version in '$PSScriptRoot\..\RequiredModules.psd1'."
+}
+
 if ($env:PSModulePath -notlike "*$requiredModulesPath*")
 {
     $env:PSModulePath = $env:PSModulePath + ";$requiredModulesPath"
@@ -143,11 +150,12 @@ foreach ($lab in $labs)
 
     Invoke-LabCommand -Activity 'Setting environment variable for build environment' -ScriptBlock {
 
-        Install-Module -Name Microsoft365DSC -Force -AllowClobber -Scope AllUsers
+        Install-Module -Name Microsoft365DSC -RequiredVersion $m365DscVersion -Force -AllowClobber -Scope AllUsers
+        Import-Module -Name Microsoft365DSC -RequiredVersion $m365DscVersion -Force -ErrorAction Stop
         Set-M365DSCLoggingOption -IncludeNonDrifted $true
         [System.Environment]::SetEnvironmentVariable('BuildEnvironment', $args[0], 'Machine')
 
-    } -ComputerName $vms -ArgumentList $lab.Notes.Environment
+    } -ComputerName $vms -ArgumentList $lab.Notes.Environment -Variable (Get-Variable -Name m365DscVersion)
 
     # ---------------------------------------------------------------------------
     #   Upload M365DscLcmApplication certificate for authentication with Azure

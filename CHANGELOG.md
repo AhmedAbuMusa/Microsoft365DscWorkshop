@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The delta-report module initialization now removes the duplicate
+  Microsoft365DSC installation from Program Files and keeps the pinned version
+  only in `output/RequiredModules`. It verifies that exactly one expected
+  version is discoverable before generating reports, preventing ambiguous DSC
+  configuration parsing.
+- The delta-report task now counts grouped tenants correctly when only one
+  tenant is present and reports that no destination tenant was exported.
 - `InitializeModuleFolderForDeltaReport` in `.build/DscConfigurationTasks.ps1` no
   longer silently ignores module copy failures. A failed `Copy-Item` now
   throws immediately, naming the module (`$_.BaseName`), instead of letting
@@ -15,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add an opt-in synthetic destination tenant to the delta-report pipeline for
+  testing report generation with a single real tenant. The copied configuration
+  gets one intentional string-property change so the generated report displays
+  drift. Document the test option and normal delta-report pipeline usage in the
+  getting-started guide.
 - Initial Upload
 - Support tenants without an Exchange Online license. The new per-environment
   setting `HasExchangeOnline` in `source/Global/Azure.yml` is maintained by the

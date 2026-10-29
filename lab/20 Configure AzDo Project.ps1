@@ -4,6 +4,8 @@ if ($env:PSModulePath -notlike "*$requiredModulesPath*")
     $env:PSModulePath = $env:PSModulePath + ";$requiredModulesPath"
 }
 
+Import-Module -Name VSTeam -MinimumVersion 7.15.2 -ErrorAction Stop
+
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\source\Datum.yml
 
 # ----------------------------------------------------------

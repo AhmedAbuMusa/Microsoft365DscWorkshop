@@ -5,6 +5,10 @@ parameters:
     displayName: Source tenant of the delta report
     type: string
     default: templatetenant.onmicrosoft.com
+  - name: createSyntheticDestination
+    displayName: Create a synthetic destination tenant (test only)
+    type: boolean
+    default: false
 
 variables:
   buildFolderName: output
@@ -33,6 +37,117 @@ steps:
   - download: exportPipeline
     patterns: "**"
     displayName: Download Exported Tenant Configurations
+
+  - ${{ if eq(parameters.createSyntheticDestination, true) }}:
+    - task: PowerShell@2
+      displayName: Create synthetic destination for testing
+      inputs:
+        targetType: inline
+        pwsh: true
+        script: |
+          $inputDirectory = $env:DeltaReportInputDirectory
+          $sourceTenant = $env:DeltaReportSourceTenant
+          $syntheticTenant = 'delta-report-test.onmicrosoft.com'
+
+          if (-not (Test-Path -LiteralPath $inputDirectory -PathType Container)) {
+            throw "Export input directory '$inputDirectory' does not exist."
+          }
+
+          if ($syntheticTenant -eq $sourceTenant) {
+            throw "The synthetic tenant name '$syntheticTenant' must differ from the source tenant."
+          }
+
+          $sourceConfigurations = @(Get-ChildItem -LiteralPath $inputDirectory -Filter '*.ps1' -File -Recurse -ErrorAction Stop |
+            Where-Object { $_.Directory.Parent.Name -eq $sourceTenant })
+          if ($sourceConfigurations.Count -eq 0) {
+            throw "No exported configuration files were found for source tenant '$sourceTenant' in '$inputDirectory'."
+          }
+
+          $sourceFolders = @($sourceConfigurations |
+            ForEach-Object { $_.Directory.Parent.FullName } |
+            Sort-Object -Unique)
+          if ($sourceFolders.Count -ne 1) {
+            throw "Expected one export folder for source tenant '$sourceTenant', found $($sourceFolders.Count): $($sourceFolders -join ', ')."
+          }
+
+          $syntheticFolder = Join-Path -Path $inputDirectory -ChildPath $syntheticTenant
+          if (Test-Path -LiteralPath $syntheticFolder) {
+            throw "Synthetic tenant folder '$syntheticFolder' already exists. Refusing to overwrite it."
+          }
+
+          New-Item -Path $syntheticFolder -ItemType Directory -ErrorAction Stop | Out-Null
+          Get-ChildItem -LiteralPath $sourceFolders[0] -Force -ErrorAction Stop |
+            Copy-Item -Destination $syntheticFolder -Recurse -Force -ErrorAction Stop
+
+          $copiedConfigurations = @(Get-ChildItem -LiteralPath $syntheticFolder -Filter '*.ps1' -File -Recurse -ErrorAction Stop)
+          if ($copiedConfigurations.Count -eq 0) {
+            throw "No configuration files were copied to synthetic tenant folder '$syntheticFolder'."
+          }
+
+          $modifiedConfiguration = $null
+          $modifiedProperty = $null
+          $literalAssignmentPattern = '^(?<prefix>[ \t]*(?<property>[A-Za-z][A-Za-z0-9_]*)[ \t]*=[ \t]*)(?<literal>''(?:[^'']|'''')*''|"(?:[^"\r\n]|`.)*")(?<suffix>[ \t]*(?:#.*)?\r?)$'
+          $assignmentOptions = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Multiline
+          $preferredProperties = 'DisplayName', 'Description'
+
+          foreach ($propertyName in $preferredProperties) {
+            foreach ($configuration in $copiedConfigurations | Sort-Object -Property FullName) {
+              $content = Get-Content -LiteralPath $configuration.FullName -Raw -ErrorAction Stop
+              $propertyPattern = '(?i)^(?<prefix>[ \t]*' + [regex]::Escape($propertyName) + '[ \t]*=[ \t]*)(?<literal>''(?:[^'']|'''')*''|"(?:[^"\r\n]|`.)*")(?<suffix>[ \t]*(?:#.*)?\r?)$'
+              $assignment = [regex]::Match($content, $propertyPattern, $assignmentOptions)
+
+              if (-not $assignment.Success) {
+                continue
+              }
+
+              $literal = $assignment.Groups['literal'].Value
+              $replacement = $literal.Substring(0, $literal.Length - 1) + ' [synthetic delta test]' + $literal.Substring($literal.Length - 1)
+              $updatedContent = $content.Remove($assignment.Index + $assignment.Groups['prefix'].Length, $literal.Length).Insert($assignment.Index + $assignment.Groups['prefix'].Length, $replacement)
+              Set-Content -LiteralPath $configuration.FullName -Value $updatedContent -NoNewline -Encoding utf8 -ErrorAction Stop
+              $modifiedConfiguration = $configuration.FullName
+              $modifiedProperty = $propertyName
+              break
+            }
+
+            if ($modifiedConfiguration) {
+              break
+            }
+          }
+
+          if (-not $modifiedConfiguration) {
+            foreach ($configuration in $copiedConfigurations | Sort-Object -Property FullName) {
+              $content = Get-Content -LiteralPath $configuration.FullName -Raw -ErrorAction Stop
+              foreach ($assignment in [regex]::Matches($content, $literalAssignmentPattern, $assignmentOptions)) {
+                $propertyName = $assignment.Groups['property'].Value
+                if ($propertyName -match '(?i)Password|Secret|Token|Certificate|Thumbprint|Credential|PrivateKey|AccessKey') {
+                  continue
+                }
+
+                $literal = $assignment.Groups['literal'].Value
+                $replacement = $literal.Substring(0, $literal.Length - 1) + ' [synthetic delta test]' + $literal.Substring($literal.Length - 1)
+                $updatedContent = $content.Remove($assignment.Index + $assignment.Groups['prefix'].Length, $literal.Length).Insert($assignment.Index + $assignment.Groups['prefix'].Length, $replacement)
+                Set-Content -LiteralPath $configuration.FullName -Value $updatedContent -NoNewline -Encoding utf8 -ErrorAction Stop
+                $modifiedConfiguration = $configuration.FullName
+                $modifiedProperty = $propertyName
+                break
+              }
+
+              if ($modifiedConfiguration) {
+                break
+              }
+            }
+          }
+
+          if (-not $modifiedConfiguration) {
+            throw "Copied configurations for '$sourceTenant' contain no safe literal string property to change; cannot create synthetic drift."
+          }
+
+          Write-Host "Changed '$modifiedProperty' in '$modifiedConfiguration' by appending '[synthetic delta test]'."
+          Write-Host "Created synthetic destination '$syntheticTenant' with $($copiedConfigurations.Count) configuration file(s) and one intentional property difference."
+          Write-Host 'This is a test-only copy; no tenant, subscription, or VM agent was created.'
+      env:
+        DeltaReportInputDirectory: $(Pipeline.Workspace)/exportPipeline
+        DeltaReportSourceTenant: ${{ parameters.sourceTenant }}
 
   - task: PowerShell@2
     name: InitializeModuleFolder

@@ -329,6 +329,8 @@ Run the script:
 
 The script then connects each agent to the specified Azure DevOps organization and adds it to the configured agent pool. It also creates a self-signed client-authentication certificate on the agent and writes the certificate thumbprint to [Azure.yml](../source/Global/Azure.yml).
 
+The agent setup installs the Microsoft365DSC version pinned in [RequiredModules.psd1](../RequiredModules.psd1). Pipeline initialization also removes other installed Microsoft365DSC versions before copying the pinned dependencies, so exports use the same version as the repository.
+
 Check the configured Azure DevOps agent pool to confirm that the new agents appear. Each agent should have a `BuildEnvironment` capability set to its corresponding environment.
 
 ---
@@ -345,6 +347,34 @@ The [20 Configure AzDo Project.ps1](../lab/20%20Configure%20AzDo%20Project.ps1) 
 - `M365DSC test`
 
 The [pipelines folder](../pipelines/) also contains YAML templates used by these pipelines. Template files such as `buildTemplate.yml` and `testDscTemplate.yml` are building blocks, not additional pipelines to run directly.
+
+### `M365DSC deltaReport`
+
+The [delta-report pipeline](../pipelines/deltaReport.yml) downloads the exported
+tenant configurations from the `M365DSC export` pipeline, merges each tenant's
+resource configurations, compares the selected source tenant with every other
+exported tenant, and publishes the resulting HTML reports as the `DeltaReport`
+pipeline artifact.
+
+When manually queuing the pipeline, set **Source tenant of the delta report**
+to the exact tenant folder name in the export (for example,
+`M365CPI39455860.onmicrosoft.com`). The export must contain that source tenant
+and at least one destination tenant.
+
+To test the comparison workflow when only one real tenant is available, enable
+**Create a synthetic destination tenant (test only)** when queuing the run.
+This copies the selected source tenant's exported configuration files to a
+temporary `delta-report-test.onmicrosoft.com` folder on the pipeline agent. It
+then changes one quoted string property in the copied configuration, preferring
+`DisplayName`, then `Description`, and then another non-secret literal property.
+It appends `[synthetic delta test]` to that property's value. The source export
+remains unchanged, and the resulting HTML report should show this intentional
+configuration difference. The pipeline fails with a clear error if it cannot
+find a suitable string property to change.
+
+This option does not create a real tenant, Azure subscription, or VM agent, and
+the synthetic configuration is for report testing only; do not use it to apply
+configuration to a tenant. Leave the option disabled for normal runs.
 
 The `M365DSC push` pipeline runs for changes to the `main` branch, except changes limited to `CHANGELOG.md`, and for tags that start with `v` and do not contain a hyphen. It builds the DSC artifacts, applies the configuration to the configured tenants, and validates the result.
 

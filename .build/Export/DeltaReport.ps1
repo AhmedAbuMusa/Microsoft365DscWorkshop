@@ -35,9 +35,9 @@ task NewM365DscDeltaReport {
     Write-Host "Looking for exported tenant configurations in '$inputDirectory'" -ForegroundColor Yellow
 
     #The export creates '<Tenant>\<DscResource>\M365TenantConfig.ps1', hence the tenant is the grandparent of each configuration file.
-    $tenants = Get-ChildItem -Path $inputDirectory -Filter *.ps1 -File -Recurse |
+    $tenants = @(Get-ChildItem -Path $inputDirectory -Filter *.ps1 -File -Recurse |
         Where-Object { $null -ne $_.Directory.Parent } |
-            Group-Object -Property { $_.Directory.Parent.FullName }
+            Group-Object -Property { $_.Directory.Parent.FullName })
 
     if ($tenants.Count -eq 0)
     {
@@ -104,9 +104,9 @@ task NewM365DscDeltaReport {
     }
 
     $destinationTenants = $mergedConfigurations.Keys | Where-Object { $_ -ne $sourceTenant } | Sort-Object
-    if (-not $destinationTenants)
+    if ($destinationTenants.Count -eq 0)
     {
-        Write-Error "There is no tenant to compare the source tenant '$sourceTenant' with." -ErrorAction Stop
+        Write-Error "There is no destination tenant to compare with source tenant '$sourceTenant'. The input directory '$inputDirectory' contains only this tenant." -ErrorAction Stop
     }
 
     foreach ($destinationTenant in $destinationTenants)

@@ -386,10 +386,10 @@ Describe 'Build agent identity in the lab scripts' -Tag Integration {
 Describe 'Build agent software installation in the lab scripts' -Tag Integration {
     BeforeAll {
         $path = (Resolve-Path -Path "$PSScriptRoot\..\..\lab\31 Agent Setup.ps1").Path
-        $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$null)
+        $script:ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$null)
 
         # Covers quoted paths and bare command names alike.
-        $script:literals = $ast.FindAll({
+        $script:literals = $script:ast.FindAll({
                 param ($node)
                 $node -is [System.Management.Automation.Language.StringConstantExpressionAst]
             }, $true).Value
@@ -405,6 +405,23 @@ Describe 'Build agent software installation in the lab scripts' -Tag Integration
         # AutomatedLab writes 'AzureLabSources.ps1' below '$AL_DeployDebugFolder\AL', which expands
         # to '%APPDATA%\DeployDebug\AL' and not to the legacy 'C:\AL'.
         $script:literals | Where-Object { $_ -match 'AzureLabSources\.ps1' } | Should -BeNullOrEmpty
+    }
+
+    It "'31 Agent Setup.ps1' installs the Microsoft365DSC version pinned by the repository" {
+        $installCommand = $script:ast.FindAll({
+                param ($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -eq 'Install-Module'
+            }, $true) | Where-Object {
+            $_.CommandElements.Value -contains 'Microsoft365DSC'
+        }
+
+        $installCommand | Should -HaveCount 1
+        $installCommand.CommandElements.ParameterName | Should -Contain 'RequiredVersion'
+        $installCommand.CommandElements | Where-Object {
+            $_ -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $_.VariablePath.UserPath -eq 'm365DscVersion'
+        } | Should -Not -BeNullOrEmpty
     }
 }
 

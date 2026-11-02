@@ -356,10 +356,11 @@ resource configurations, compares the selected source tenant with every other
 exported tenant, and publishes the resulting HTML reports as the `DeltaReport`
 pipeline artifact.
 
-When manually queuing the pipeline, set **Source tenant of the delta report**
-to the exact tenant folder name in the export (for example,
-`M365CPI39455860.onmicrosoft.com`). The export must contain that source tenant
-and at least one destination tenant.
+The **Source tenant of the delta report** parameter defaults to the configured
+Dev tenant, `MngEnvMCAP289781.onmicrosoft.com`. The value must exactly match a
+tenant folder name in the export, and the export must contain that source tenant
+and at least one destination tenant. Change the parameter when using a different
+source tenant or after updating the Dev tenant in `source/Global/Azure.yml`.
 
 To test the comparison workflow when only one real tenant is available, enable
 **Create a synthetic destination tenant (test only)** when queuing the run.
@@ -375,6 +376,14 @@ find a suitable string property to change.
 This option does not create a real tenant, Azure subscription, or VM agent, and
 the synthetic configuration is for report testing only; do not use it to apply
 configuration to a tenant. Leave the option disabled for normal runs.
+
+**Validation evidence (2026-11-02):** Delta-report run `20261102.1` completed
+successfully with the synthetic-destination option disabled. It consumed the
+published export artifact from run `20261029.1`, containing configurations for
+both configured environments, and published a `DeltaReport` artifact with an
+HTML comparison report. The generated report showed differences in exported
+resource properties. This verifies the comparison using existing tenant
+exports; no tenant identifiers or exported configurations are stored here.
 
 The `M365DSC push` pipeline runs for changes to the `main` branch, except changes limited to `CHANGELOG.md`, and for tags that start with `v` and do not contain a hyphen. It builds the DSC artifacts, applies the configuration to the configured tenants, and validates the result.
 

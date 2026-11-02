@@ -4,7 +4,7 @@ parameters:
   - name: sourceTenant
     displayName: Source tenant of the delta report
     type: string
-    default: templatetenant.onmicrosoft.com
+    default: MngEnvMCAP289781.onmicrosoft.com
   - name: createSyntheticDestination
     displayName: Create a synthetic destination tenant (test only)
     type: boolean

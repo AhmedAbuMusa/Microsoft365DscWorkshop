@@ -4,7 +4,7 @@ param (
     [string[]]$EnvironmentName
 )
 
-$requiredModulesPath = (Resolve-Path -Path $PSScriptRoot\..\output\RequiredModules).Path
+$requiredModulesPath = (Resolve-Path -Path $PSScriptRoot\..\..\output\RequiredModules).Path
 if ($env:PSModulePath -notlike "*$requiredModulesPath*")
 {
     $env:PSModulePath = $env:PSModulePath + ";$requiredModulesPath"
@@ -16,14 +16,11 @@ if ($EnvironmentName)
 }
 
 Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force
-$projectSettings = Get-Content $PSScriptRoot\..\source\Global\ProjectSettings.yml | ConvertFrom-Yaml -ErrorAction Stop
-$datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\source\Datum.yml
-$labs = Get-Lab -List | Where-Object { $_ -Like "$($projectSettings.ProjectName)*" }
+$projectSettings = Get-Content $PSScriptRoot\..\..\source\Global\ProjectSettings.yml | ConvertFrom-Yaml -ErrorAction Stop
+$datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
 
-foreach ($lab in $labs)
+foreach ($envName in $datum.Global.Azure.Environments.Keys)
 {
-    $lab -match "(?:$($projectSettings.ProjectName))(?<Environment>\w+)" | Out-Null
-    $envName = $Matches.Environment
     if ($EnvironmentName -and $envName -notin $EnvironmentName)
     {
         Write-Host "Skipping environment '$envName'" -ForegroundColor Yellow
@@ -46,11 +43,22 @@ foreach ($lab in $labs)
     $param.SkipExchangeOnline = $environment.HasExchangeOnline -eq $false
 
     Connect-M365Dsc @param -ErrorAction Stop
+    Set-AzContext -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -ErrorAction Stop | Out-Null
 
-    Write-Host "Stopping all VMs in $($lab.Name) for environment '$envName'" -ForegroundColor Magenta
+    $vmName = Get-M365DscAgentVmName -ProjectName $projectSettings.ProjectName -EnvironmentName $envName
+    $vm = Get-M365DscAgentVm -ProjectName $projectSettings.ProjectName -EnvironmentName $envName
+    if ($null -eq $vm)
+    {
+        throw "Expected one VM named '$vmName' in subscription '$($environment.AzSubscriptionId)', but none was found."
+    }
 
-    $lab = Import-Lab -Name $lab -NoValidation -PassThru
-
-    Write-Host "Stopping all VMs in $($lab.Name)"
-    Stop-LabVM -All
+    Write-Host "Stopping VM '$vmName' in resource group '$($vm.ResourceGroupName)' for environment '$envName'." -ForegroundColor Magenta
+    if ($vm.PowerState -eq 'VM running')
+    {
+        Stop-AzVM -ResourceGroupName $vm.ResourceGroupName -Name $vmName -Force -ErrorAction Stop | Out-Null
+    }
+    else
+    {
+        Write-Host "VM '$vmName' is already stopped."
+    }
 }

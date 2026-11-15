@@ -366,6 +366,12 @@ process
 
 begin
 {
+    if ($UseModuleFast)
+    {
+        # Set before the first HTTP handler is created; .NET caches this process-wide switch.
+        [System.AppContext]::SetSwitch('System.Net.SocketsHttpHandler.Http3Support', $false)
+    }
+
     # Find build config if not specified.
     if (-not $BuildConfig)
     {
@@ -518,6 +524,10 @@ begin
         Write-Host -Object "[pre-build] Starting bootstrap process." -ForegroundColor Green
 
         .\Resolve-Dependency.ps1 @resolveDependencyParams
+        if (-not $?)
+        {
+            throw 'Dependency resolution failed; stopping the build.'
+        }
     }
 
     if ($MyInvocation.ScriptName -notlike '*Invoke-Build.ps1')

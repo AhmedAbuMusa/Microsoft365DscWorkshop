@@ -1,48 +1,63 @@
 parameters:
-- name: buildEnvironments
-  type: object
-  default: {}
 - name: poolName
   type: string
+- name: validateDeployment
+  type: boolean
+  default: false
+- name: dependsOnStage
+  type: string
+  default: ''
 
 stages:
-  - ${{ each buildEnvironment in parameters.buildEnvironments }}:
-    - stage: TestConfig${{ buildEnvironment.Name }}
-      displayName: Validating DSC Configuration of environment ${{ buildEnvironment.Name }}
-      pool:
-        name: ${{ parameters.poolName }}
-        demands:
-          - buildEnvironment -equals ${{ buildEnvironment.Name }}
-      ${{ if endsWith(variables['Build.DefinitionName'], 'push') }}:
-        dependsOn:
-        - StartConfig${{ buildEnvironment.Name }}
+- stage: TestConfiguration
+  displayName: Test DSC configuration
+  dependsOn:
+  - GenerateBuildEnvironmentMatrix
+  - ${{ if ne(parameters.dependsOnStage, '') }}:
+    - ${{ parameters.dependsOnStage }}
+  jobs:
+  - job: TestConfiguration
+    displayName: Test $(BuildEnvironment)
+    strategy:
+      matrix: $[ stageDependencies.GenerateBuildEnvironmentMatrix.CreateBuildEnvironmentMatrix.outputs['setMatrix.buildEnvironmentMatrix'] ]
+    pool:
+      name: ${{ parameters.poolName }}
+      demands:
+      - buildEnvironment -equals $(BuildEnvironment)
+    steps:
+    - download: None
 
-      jobs:
-        - deployment: ${{ buildEnvironment.Name }}
-          displayName: Testing deployment in ${{ buildEnvironment.Name }}
-          environment: ${{ buildEnvironment.Name }}
-          pool:
-            name: ${{ parameters.poolName }}
-            demands:
-              - buildEnvironment -equals ${{ buildEnvironment.Name }}
-          strategy:
-            runOnce:
-              deploy:
-                steps:
-                - download: None
+    - ${{ if parameters.validateDeployment }}:
+      - task: DownloadPipelineArtifact@2
+        name: downloadMof
+        displayName: Download compiled MOF for $(BuildEnvironment)
+        inputs:
+          buildType: current
+          artifactName: MOF_$(BuildEnvironment)
+          targetPath: '$(System.DefaultWorkingDirectory)\output\MOF'
 
-                - task: PowerShell@2
-                  name: displayEnvVariables2
-                  displayName: 'Display Environment Variables'
-                  inputs:
-                    targetType: inline
-                    script: |
-                      dir -Path env: | Format-Table -Property Name, Value -AutoSize | Out-String | Write-Host
+    - task: PowerShell@2
+      name: displayEnvVariables2
+      displayName: Display Environment Variables
+      inputs:
+        targetType: inline
+        script: |
+          dir -Path env: | Format-Table -Property Name, Value -AutoSize | Out-String | Write-Host
 
-                - task: PowerShell@2
-                  name: testConfiguration
-                  displayName: 'Validating Deployment of DSC Configuration'
-                  inputs:
-                    filePath: './build.ps1'
-                    arguments: '-Tasks testConfiguration'
-                    pwsh: false
+    - ${{ if parameters.validateDeployment }}:
+      - task: PowerShell@2
+        name: testConfiguration
+        displayName: Validating Deployment of DSC Configuration
+        inputs:
+          filePath: ./build.ps1
+          arguments: -Tasks testDeploymentDscConfiguration
+          pwsh: false
+
+    - ${{ else }}:
+      - task: PowerShell@2
+        name: testConfiguration
+        displayName: Validating Deployment of DSC Configuration
+        inputs:
+          filePath: ./build.ps1
+          arguments: -Tasks testConfiguration
+          pwsh: false

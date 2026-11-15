@@ -1,13 +1,39 @@
 task ConfigDataPreparation {
 
+    $requiredModuleVersions = Import-PowerShellDataFile -Path (Join-Path -Path $BuildRoot -ChildPath 'RequiredModules.psd1')
+
     try
     {
-        Remove-Module -Name Az.Accounts -ErrorAction SilentlyContinue
-        Import-Module -Name Az.Resources -ErrorAction SilentlyContinue
+        foreach ($moduleName in 'Az.Accounts', 'Az.Resources')
+        {
+            $requiredVersion = $requiredModuleVersions[$moduleName]
+            if ($requiredVersion -is [hashtable])
+            {
+                $requiredVersion = $requiredVersion.Version
+            }
+
+            if (-not $requiredVersion -or $requiredVersion -eq 'latest')
+            {
+                throw "Module '$moduleName' must have an explicit version in RequiredModules.psd1."
+            }
+
+            $loadedModule = Get-Module -Name $moduleName | Select-Object -First 1
+            if ($loadedModule)
+            {
+                if ($loadedModule.Version -ne [version]$requiredVersion)
+                {
+                    throw "Module '$moduleName' version '$($loadedModule.Version)' is already loaded; expected '$requiredVersion'."
+                }
+            }
+            else
+            {
+                Import-Module -Name $moduleName -RequiredVersion $requiredVersion -ErrorAction Stop
+            }
+        }
     }
     catch
     {
-        Write-Build Yellow 'There were issues importing the Az modules.'
+        throw "Failed to load the pinned Azure PowerShell modules. $($_.Exception.Message)"
     }
 
     $global:azBuildParameters = @{}

@@ -1,0 +1,26 @@
+﻿<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<test-results xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="nunit_schema_2.5.xsd" name="Pester" total="1" errors="0" failures="0" not-run="58" inconclusive="0" ignored="0" skipped="0" invalid="0" date="2026-10-29" time="20:04:12">
+  <environment machine-name="LD-SERVER-01" nunit-version="2.5.8.0" user-domain="LD-SERVER-01" platform="Microsoft Windows 11 Enterprise|C:\WINDOWS|\Device\Harddisk2\Partition3" cwd="C:\Code\Code\DB Systel GmbH\AzureDevOps\Single Tenant\DSC" os-version="10.0.26100" user="admin" clr-version="10.0.14" />
+  <culture-info current-culture="en-US" current-uiculture="en-US" />
+  <test-suite type="TestFixture" name="Pester" executed="True" result="Success" success="True" time="3.9032" asserts="0" description="Pester">
+    <results>
+      <test-suite type="TestFixture" name="C:\Program Files\PowerShell\Modules\AutomatedLabTest\5.61.0\tests\00General.tests.ps1" executed="True" result="Success" success="True" time="1.7693" asserts="0" description="C:\Program Files\PowerShell\Modules\AutomatedLabTest\5.61.0\tests\00General.tests.ps1">
+        <results>
+          <test-suite type="TestFixture" name="[DSCTest] General" executed="True" result="Success" success="True" time="1.6378" asserts="0" description="[DSCTest] General">
+            <results>
+              <test-suite type="TestFixture" name="[DSCTest] General.Lab deployment successful" executed="True" result="Success" success="True" time="1.6328" asserts="0" description="[DSCTest] General.Lab deployment successful">
+                <results>
+                  <test-suite type="ParameterizedTest" name="[DSCTest] General.Lab deployment successful.[&lt;LabName&gt;] Should return the correct amount of machines" executed="True" result="Success" success="True" time="1.6279" asserts="0" description="[&lt;LabName&gt;] Should return the correct amount of machines">
+                    <results>
+                      <test-case description="[DSCTest] Should return the correct amount of machines" name="[DSCTest] General.Lab deployment successful.[DSCTest] Should return the correct amount of machines" time="1.6279" asserts="0" success="True" result="Success" executed="True" />
+                    </results>
+                  </test-suite>
+                </results>
+              </test-suite>
+            </results>
+          </test-suite>
+        </results>
+      </test-suite>
+    </results>
+  </test-suite>
+</test-results>

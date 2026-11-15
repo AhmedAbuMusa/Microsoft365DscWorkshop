@@ -8,7 +8,7 @@
 
 # 1. Encrypting Secrets in Configuration Data
 
-In order to create the environment and all required parts, this project must connect to an Azure tenant with an App that was registered when the script [10 Setup App Registrations.ps1](../lab//10%20Setup%20App%20Registrations.ps1) was called. The script writes the App ID and the App's secret to the file [Azure.yml](../source/Global/Azure.yml) file. The secret is encrypted with the password stored in pain text in the [Datum.yml](../source/Datum.yml). 
+The setup application secret is retained in protected configuration as the bootstrap credential used to access the per-environment Azure Key Vaults. The script [10 Setup App Registrations.ps1](../../lab/AutomatedLab/10%20Setup%20App%20Registrations.ps1) also stores application secrets and certificate private keys in those vaults; other application secrets are no longer written to [Azure.yml](../source/Global/Azure.yml). The bootstrap secret is protected using the password configured in [Datum.yml](../source/Datum.yml).
 
 ```yml
 DatumHandlers:
@@ -21,10 +21,10 @@ This is obviously not secure. This short guide explains how to switch from simpl
 
 ## 1.1. Import the module `Helpers.psm1`
 
-To make things easier there are prepared functions in the [Helpers.psm1 module](../lab//Helpers.psm1). Import the module:
+To make things easier there are prepared functions in the [AzHelpers.psm1 module](../../lab/AutomatedLab/AzHelpers.psm1). Import the module:
 
 ```powershell
-Import-Module -Name .\lab\Helpers.psm1
+Import-Module -Name .\lab\AutomatedLab\AzHelpers.psm1
 ```
 
 ## 1.2. Create a Document Encryption Certificate
@@ -101,7 +101,7 @@ $d.Global.Azure.Environments.Dev.AzApplicationSecret
 
 If you access the key `AzApplicationSecret`, you should see the application secret and not a string like `[ENC=PE9ianMgVmVyc2lvbj...`.
 
-Finally you can use the script [11 Test Connection.ps1](../lab//11%20Test%20Connection.ps1) to test connecting to your Azure tenants.
+Finally you can use the script [11 Test Connection.ps1](../../lab/AutomatedLab/11%20Test%20Connection.ps1) to test connecting to your Azure tenants.
 
 ## Update Remaining Credentials
 

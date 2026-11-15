@@ -1,28 +1,28 @@
 trigger: none
-
 pool:
   vmImage: windows-latest
-
 variables:
   buildFolderName: output
   testResultFolderName: testResults
   defaultBranch: main
   Agent.Source.Git.ShallowFetchDepth: 0
-
 parameters:
-  - name: buildEnvironments
-    type: object
-    default:
-      - Name: Dev
-      - Name: Test
-      - Name: Prod
-  - name: poolName
-    type: string
-    default: DSC
-
+- name: poolName
+  type: string
+  default: DSC
+- name: environments
+  displayName: Environments
+  type: stringList
+  default:
+    - Dev
+    - Test
+  values:
+    - Dev
+    - Test
 stages:
-
-  - template: exportDscTemplate.yml
-    parameters:
-      buildEnvironments: ${{ parameters.buildEnvironments }}
-      poolName: ${{ parameters.poolName }}
+- template: environmentMatrixTemplate.yml
+  parameters:
+    environments: ${{ parameters.environments }}
+- template: exportDscTemplate.yml
+  parameters:
+    poolName: ${{ parameters.poolName }}

@@ -1,6 +1,6 @@
 # 1. Manually setting up the Azure DevOps Build Agent
 
-The Azure DevOps agent setup for this solution can fully automated with the script [](../lab/31%20Agent%20Setup.ps1). The automation is based on [AutomatedLab](https://automatedlab.org/) which sometimes conflicts with security guidelines in production environments. The guide is for setting up the build agent without the scripts provided.
+The Azure DevOps agent setup for this solution is automated by [31 Agent Setup.ps1](../../lab/Azure/31%20Agent%20Setup.ps1), which uses Azure VM Run Command. This guide describes the optional manual setup path.
 
 - [1. Manually setting up the Azure DevOps Build Agent](#1-manually-setting-up-the-azure-devops-build-agent)
   - [1.1. Connect to and prepare the Azure Tenant](#11-connect-to-and-prepare-the-azure-tenant)
@@ -73,7 +73,7 @@ Add the Graph permissions required by Microsoft365DSC for read-only or read/writ
 7. :pencil2: Next we need to import the `AzHelper` module:
 
 ```powershell
-Import-Module -Name .\lab\AzHelpers.psm1
+Import-Module -Name .\lab\AutomatedLab\AzHelpers.psm1
 ```
 
 8. :pencil2: Then we get the desired permissions for the tenant (in the following case read-only):

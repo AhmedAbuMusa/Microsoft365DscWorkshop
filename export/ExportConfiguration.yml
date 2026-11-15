@@ -1,4 +1,21 @@
 DscResources:
 - AADApplication
 - AADSecurityDefaults
-- AADGroupSettings
+- AADGroupsSettings
+- AADNamedLocationPolicy
+- AADRoleDefinition
+- AADConditionalAccessPolicy
+- AADAuthenticationMethodPolicy
+- AADAuthenticationMethodPolicyAuthenticator
+- AADAuthenticationMethodPolicyEmail
+- AADAuthenticationMethodPolicyExternal
+- AADAuthenticationMethodPolicyFido2
+- AADAuthenticationMethodPolicyHardware
+- AADAuthenticationMethodPolicyQRCodeImage
+- AADAuthenticationMethodPolicySms
+- AADAuthenticationMethodPolicySoftware
+- AADAuthenticationMethodPolicyTemporary
+- AADAuthenticationMethodPolicyVoice
+- AADAuthenticationMethodPolicyX509
+- AADAuthenticationStrengthPolicy
+- AADAuthenticationContextClassReference

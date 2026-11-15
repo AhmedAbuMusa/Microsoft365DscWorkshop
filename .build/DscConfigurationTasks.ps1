@@ -1,4 +1,4 @@
-Import-Module -Name $ProjectPath\Lab\M365DscHelpers.psm1
+Import-Module -Name $ProjectPath\Lab\AutomatedLab\M365DscHelpers.psm1
 
 task StartDscConfiguration {
 
@@ -68,6 +68,91 @@ task TestDscConfiguration {
     }
 }
 
+task TestDeploymentDscConfiguration {
+
+    $environment = $env:buildEnvironment
+    if (-not $environment)
+    {
+        Write-Error 'The build environment is not set' -ErrorAction Stop
+    }
+
+    $mofDirectory = Join-Path -Path (Join-Path -Path $OutputDirectory -ChildPath $MofOutputFolder) -ChildPath $environment
+    $mofFiles = @(Get-ChildItem -Path $mofDirectory -Filter '*.mof' -File -ErrorAction SilentlyContinue)
+    if ($mofFiles.Count -eq 0)
+    {
+        Write-Error "No compiled MOF files were found in '$mofDirectory'. The deployment validation job must download the environment's MOF artifact." -ErrorAction Stop
+    }
+
+    foreach ($mofFile in $mofFiles)
+    {
+        $computerName = $mofFile.BaseName
+        Write-Host "Validating DSC configuration on '$computerName'." -ForegroundColor Yellow
+
+        $cimSession = New-CimSession -ComputerName $computerName -ErrorAction Stop
+        $validationDeadline = (Get-Date).AddMinutes(10)
+        try
+        {
+            while ($true)
+            {
+                $lcmState = (Get-DscLocalConfigurationManager -CimSession $cimSession -ErrorAction Stop).LCMState
+                if ($lcmState -eq 'Busy')
+                {
+                    if ((Get-Date) -ge $validationDeadline)
+                    {
+                        throw "Timed out waiting for the LCM on '$computerName' to become idle; validation was not run."
+                    }
+
+                    Write-Host "LCM on '$computerName' is busy; checking again in 10 seconds." -ForegroundColor Yellow
+                    Start-Sleep -Seconds 10
+                    continue
+                }
+
+                try
+                {
+                    $dscState = Test-DscConfiguration -CimSession $cimSession -Detailed -ErrorAction Stop
+                    break
+                }
+                catch
+                {
+                    if ($_.Exception.Message -notmatch '(?i)cmdlet is in progress and must return before Test-DscConfiguration can be invoked')
+                    {
+                        throw
+                    }
+
+                    if ((Get-Date) -ge $validationDeadline)
+                    {
+                        throw "Timed out waiting for the active DSC operation on '$computerName' to finish; validation was not run. $($_.Exception.Message)"
+                    }
+
+                    Write-Host "A DSC operation is still in progress on '$computerName'; retrying validation in 10 seconds." -ForegroundColor Yellow
+                    Start-Sleep -Seconds 10
+                }
+            }
+        }
+        finally
+        {
+            try
+            {
+                Remove-CimSession -CimSession $cimSession -ErrorAction Stop
+            }
+            catch
+            {
+                Write-Warning "Could not close the CIM session for '$computerName': $($_.Exception.Message)"
+            }
+        }
+
+        if (-not $dscState.InDesiredState)
+        {
+            Write-Host "The following $($dscState.ResourcesNotInDesiredState.Count) resource(s) are not in the desired state on '$computerName':" -ForegroundColor Red
+            $dscState.ResourcesNotInDesiredState | ConvertTo-Yaml | Write-Host -ForegroundColor Yellow
+
+            Write-Error -Message "Test failed on '$computerName', $($dscState.ResourcesNotInDesiredState.Count) resource(s) are not in the desired state." -ErrorAction Stop
+        }
+
+        Write-Host "All resources on '$computerName' are in the desired state." -ForegroundColor Green
+    }
+}
+
 task CleanModuleFolder {
 
     $programFileModulePath = 'C:\Program Files\WindowsPowerShell\Modules'
@@ -90,6 +175,9 @@ task InitializeModuleFolder {
     }
 
     Wait-DscLocalConfigurationManager
+
+    # UPSTREAM: M365DSC-1
+    & (Join-Path -Path $ProjectPath -ChildPath 'pipelines\scripts\PatchMicrosoft365DscAADGroupsSettings.ps1') -RequiredModulesPath $requiredModulesPath
 
     $programFileModulePath = 'C:\Program Files\WindowsPowerShell\Modules'
     $m365DscSourcePath = Join-Path -Path $requiredModulesPath -ChildPath 'Microsoft365DSC'

@@ -1,8 +1,20 @@
 task InitLab {
 
+    $requiredModuleVersions = Import-PowerShellDataFile -Path (Join-Path -Path $ProjectPath -ChildPath 'RequiredModules.psd1')
+    $exchangeOnlineManagementVersion = $requiredModuleVersions['ExchangeOnlineManagement']
+    if ($exchangeOnlineManagementVersion -is [hashtable])
+    {
+        $exchangeOnlineManagementVersion = $exchangeOnlineManagementVersion.Version
+    }
+
+    if (-not $exchangeOnlineManagementVersion -or $exchangeOnlineManagementVersion -eq 'latest')
+    {
+        throw "Module 'ExchangeOnlineManagement' must have an explicit version in RequiredModules.psd1."
+    }
+
     #workaround for https://github.com/microsoftgraph/msgraph-sdk-powershell/issues/3331
     $dummyCred = [pscredential]::new('dummy', ('123' | ConvertTo-SecureString -AsPlainText -Force))
-    Import-Module -Name ExchangeOnlineManagement
+    Import-Module -Name ExchangeOnlineManagement -RequiredVersion $exchangeOnlineManagementVersion -ErrorAction Stop
     try
     {
         Connect-ExchangeOnline -UserPrincipalName dummy@contoso.com -Credential $dummyCred -ErrorAction Ignore | Out-Null
@@ -12,14 +24,14 @@ task InitLab {
         # Exception is expected
     }
 
-    Write-Host "Importing module 'AzHelpers' from path '$ProjectPath\lab\AzHelpers.psm1'." -ForegroundColor Yellow
-    Import-Module -Name $ProjectPath\lab\AzHelpers.psm1 -Force
+    Write-Host "Importing module 'AzHelpers' from path '$ProjectPath\lab\AutomatedLab\AzHelpers.psm1'." -ForegroundColor Yellow
+    Import-Module -Name $ProjectPath\lab\AutomatedLab\AzHelpers.psm1 -Force
 
-    Write-Host "Importing module 'CertHelpers' from path '$ProjectPath\lab\CertHelpers.psm1'." -ForegroundColor Yellow
-    Import-Module -Name $ProjectPath\lab\CertHelpers.psm1 -Force
+    Write-Host "Importing module 'CertHelpers' from path '$ProjectPath\lab\AutomatedLab\CertHelpers.psm1'." -ForegroundColor Yellow
+    Import-Module -Name $ProjectPath\lab\AutomatedLab\CertHelpers.psm1 -Force
 
-    Write-Host "Importing module 'M365DscHelpers' from path '$ProjectPath\lab\M365DscHelpers.psm1'." -ForegroundColor Yellow
-    Import-Module -Name $ProjectPath\lab\M365DscHelpers.psm1 -Force
+    Write-Host "Importing module 'M365DscHelpers' from path '$ProjectPath\lab\AutomatedLab\M365DscHelpers.psm1'." -ForegroundColor Yellow
+    Import-Module -Name $ProjectPath\lab\AutomatedLab\M365DscHelpers.psm1 -Force
 
     if ($PSVersionTable.PSEdition -eq 'Core')
     {
@@ -57,16 +69,26 @@ task InitLab {
         'ExchangeOnlineManagement',
         'Az.Accounts',
         'Az.Resources',
+        'Az.Compute',
+        'Az.ManagedServiceIdentity',
         'Microsoft365DSC'
     )
 
     foreach ($moduleToImport in $modulesToImport)
     {
-        $module = Get-Module -Name $moduleToImport -ListAvailable |
-            Sort-Object -Property Version -Descending |
-                Select-Object -First 1 |
-                    Import-Module -PassThru
-        Write-Host "'$module' module version $($module.Version) is imported to make sure the highest available version is used." -ForegroundColor Yellow
+        $moduleVersion = $requiredModuleVersions[$moduleToImport]
+        if ($moduleVersion -is [hashtable])
+        {
+            $moduleVersion = $moduleVersion.Version
+        }
+
+        if (-not $moduleVersion -or $moduleVersion -eq 'latest')
+        {
+            throw "Module '$moduleToImport' must have an explicit version in RequiredModules.psd1."
+        }
+
+        $module = Import-Module -Name $moduleToImport -RequiredVersion $moduleVersion -PassThru -ErrorAction Stop
+        Write-Host "'$module' pinned module version $($module.Version) is imported." -ForegroundColor Yellow
 
     }
 

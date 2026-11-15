@@ -46,6 +46,8 @@ The following steps guide you through the process of customizing and running the
 
 ### 1.3.1. Configuring the configuration file
 
+To add or remove Microsoft365DSC resources from the export, and to understand the Microsoft365DSC version and dependency pins, see [Managing exported resources and the Microsoft365DSC version](./ManagingExportResourcesAndMicrosoft365DSCVersion.md).
+
 The file [Azure.yml](../source//Global//Azure.yml) stores the configuration of your Azure tenants. In this guide only one tenant will be configured and later exported.
 
 - Please remove the `Test` and `Prod` tenant from the [Azure.yml](../source//Global//Azure.yml) file. Then put your tenant ID, tenant name and subscription ID to the remaining tenant, which should be `Dev`.

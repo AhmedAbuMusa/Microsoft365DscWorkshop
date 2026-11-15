@@ -1,0 +1,26 @@
+parameters:
+- name: environments
+  type: object
+  default:
+    - Dev
+    - Test
+
+stages:
+- stage: GenerateBuildEnvironmentMatrix
+  displayName: Discover build environments
+  jobs:
+  - job: CreateBuildEnvironmentMatrix
+    displayName: Use selected environment parameters
+    pool:
+      vmImage: windows-latest
+    steps:
+    - checkout: self
+    - task: PowerShell@2
+      name: setMatrix
+      displayName: Create environment matrix
+      inputs:
+        targetType: filePath
+        filePath: ./pipelines/scripts/GetBuildEnvironmentMatrix.ps1
+        pwsh: true
+      env:
+        SELECTED_ENVIRONMENTS: ${{ join(',', parameters.environments) }}

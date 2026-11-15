@@ -4,14 +4,14 @@ param (
     [string[]]$EnvironmentName
 )
 
-$requiredModulesPath = (Resolve-Path -Path $PSScriptRoot\..\output\RequiredModules).Path
+$requiredModulesPath = (Resolve-Path -Path $PSScriptRoot\..\..\output\RequiredModules).Path
 if ($env:PSModulePath -notlike "*$requiredModulesPath*")
 {
     $env:PSModulePath = $env:PSModulePath + ";$requiredModulesPath"
 }
 
 Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force
-$datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\source\Datum.yml
+$datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
 $environments = $datum.Global.Azure.Environments.Keys
 if ($EnvironmentName)
 {

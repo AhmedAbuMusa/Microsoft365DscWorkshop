@@ -1,5 +1,653 @@
 Import-Module -Name $PSScriptRoot\CertHelpers.psm1 -Force
 
+function Get-M365DscAgentResourceGroupName
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$EnvironmentName
+    )
+
+    return "$ProjectName-$EnvironmentName-rg"
+}
+
+function Get-M365DscAgentVmName
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$EnvironmentName
+    )
+
+    return "Lcm$ProjectName$EnvironmentName"
+}
+
+function Get-M365DscAgentIdentityName
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$EnvironmentName
+    )
+
+    return "M365DscLcm${ProjectName}${EnvironmentName}Identity"
+}
+
+function Get-M365DscAgentVm
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$EnvironmentName
+    )
+
+    $vmName = Get-M365DscAgentVmName -ProjectName $ProjectName -EnvironmentName $EnvironmentName
+    $vms = @(Get-AzVM -Status -ErrorAction Stop | Where-Object Name -EQ $vmName)
+    if ($vms.Count -le 1)
+    {
+        return $vms | Select-Object -First 1
+    }
+
+    $preferredResourceGroupNames = @(
+        Get-M365DscAgentResourceGroupName -ProjectName $ProjectName -EnvironmentName $EnvironmentName
+        "$ProjectName$EnvironmentName"
+    )
+    foreach ($preferredResourceGroupName in $preferredResourceGroupNames)
+    {
+        $preferredVms = @($vms | Where-Object ResourceGroupName -EQ $preferredResourceGroupName)
+        if ($preferredVms.Count -eq 1)
+        {
+            $otherResourceGroups = @(
+                $vms |
+                    Where-Object ResourceGroupName -NE $preferredResourceGroupName |
+                    Select-Object -ExpandProperty ResourceGroupName -Unique
+            ) -join ', '
+            Write-Warning "Found duplicate VM names; using '$preferredResourceGroupName' and leaving matching VM(s) in '$otherResourceGroups' untouched."
+            return $preferredVms[0]
+        }
+    }
+
+    $matchingResourceGroups = @($vms | Select-Object -ExpandProperty ResourceGroupName -Unique) -join ', '
+    throw "Found more than one VM named '$vmName' and could not uniquely select the canonical or legacy resource group. Matching resource groups: $matchingResourceGroups."
+}
+
+function Get-M365DscKeyVaultName
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$EnvironmentName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TenantId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SubscriptionId
+    )
+
+    $prefix = "$ProjectName-$EnvironmentName" -replace '[^a-zA-Z0-9-]', '-'
+    $prefix = $prefix -replace '-{2,}', '-'
+    $prefix = $prefix.Trim('-').ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($prefix))
+    {
+        throw 'The project and environment names must contain at least one alphanumeric character.'
+    }
+
+    if ($prefix.Length -gt 12)
+    {
+        $prefix = $prefix.Substring(0, 12).TrimEnd('-')
+    }
+
+    $hashInput = [System.Text.Encoding]::UTF8.GetBytes("$TenantId|$SubscriptionId")
+    $hash = [System.Security.Cryptography.SHA256]::Create()
+    try
+    {
+        $suffix = [System.BitConverter]::ToString($hash.ComputeHash($hashInput)).Replace('-', '').Substring(0, 8).ToLowerInvariant()
+    }
+    finally
+    {
+        $hash.Dispose()
+    }
+
+    return "kv-$prefix-$suffix"
+}
+
+function Get-M365DscKeyVaultSecretName
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$IdentityName,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('secret', 'pfx', 'pfx-password')]
+        [string]$CredentialType
+    )
+
+    $identityToken = ($IdentityName -replace '[^a-zA-Z0-9-]', '-').Trim('-').ToLowerInvariant()
+    $secretName = "$identityToken-$CredentialType"
+    if ($secretName.Length -gt 127)
+    {
+        throw "The generated Key Vault secret name '$secretName' exceeds the 127-character limit."
+    }
+
+    return $secretName
+}
+
+function Confirm-M365DscOverwrite
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Prompt
+    )
+
+    $response = Read-Host -Prompt "$Prompt [y/N]"
+    return $response -match '^(?i)y(es)?$'
+}
+
+function Get-M365DscDeletedKeyVault
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VaultName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Location,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SubscriptionId
+    )
+
+    $normalizedLocation = $Location -replace '[^a-zA-Z0-9]', ''
+    $deletedVaults = @(
+        Get-AzKeyVault -InRemovedState -SubscriptionId $SubscriptionId -ErrorAction Stop |
+            Where-Object {
+                $_.VaultName -ieq $VaultName -and
+                ($_.Location -replace '[^a-zA-Z0-9]', '') -ieq $normalizedLocation
+            }
+    )
+    if ($deletedVaults.Count -gt 1)
+    {
+        throw "More than one soft-deleted Key Vault named '$VaultName' was found in subscription '$SubscriptionId'."
+    }
+
+    if ($deletedVaults.Count -eq 1)
+    {
+        return $deletedVaults[0]
+    }
+
+    return $null
+}
+
+function Wait-M365DscDeletedKeyVault
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VaultName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Location,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SubscriptionId
+    )
+
+    for ($attempt = 1; $attempt -le 12; $attempt++)
+    {
+        $deletedVault = Get-M365DscDeletedKeyVault `
+            -VaultName $VaultName `
+            -Location $Location `
+            -SubscriptionId $SubscriptionId
+        if ($deletedVault)
+        {
+            return $deletedVault
+        }
+
+        if ($attempt -lt 12)
+        {
+            Start-Sleep -Seconds 5
+        }
+    }
+
+    throw "Key Vault '$VaultName' was deleted but did not appear in the soft-deleted vault list."
+}
+
+function Remove-M365DscDeletedKeyVault
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [psobject]$DeletedVault,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Location,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SubscriptionId
+    )
+
+    if ($DeletedVault.EnablePurgeProtection -eq $true)
+    {
+        throw "Key Vault '$($DeletedVault.VaultName)' has purge protection enabled and cannot be purged until its retention period expires."
+    }
+
+    Write-Host "Purging soft-deleted Key Vault '$($DeletedVault.VaultName)'."
+    Remove-AzKeyVault -InputObject $DeletedVault -InRemovedState -Force -ErrorAction Stop | Out-Null
+
+    $remainingVault = Get-M365DscDeletedKeyVault `
+        -VaultName $DeletedVault.VaultName `
+        -Location $Location `
+        -SubscriptionId $SubscriptionId
+    if ($remainingVault)
+    {
+        throw "Soft-deleted Key Vault '$($DeletedVault.VaultName)' is still present after the purge request."
+    }
+}
+
+function Initialize-M365DscKeyVault
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$EnvironmentName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TenantId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SubscriptionId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Location
+    )
+
+    $vaultName = Get-M365DscKeyVaultName `
+        -ProjectName $ProjectName `
+        -EnvironmentName $EnvironmentName `
+        -TenantId $TenantId `
+        -SubscriptionId $SubscriptionId
+    $resourceGroupName = "$ProjectName-$EnvironmentName-credentials-rg" -replace '[^a-zA-Z0-9_.()-]', '-'
+    $context = Get-AzContext -ErrorAction Stop
+    if (-not [string]::Equals($context.Subscription.Id, $SubscriptionId, [StringComparison]::OrdinalIgnoreCase))
+    {
+        throw "The active Azure subscription '$($context.Subscription.Id)' does not match the Key Vault subscription '$SubscriptionId'."
+    }
+
+    $keyVaultProvider = Get-AzResourceProvider -ProviderNamespace 'Microsoft.KeyVault' -ErrorAction Stop
+    if ($keyVaultProvider.RegistrationState -ne 'Registered')
+    {
+        Register-AzResourceProvider -ProviderNamespace 'Microsoft.KeyVault' -ErrorAction Stop | Out-Null
+        for ($attempt = 1; $attempt -le 12; $attempt++)
+        {
+            $keyVaultProvider = Get-AzResourceProvider -ProviderNamespace 'Microsoft.KeyVault' -ErrorAction Stop
+            if ($keyVaultProvider.RegistrationState -eq 'Registered')
+            {
+                break
+            }
+
+            if ($attempt -eq 12)
+            {
+                throw "The Microsoft.KeyVault resource provider did not register in subscription '$SubscriptionId'."
+            }
+
+            Start-Sleep -Seconds 5
+        }
+    }
+
+    $resourceGroup = Get-AzResourceGroup -ErrorAction Stop |
+        Where-Object Name -EQ $resourceGroupName
+    $vault = Get-AzKeyVault -ErrorAction Stop |
+        Where-Object VaultName -EQ $vaultName
+    if (@($vault).Count -gt 1)
+    {
+        throw "More than one Key Vault named '$vaultName' was found in subscription '$SubscriptionId'."
+    }
+    if ($vault -and -not [string]::Equals($vault.ResourceGroupName, $resourceGroupName, [StringComparison]::OrdinalIgnoreCase))
+    {
+        throw "Key Vault '$vaultName' already exists in resource group '$($vault.ResourceGroupName)' instead of '$resourceGroupName'."
+    }
+
+    $deletedVault = Get-M365DscDeletedKeyVault `
+        -VaultName $vaultName `
+        -Location $Location `
+        -SubscriptionId $SubscriptionId
+
+    $overwriteResourceGroup = $false
+    if ($resourceGroup)
+    {
+        $overwriteResourceGroup = Confirm-M365DscOverwrite `
+            -Prompt "Resource group '$resourceGroupName' already exists. Overwriting it permanently deletes every resource it contains. Delete and recreate it?"
+    }
+    else
+    {
+        Write-Host "Creating credential resource group '$resourceGroupName' in '$Location'."
+        $resourceGroup = New-AzResourceGroup -Name $resourceGroupName -Location $Location -ErrorAction Stop
+    }
+
+    $vaultInResourceGroup = $vault -and
+        [string]::Equals($vault.ResourceGroupName, $resourceGroupName, [StringComparison]::OrdinalIgnoreCase)
+    $deletedVaultInResourceGroup = $deletedVault -and
+        [string]::Equals($deletedVault.ResourceGroupName, $resourceGroupName, [StringComparison]::OrdinalIgnoreCase)
+
+    if ($overwriteResourceGroup)
+    {
+        if ($vaultInResourceGroup -and $vault.EnablePurgeProtection -eq $true)
+        {
+            throw "Key Vault '$vaultName' has purge protection enabled. The resource group cannot be overwritten until its retention period expires."
+        }
+        if ($deletedVaultInResourceGroup -and $deletedVault.EnablePurgeProtection -eq $true)
+        {
+            throw "Key Vault '$vaultName' has purge protection enabled. The resource group cannot be overwritten until its retention period expires."
+        }
+
+        Write-Host "Deleting credential resource group '$resourceGroupName'."
+        Remove-AzResourceGroup -Name $resourceGroupName -Force -ErrorAction Stop | Out-Null
+
+        if ($vaultInResourceGroup)
+        {
+            $deletedVault = Wait-M365DscDeletedKeyVault `
+                -VaultName $vaultName `
+                -Location $Location `
+                -SubscriptionId $SubscriptionId
+            Remove-M365DscDeletedKeyVault `
+                -DeletedVault $deletedVault `
+                -Location $Location `
+                -SubscriptionId $SubscriptionId
+            $vault = $null
+            $deletedVault = $null
+        }
+        elseif ($deletedVaultInResourceGroup)
+        {
+            Remove-M365DscDeletedKeyVault `
+                -DeletedVault $deletedVault `
+                -Location $Location `
+                -SubscriptionId $SubscriptionId
+            $deletedVault = $null
+        }
+
+        Write-Host "Creating credential resource group '$resourceGroupName' in '$Location'."
+        $resourceGroup = New-AzResourceGroup -Name $resourceGroupName -Location $Location -ErrorAction Stop
+    }
+    elseif (-not $resourceGroup)
+    {
+        Write-Host "Creating credential resource group '$resourceGroupName' in '$Location'."
+        $resourceGroup = New-AzResourceGroup -Name $resourceGroupName -Location $Location -ErrorAction Stop
+    }
+
+    if ($vault)
+    {
+        if (Confirm-M365DscOverwrite `
+                -Prompt "Key Vault '$vaultName' already exists. Delete, purge, and recreate it with an empty secret store?")
+        {
+            if ($vault.EnablePurgeProtection -eq $true)
+            {
+                throw "Key Vault '$vaultName' has purge protection enabled and cannot be purged until its retention period expires."
+            }
+
+            Write-Host "Deleting Key Vault '$vaultName'."
+            Remove-AzKeyVault `
+                -VaultName $vault.VaultName `
+                -ResourceGroupName $vault.ResourceGroupName `
+                -Force `
+                -ErrorAction Stop | Out-Null
+            $deletedVault = Wait-M365DscDeletedKeyVault `
+                -VaultName $vaultName `
+                -Location $Location `
+                -SubscriptionId $SubscriptionId
+            Remove-M365DscDeletedKeyVault `
+                -DeletedVault $deletedVault `
+                -Location $Location `
+                -SubscriptionId $SubscriptionId
+            $vault = $null
+        }
+        else
+        {
+            Write-Host "Using existing Key Vault '$vaultName' without changing its authorization model."
+        }
+    }
+    elseif ($deletedVault)
+    {
+        if (Confirm-M365DscOverwrite `
+                -Prompt "Key Vault '$vaultName' is soft-deleted. Type Y to purge and recreate it; the default N recovers and reuses it")
+        {
+            Remove-M365DscDeletedKeyVault `
+                -DeletedVault $deletedVault `
+                -Location $Location `
+                -SubscriptionId $SubscriptionId
+        }
+        else
+        {
+            Write-Host "Recovering and reusing soft-deleted Key Vault '$vaultName'."
+            Undo-AzKeyVaultRemoval -InputObject $deletedVault -ErrorAction Stop | Out-Null
+            $vault = Get-AzKeyVault -ErrorAction Stop |
+                Where-Object VaultName -EQ $vaultName
+            if (@($vault).Count -ne 1)
+            {
+                throw "Could not uniquely resolve Key Vault '$vaultName' after recovery."
+            }
+        }
+    }
+
+    if (-not $vault)
+    {
+        Write-Host "Creating Key Vault '$vaultName' in resource group '$resourceGroupName'."
+        $vault = New-AzKeyVault `
+            -VaultName $vaultName `
+            -ResourceGroupName $resourceGroupName `
+            -Location $Location `
+            -DisableRbacAuthorization:$false `
+            -ErrorAction Stop
+    }
+    elseif (-not [string]::Equals($vault.ResourceGroupName, $resourceGroupName, [StringComparison]::OrdinalIgnoreCase))
+    {
+        throw "Key Vault '$vaultName' already exists in resource group '$($vault.ResourceGroupName)' instead of '$resourceGroupName'."
+    }
+
+    if ($vault.EnableRbacAuthorization -ne $true)
+    {
+        throw "Key Vault '$vaultName' must use Azure RBAC authorization. Review the existing vault before changing its permission model."
+    }
+
+    return $vault
+}
+
+function Ensure-M365DscKeyVaultRoleAssignment
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VaultResourceId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PrincipalId,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Key Vault Secrets Officer', 'Key Vault Secrets User')]
+        [string]$RoleDefinitionName
+    )
+
+    $vaults = @(
+        Get-AzKeyVault -ErrorAction Stop |
+            Where-Object ResourceId -EQ $VaultResourceId
+    )
+    if ($vaults.Count -ne 1)
+    {
+        throw "Could not uniquely resolve Key Vault '$VaultResourceId' to grant access to principal '$PrincipalId'."
+    }
+
+    $vault = $vaults[0]
+    $vaultResource = Get-AzResource `
+        -ResourceId $VaultResourceId `
+        -ExpandProperties `
+        -ErrorAction Stop
+    $enableRbacAuthorization = $vaultResource.Properties.EnableRbacAuthorization
+    if ($null -eq $enableRbacAuthorization)
+    {
+        $enableRbacAuthorization = $vault.EnableRbacAuthorization
+    }
+    if ($null -eq $enableRbacAuthorization)
+    {
+        throw "Could not determine the authorization model for Key Vault '$($vault.VaultName)'."
+    }
+
+    if ($enableRbacAuthorization -eq $true)
+    {
+        $assignments = @(
+            Get-AzRoleAssignment `
+                -ObjectId $PrincipalId `
+                -Scope $VaultResourceId `
+                -RoleDefinitionName $RoleDefinitionName `
+                -ErrorAction Stop
+        )
+        if ($assignments.Count -gt 0)
+        {
+            return
+        }
+
+        Write-Host "Assigning '$RoleDefinitionName' on Key Vault to principal '$PrincipalId'."
+        New-AzRoleAssignment `
+            -ObjectId $PrincipalId `
+            -Scope $VaultResourceId `
+            -RoleDefinitionName $RoleDefinitionName `
+            -ErrorAction Stop | Out-Null
+        return
+    }
+
+    $existingPolicy = @($vault.AccessPolicies | Where-Object ObjectId -EQ $PrincipalId)
+    $requiredSecretPermissions = if ($RoleDefinitionName -eq 'Key Vault Secrets Officer')
+    {
+        @('Get', 'List', 'Set', 'Delete', 'Recover', 'Backup', 'Restore', 'Purge')
+    }
+    else
+    {
+        @('Get', 'List')
+    }
+    $existingSecretPermissions = @($existingPolicy | ForEach-Object PermissionsToSecrets)
+    $secretPermissions = @(
+        $existingSecretPermissions + $requiredSecretPermissions |
+            Sort-Object -Unique
+    )
+    $policyParameters = @{
+        VaultName          = $vault.VaultName
+        ResourceGroupName  = $vault.ResourceGroupName
+        ObjectId           = $PrincipalId
+        PermissionsToSecrets = $secretPermissions
+        ErrorAction        = 'Stop'
+    }
+    if ($existingPolicy.Count -gt 0)
+    {
+        $policy = $existingPolicy[0]
+        if ($policy.PermissionsToKeys)
+        {
+            $policyParameters.PermissionsToKeys = @($policy.PermissionsToKeys)
+        }
+        if ($policy.PermissionsToCertificates)
+        {
+            $policyParameters.PermissionsToCertificates = @($policy.PermissionsToCertificates)
+        }
+        if ($policy.PermissionsToStorage)
+        {
+            $policyParameters.PermissionsToStorage = @($policy.PermissionsToStorage)
+        }
+    }
+
+    Write-Host "Granting '$RoleDefinitionName' secret permissions through the existing access policy on Key Vault to principal '$PrincipalId'."
+    Set-AzKeyVaultAccessPolicy @policyParameters | Out-Null
+}
+
+function Test-M365DscKeyVaultSecret
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VaultName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $secretNames = @(
+        Get-AzKeyVaultSecret -VaultName $VaultName -ErrorAction Stop |
+            Select-Object -ExpandProperty Name
+    )
+
+    return $Name -in $secretNames
+}
+
+function Get-M365DscKeyVaultSecret
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VaultName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $secret = Get-AzKeyVaultSecret -VaultName $VaultName -Name $Name -ErrorAction Stop
+    if ($null -eq $secret.SecretValue)
+    {
+        throw "Key Vault secret '$Name' in vault '$VaultName' has no value."
+    }
+
+    return $secret.SecretValue
+}
+
+function Set-M365DscKeyVaultSecret
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VaultName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [securestring]$SecretValue,
+
+        [Parameter()]
+        [string]$ContentType = 'application/octet-stream',
+
+        [Parameter()]
+        [switch]$Overwrite
+    )
+
+    if ((Test-M365DscKeyVaultSecret -VaultName $VaultName -Name $Name) -and -not $Overwrite)
+    {
+        return
+    }
+
+    Set-AzKeyVaultSecret `
+        -VaultName $VaultName `
+        -Name $Name `
+        -SecretValue $SecretValue `
+        -ContentType $ContentType `
+        -ErrorAction Stop | Out-Null
+}
+
 function Get-ServicePrincipalAppPermissions
 {
     param (
@@ -577,6 +1225,10 @@ function New-M365DscIdentity
         {
             $app.Secret = $clientSecret.SecretText
         }
+        elseif ($GenereateCertificate)
+        {
+            $app.CertificateThumbprint = $certificate.Thumbprint
+        }
 
         $app
     }
@@ -639,9 +1291,21 @@ function Get-M365DscIdentity
     {
         $appRegistration = Get-MgApplication -Filter "displayName eq '$Name'" -ErrorAction Stop
     }
-    catch [Microsoft.Graph.PowerShell.AuthenticationException]
+    catch
     {
-        Write-Error -Message "You are not connected to the Microsoft Graph. Please run 'Connect-M365Dsc'." -Exception $_.Exception -ErrorAction Stop
+        $errorRecord = $_
+        $exception = $errorRecord.Exception
+        while ($null -ne $exception)
+        {
+            if ($exception.GetType().FullName -eq 'Microsoft.Graph.PowerShell.AuthenticationException')
+            {
+                Write-Error -Message "You are not connected to the Microsoft Graph. Please run 'Connect-M365Dsc'." -Exception $errorRecord.Exception -ErrorAction Stop
+            }
+
+            $exception = $exception.InnerException
+        }
+
+        throw
     }
 
     if ($appRegistration)
@@ -1181,7 +1845,7 @@ function Disconnect-M365Dsc
         }
         else
         {
-            # Az.Accounts 5.3.2 is built against MSAL 4.65, Microsoft.Graph.Authentication 2.35.1 loads 4.78 into the same process.
+            # Az.Accounts 5.3.2 is built against MSAL 4.65, while Microsoft.Graph.Authentication ships a newer MSAL (4.90 in 2.41.1) that is loaded into the same process.
             Write-Warning "'Disconnect-AzAccount' failed on the MSAL assembly conflict between 'Az.Accounts' and 'Microsoft.Graph.Authentication'. Clearing the Azure context of this process instead. The error was: $($disconnectError[0].Exception.Message)"
             Clear-AzContext -Scope Process -Force
         }
@@ -1428,7 +2092,7 @@ function Remove-M365DscIdentityPermission
     )
 
     Write-Host 'Removing Azure permissions' -ForegroundColor Magenta
-    if (Get-AzRoleAssignment -ObjectId $Identity.AppPrincipalId -RoleDefinitionName Owner)
+    if (Get-AzRoleAssignment -ObjectId $Identity.AppPrincipalId -RoleDefinitionName Owner -ErrorAction Stop)
     {
         Write-Host "Removing the application '$($Identity.DisplayName)' from the role 'Owner'."
         try

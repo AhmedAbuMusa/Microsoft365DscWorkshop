@@ -146,6 +146,8 @@ param
     $UsePowerShellGetCompatibilityModuleVersion
 )
 
+. (Join-Path -Path $PSScriptRoot -ChildPath '.build\PSResourceRetry.ps1')
+
 try
 {
     if ($PSVersionTable.PSVersion.Major -le 5)
@@ -255,6 +257,7 @@ if ($UseModuleFast -and -not (Get-Module -Name 'ModuleFast'))
 
         $invokeWebRequestParameters = @{
             Uri         = $moduleFastBootstrapUri
+            TimeoutSec  = 120
             ErrorAction = 'Stop'
         }
 
@@ -304,6 +307,7 @@ if ($UsePSResourceGet)
                 # TODO: Should support proxy parameters passed to the script.
                 Uri         = $psResourceGetUri
                 OutFile     = "$PSDependTarget/$psResourceGetModuleName.nupkg" # cSpell: ignore nupkg
+                TimeoutSec  = 120
                 ErrorAction = 'Stop'
             }
 
@@ -389,7 +393,7 @@ if ($UsePSResourceGet)
                 }
             }
 
-            Save-PSResource @savePowerShellGetParameters
+            Invoke-SavePSResourceWithRetry -Parameters $savePowerShellGetParameters -ModuleName $savePowerShellGetParameters.Name
 
             Import-Module -Name "$PSDependTarget/PowerShellGet"
         }
@@ -857,23 +861,18 @@ try
                     NoProfileUpdate      = $true
                     Update               = $true
                     Confirm              = $false
+                    Timeout              = 60
                 }
 
-                $moduleFastPlan = Install-ModuleFast -Specification $modulesToSave -Plan @installModuleFastParameters
-
-                Write-Debug -Message ("Missing modules that need to be saved:`n{0}" -f ($moduleFastPlan | Out-String))
-
-                if ($moduleFastPlan)
+                try
                 {
-                    # Clear all modules in plan from the current session so they can be fetched again.
-                    try
+                    $moduleFastPlan = Install-ModuleFast -Specification $modulesToSave -Plan @installModuleFastParameters
+
+                    Write-Debug -Message ("Missing modules that need to be saved:`n{0}" -f ($moduleFastPlan | Out-String))
+
+                    if ($moduleFastPlan)
                     {
-                        $moduleFastPlan.Name | Get-Module | Remove-Module -Force
-                        $moduleFastPlan | Install-ModuleFast @installModuleFastParameters
-                    }
-                    catch
-                    {
-                        Write-Warning -Message 'ModuleFast could not save one or more dependencies. Retrying...'
+                        # Clear all modules in plan from the current session so they can be fetched again.
                         try
                         {
                             $moduleFastPlan.Name | Get-Module | Remove-Module -Force
@@ -881,13 +880,59 @@ try
                         }
                         catch
                         {
-                            Write-Error 'ModuleFast could not save one or more dependencies even after a retry.'
+                            $moduleFastError = $_.Exception.Message
+
+                            if ($moduleFastError -match 'HttpClient\.Timeout|The request was canceled due to the configured HttpClient\.Timeout|timed out')
+                            {
+                                Write-Warning -Message ('ModuleFast timed out while contacting the gallery. Falling back to PSResourceGet. Error: {0}' -f $moduleFastError)
+                                $UseModuleFast = $false
+                                $UsePSResourceGet = $true
+                            }
+                            else
+                            {
+                                Write-Warning -Message 'ModuleFast could not save one or more dependencies. Retrying...'
+                                try
+                                {
+                                    $moduleFastPlan.Name | Get-Module | Remove-Module -Force
+                                    $moduleFastPlan | Install-ModuleFast @installModuleFastParameters
+                                }
+                                catch
+                                {
+                                    $moduleFastError = $_.Exception.Message
+
+                                    if ($moduleFastError -match 'HttpClient\.Timeout|The request was canceled due to the configured HttpClient\.Timeout|timed out')
+                                    {
+                                        Write-Warning -Message ('ModuleFast timed out while contacting the gallery. Falling back to PSResourceGet. Error: {0}' -f $moduleFastError)
+                                        $UseModuleFast = $false
+                                        $UsePSResourceGet = $true
+                                    }
+                                    else
+                                    {
+                                        Write-Error 'ModuleFast could not save one or more dependencies even after a retry.'
+                                    }
+                                }
+                            }
                         }
                     }
+                    else
+                    {
+                        Write-Verbose -Message 'All required modules were already up to date'
+                    }
                 }
-                else
+                catch
                 {
-                    Write-Verbose -Message 'All required modules were already up to date'
+                    $moduleFastError = $_.Exception.Message
+
+                    if ($moduleFastError -match 'HttpClient\.Timeout|The request was canceled due to the configured HttpClient\.Timeout|timed out')
+                    {
+                        Write-Warning -Message ('ModuleFast timed out while contacting the gallery. Falling back to PSResourceGet. Error: {0}' -f $moduleFastError)
+                        $UseModuleFast = $false
+                        $UsePSResourceGet = $true
+                    }
+                    else
+                    {
+                        throw
+                    }
                 }
 
                 Write-Progress -Activity 'ModuleFast:' -PercentComplete 100 -CurrentOperation 'Dependencies restored' -Completed
@@ -983,12 +1028,7 @@ try
                         # Clear all module from the current session so any new version fetched will be re-imported.
                         Get-Module -Name $savePSResourceParameters.Name | Remove-Module -Force
 
-                        Save-PSResource @savePSResourceParameters -ErrorVariable 'savePSResourceError'
-
-                        if ($savePSResourceError)
-                        {
-                            Write-Warning -Message 'Save-PSResource could not save (replace) one or more dependencies. This can be due to the module is loaded into the session (and referencing assemblies). Close the current session and open a new session and try again.'
-                        }
+                        Invoke-SavePSResourceWithRetry -Parameters $savePSResourceParameters -ModuleName $savePSResourceParameters.Name
                     }
 
                     $progressPercentage += $percentagePerModule

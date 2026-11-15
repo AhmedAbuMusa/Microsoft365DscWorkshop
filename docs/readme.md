@@ -40,4 +40,7 @@ To get started, you just need an Azure tenant and your personal computer. The st
 4. Build the Artifacts.
 5. Run the deployment scripts in the [lab](../lab/) folder.
 
-Please go to the [detailed guide](GettingStarted.md) to get started.
+Choose the setup guide for your preferred lab-agent provisioning path:
+
+- [Azure-provisioned lab agents](GettingStarted%20Azure.md) uses Azure PowerShell and Bicep to create the agent VMs without AutomatedLab.
+- [The existing getting started guide](GettingStarted.md) covers the standard setup and its supported provisioning options.

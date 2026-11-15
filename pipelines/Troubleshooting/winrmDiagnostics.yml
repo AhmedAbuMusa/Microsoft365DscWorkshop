@@ -1,0 +1,110 @@
+trigger: none
+pool:
+  vmImage: windows-latest
+variables:
+  buildFolderName: output
+  testResultFolderName: testResults
+  defaultBranch: main
+  Agent.Source.Git.ShallowFetchDepth: 0
+parameters:
+- name: poolName
+  type: string
+  default: DSC
+- name: environments
+  displayName: Environments
+  type: stringList
+  default:
+    - Dev
+    - Test
+  values:
+    - Dev
+    - Test
+stages:
+- template: ../environmentMatrixTemplate.yml
+  parameters:
+    environments: ${{ parameters.environments }}
+- stage: TestWinRMConnectivity
+  displayName: Test WinRM connectivity
+  dependsOn: GenerateBuildEnvironmentMatrix
+  jobs:
+  - job: TestWinRMConnectivity
+    displayName: Test WinRM connectivity for $(BuildEnvironment)
+    strategy:
+      matrix: $[ stageDependencies.GenerateBuildEnvironmentMatrix.CreateBuildEnvironmentMatrix.outputs['setMatrix.buildEnvironmentMatrix'] ]
+    pool:
+      name: ${{ parameters.poolName }}
+      demands:
+      - buildEnvironment -equals $(BuildEnvironment)
+    steps:
+    - checkout: none
+
+    - task: PowerShell@2
+      displayName: Test DNS and WinRM connectivity
+      inputs:
+        targetType: inline
+        pwsh: false
+        script: |
+          $ErrorActionPreference = 'Stop'
+          $target = "LcmDSC$($env:BUILD_ENVIRONMENT)"
+
+          Write-Host "Agent: $env:AGENT_NAME"
+          Write-Host "Agent identity:"
+          whoami
+          Write-Host "Environment: $env:BUILD_ENVIRONMENT"
+          Write-Host "Target: $target"
+
+          $dnsResolved = $false
+          try
+          {
+              $dnsRecords = @(Resolve-DnsName -Name $target -ErrorAction Stop)
+              $dnsRecords |
+                  Format-Table -Property Name, Type, IPAddress, NameHost -AutoSize |
+                  Out-String |
+                  Write-Host
+              $dnsResolved = $true
+          }
+          catch
+          {
+              Write-Host "DNS lookup failed: $($_.Exception.Message)" -ForegroundColor Red
+          }
+
+          foreach ($port in 5985, 5986)
+          {
+              $reachable = Test-NetConnection -ComputerName $target -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue
+              Write-Host "TCP port $port reachable: $reachable"
+          }
+
+          $wsmanResponded = $false
+          foreach ($useSsl in $false, $true)
+          {
+              $scheme = if ($useSsl) { 'HTTPS' } else { 'HTTP' }
+              try
+              {
+                  if ($useSsl)
+                  {
+                      $null = Test-WSMan -ComputerName $target -UseSSL -Authentication Negotiate -ErrorAction Stop
+                  }
+                  else
+                  {
+                      $null = Test-WSMan -ComputerName $target -Authentication Negotiate -ErrorAction Stop
+                  }
+
+                  Write-Host "WSMan $scheme with Negotiate: succeeded" -ForegroundColor Green
+                  $wsmanResponded = $true
+              }
+              catch
+              {
+                  Write-Host "WSMan $scheme with Negotiate failed: $($_.Exception.Message)" -ForegroundColor Yellow
+              }
+          }
+
+          if (-not $dnsResolved)
+          {
+              throw "DNS resolution failed for '$target'."
+          }
+          if (-not $wsmanResponded)
+          {
+              throw "Neither HTTP nor HTTPS WSMan succeeded for '$target'. See the port and authentication results above."
+          }
+      env:
+        BUILD_ENVIRONMENT: $(BuildEnvironment)

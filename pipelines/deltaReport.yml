@@ -86,64 +86,56 @@ steps:
 
           $modifiedConfiguration = $null
           $modifiedProperty = $null
-          $literalAssignmentPattern = '^(?<prefix>[ \t]*(?<property>[A-Za-z][A-Za-z0-9_]*)[ \t]*=[ \t]*)(?<literal>''(?:[^'']|'''')*''|"(?:[^"\r\n]|`.)*")(?<suffix>[ \t]*(?:#.*)?\r?)$'
-          $assignmentOptions = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Multiline
-          $preferredProperties = 'DisplayName', 'Description'
-
-          foreach ($propertyName in $preferredProperties) {
-            foreach ($configuration in $copiedConfigurations | Sort-Object -Property FullName) {
-              $content = Get-Content -LiteralPath $configuration.FullName -Raw -ErrorAction Stop
-              $propertyPattern = '(?i)^(?<prefix>[ \t]*' + [regex]::Escape($propertyName) + '[ \t]*=[ \t]*)(?<literal>''(?:[^'']|'''')*''|"(?:[^"\r\n]|`.)*")(?<suffix>[ \t]*(?:#.*)?\r?)$'
-              $assignment = [regex]::Match($content, $propertyPattern, $assignmentOptions)
-
-              if (-not $assignment.Success) {
-                continue
-              }
-
-              $literal = $assignment.Groups['literal'].Value
-              $replacement = $literal.Substring(0, $literal.Length - 1) + ' [synthetic delta test]' + $literal.Substring($literal.Length - 1)
-              $updatedContent = $content.Remove($assignment.Index + $assignment.Groups['prefix'].Length, $literal.Length).Insert($assignment.Index + $assignment.Groups['prefix'].Length, $replacement)
-              Set-Content -LiteralPath $configuration.FullName -Value $updatedContent -NoNewline -Encoding utf8 -ErrorAction Stop
-              $modifiedConfiguration = $configuration.FullName
-              $modifiedProperty = $propertyName
-              break
+          $authMethodConfigurations = @($copiedConfigurations | Where-Object { $_.Directory.Name -eq 'AADAuthenticationMethodPolicyTemporary' } | Sort-Object -Property FullName)
+          foreach ($configuration in $authMethodConfigurations) {
+            $content = Get-Content -LiteralPath $configuration.FullName -Raw -ErrorAction Stop
+            $propertyPattern = '(?im)^(?<prefix>[ \t]*DefaultLifetimeInMinutes[ \t]*=[ \t]*)(?<value>\d+)(?<suffix>[ \t]*(?:#.*)?\r?)$'
+            $assignment = [regex]::Match($content, $propertyPattern)
+            if (-not $assignment.Success) {
+              continue
             }
 
-            if ($modifiedConfiguration) {
-              break
+            $currentValue = [int]$assignment.Groups['value'].Value
+            $random = [System.Security.Cryptography.RandomNumberGenerator]::GetInt32(10, 43201)
+            while ($random -eq $currentValue) {
+              $random = [System.Security.Cryptography.RandomNumberGenerator]::GetInt32(10, 43201)
             }
+
+            $updatedContent = $content.Remove($assignment.Groups['value'].Index, $assignment.Groups['value'].Length).Insert($assignment.Groups['value'].Index, [string]$random)
+            Set-Content -LiteralPath $configuration.FullName -Value $updatedContent -NoNewline -Encoding utf8 -ErrorAction Stop
+            $modifiedConfiguration = $configuration.FullName
+            $modifiedProperty = "DefaultLifetimeInMinutes ($currentValue -> $random)"
+            break
           }
 
           if (-not $modifiedConfiguration) {
-            foreach ($configuration in $copiedConfigurations | Sort-Object -Property FullName) {
-              $content = Get-Content -LiteralPath $configuration.FullName -Raw -ErrorAction Stop
-              foreach ($assignment in [regex]::Matches($content, $literalAssignmentPattern, $assignmentOptions)) {
-                $propertyName = $assignment.Groups['property'].Value
-                if ($propertyName -match '(?i)Password|Secret|Token|Certificate|Thumbprint|Credential|PrivateKey|AccessKey') {
-                  continue
-                }
+            throw "No exported AADAuthenticationMethodPolicyTemporary DefaultLifetimeInMinutes property was found for '$sourceTenant'; cannot create the requested synthetic authentication-method drift."
+          }
 
-                $literal = $assignment.Groups['literal'].Value
-                $replacement = $literal.Substring(0, $literal.Length - 1) + ' [synthetic delta test]' + $literal.Substring($literal.Length - 1)
-                $updatedContent = $content.Remove($assignment.Index + $assignment.Groups['prefix'].Length, $literal.Length).Insert($assignment.Index + $assignment.Groups['prefix'].Length, $replacement)
-                Set-Content -LiteralPath $configuration.FullName -Value $updatedContent -NoNewline -Encoding utf8 -ErrorAction Stop
-                $modifiedConfiguration = $configuration.FullName
-                $modifiedProperty = $propertyName
-                break
-              }
-
-              if ($modifiedConfiguration) {
-                break
-              }
+          Write-Host "Changed '$modifiedProperty' in '$modifiedConfiguration'."
+          $securityDefaultsConfigurations = @($copiedConfigurations | Where-Object { $_.Directory.Name -eq 'AADSecurityDefaults' } | Sort-Object -Property FullName)
+          $securityDescriptionPattern = '(?im)^(?<prefix>[ \t]*Description[ \t]*=[ \t]*)(?<value>''(?:''''|[^''])*''|"(?:`"|[^"])*"|\[System\.String\]\$null|\$null)(?<suffix>[ \t]*(?:#.*)?\r?)$'
+          $modifiedSecurityDescription = $false
+          foreach ($configuration in $securityDefaultsConfigurations) {
+            $content = Get-Content -LiteralPath $configuration.FullName -Raw -ErrorAction Stop
+            $assignment = [regex]::Match($content, $securityDescriptionPattern)
+            if (-not $assignment.Success) {
+              continue
             }
+
+            $description = "'DeltaReport synthetic test $([guid]::NewGuid().ToString('N').Substring(0, 8))'"
+            $updatedContent = $content.Remove($assignment.Groups['value'].Index, $assignment.Groups['value'].Length).Insert($assignment.Groups['value'].Index, $description)
+            Set-Content -LiteralPath $configuration.FullName -Value $updatedContent -NoNewline -Encoding utf8 -ErrorAction Stop
+            Write-Host "Changed the copied AADSecurityDefaults Description in '$($configuration.FullName)'."
+            $modifiedSecurityDescription = $true
+            break
           }
 
-          if (-not $modifiedConfiguration) {
-            throw "Copied configurations for '$sourceTenant' contain no safe literal string property to change; cannot create synthetic drift."
+          if (-not $modifiedSecurityDescription) {
+            throw "No exported AADSecurityDefaults Description was found for '$sourceTenant'; cannot create the requested synthetic metadata drift."
           }
 
-          Write-Host "Changed '$modifiedProperty' in '$modifiedConfiguration' by appending '[synthetic delta test]'."
-          Write-Host "Created synthetic destination '$syntheticTenant' with $($copiedConfigurations.Count) configuration file(s) and one intentional property difference."
+          Write-Host "Created synthetic destination '$syntheticTenant' with $($copiedConfigurations.Count) configuration file(s), a randomized TAP lifetime, and a synthetic Security Defaults description difference."
           Write-Host 'This is a test-only copy; no tenant, subscription, or VM agent was created.'
       env:
         DeltaReportInputDirectory: $(Pipeline.Workspace)/exportPipeline

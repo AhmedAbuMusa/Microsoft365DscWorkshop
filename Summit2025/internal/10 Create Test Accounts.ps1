@@ -1,5 +1,5 @@
 & "$PSScriptRoot\..\..\build.ps1" -Tasks Init
-& "$PSScriptRoot\..\..\lab\11 Test Connection.ps1" -EnvironmentName Dev -DoNotDisconnect
+& "$PSScriptRoot\..\..\lab\AutomatedLab\11 Test Connection.ps1" -EnvironmentName Dev -DoNotDisconnect
 Import-Module -Name NameIT -ErrorAction SilentlyContinue
 
 $appCount = 120

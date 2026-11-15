@@ -8,9 +8,10 @@
 
         - Verifies that the session is elevated and that the repository is a clone of an
           Azure DevOps project.
+        - Runs in a clean PowerShell process without loading profiles.
         - Restores the default module paths, see 'Restore-DefaultModulePath'.
         - Writes the project name into 'source/Global/ProjectSettings.yml'.
-        - Installs 'VSTeam', 'AutomatedLab' and 'Pester' with the pinned versions for all users.
+        - Installs 'VSTeam', 'AutomatedLab', 'Az.Accounts' and 'Pester' with the pinned versions for all users.
         - Installs the Azure modules that AutomatedLab requires.
         - Removes module copies that shadow a newer installation, see 'Resolve-ShadowedModule'.
         - Enables remoting for the lab host.
@@ -20,7 +21,7 @@
         of the cloned repository.
 
     .EXAMPLE
-        & '.\lab\00 Prep.ps1'
+        & '.\lab\AutomatedLab\00 Prep.ps1'
 
         Runs all preparation steps.
 
@@ -38,6 +39,42 @@
 [CmdletBinding()]
 
 param()
+
+$cleanProcessMarker = 'DSC_LAB_PREP_NO_PROFILE'
+if (-not [Environment]::GetEnvironmentVariable($cleanProcessMarker, 'Process'))
+{
+    $powerShellExecutable = if ($PSVersionTable.PSEdition -eq 'Core')
+    {
+        Join-Path -Path $PSHOME -ChildPath 'pwsh.exe'
+    }
+    else
+    {
+        Join-Path -Path $PSHOME -ChildPath 'powershell.exe'
+    }
+
+    if (-not (Test-Path -LiteralPath $powerShellExecutable -PathType Leaf))
+    {
+        throw "Could not find the PowerShell executable at '$powerShellExecutable'."
+    }
+
+    Write-Host 'Starting in a clean PowerShell process without profiles...'
+    $previousCleanProcessMarker = [Environment]::GetEnvironmentVariable($cleanProcessMarker, 'Process')
+    try
+    {
+        [Environment]::SetEnvironmentVariable($cleanProcessMarker, '1', 'Process')
+        & $powerShellExecutable -NoProfile -File $PSCommandPath
+        if ($LASTEXITCODE -ne 0)
+        {
+            throw "The clean PowerShell process exited with code '$LASTEXITCODE'."
+        }
+    }
+    finally
+    {
+        [Environment]::SetEnvironmentVariable($cleanProcessMarker, $previousCleanProcessMarker, 'Process')
+    }
+
+    return
+}
 
 function Restore-DefaultModulePath
 {
@@ -232,17 +269,19 @@ else
     Write-Host 'ok.'
 }
 
-$projectSettings = Get-Content -Path $PSScriptRoot\..\source\Global\ProjectSettings.yml
+$projectSettings = Get-Content -Path $PSScriptRoot\..\..\source\Global\ProjectSettings.yml
 if ($projectSettings -contains 'ProjectName: <ProjectName>')
 {
     Write-Host "Updating the project name in the 'ProjectSettings.yml' file"
     $projectSettings = $projectSettings -replace '<ProjectName>', (Split-Path -Path (git rev-parse --show-toplevel) -Leaf)
-    $projectSettings | Out-File -FilePath $PSScriptRoot\..\source\Global\ProjectSettings.yml
+    $projectSettings | Out-File -FilePath $PSScriptRoot\..\..\source\Global\ProjectSettings.yml
 }
 
 $requiredModules = @{
-    VSTeam       = '7.15.2'
-    AutomatedLab = '5.61.0'
+    VSTeam        = '7.15.2'
+    AutomatedLab  = '5.61.0'
+    # Current Az.Compute, Az.Network, Az.Resources, Az.Websites and Az.Security modules require Az.Accounts 5.5.3.
+    'Az.Accounts' = '5.5.3'
     # AutomatedLabTest fails the discovery of its own tests under Pester 6, so 'Install-Lab' needs Pester 5 next to it.
     Pester       = '5.7.1'
 }

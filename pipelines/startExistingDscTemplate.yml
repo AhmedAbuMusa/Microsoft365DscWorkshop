@@ -1,47 +1,37 @@
 parameters:
-- name: buildEnvironments
-  type: object
-  default: {}
 - name: poolName
   type: string
 
 stages:
-  - ${{ each buildEnvironment in parameters.buildEnvironments }}:
-    - stage: StartConfig${{ buildEnvironment.Name }}
-      displayName: Start DSC Configuration of environment ${{ buildEnvironment.Name }}
-      pool:
-        name: ${{ parameters.poolName }}
-        demands:
-          - buildEnvironment -equals ${{ buildEnvironment.Name }}
-      dependsOn:
-      - Init${{ buildEnvironment.Name }}
+- stage: StartExistingConfiguration
+  displayName: Start existing DSC configuration
+  dependsOn:
+  - GenerateBuildEnvironmentMatrix
+  - Initialize
+  jobs:
+  - job: StartExistingConfiguration
+    displayName: Deploy to $(BuildEnvironment)
+    strategy:
+      matrix: $[ stageDependencies.GenerateBuildEnvironmentMatrix.CreateBuildEnvironmentMatrix.outputs['setMatrix.buildEnvironmentMatrix'] ]
+    pool:
+      name: ${{ parameters.poolName }}
+      demands:
+      - buildEnvironment -equals $(BuildEnvironment)
+    steps:
+    - download: None
 
-      jobs:
-        - deployment: ${{ buildEnvironment.Name }}
-          displayName: Deployment in ${{ buildEnvironment.Name }}
-          environment: ${{ buildEnvironment.Name }}
-          pool:
-            name: ${{ parameters.poolName }}
-            demands:
-              - buildEnvironment -equals ${{ buildEnvironment.Name }}
-          strategy:
-            runOnce:
-              deploy:
-                steps:
-                - download: None
+    - task: PowerShell@2
+      name: displayEnvVariables2
+      displayName: Display Environment Variables
+      inputs:
+        targetType: inline
+        script: |
+          dir -Path env: | Format-Table -Property Name, Value -AutoSize | Out-String | Write-Host
 
-                - task: PowerShell@2
-                  name: displayEnvVariables2
-                  displayName: 'Display Environment Variables'
-                  inputs:
-                    targetType: inline
-                    script: |
-                      dir -Path env: | Format-Table -Property Name, Value -AutoSize | Out-String | Write-Host
-
-                - task: PowerShell@2
-                  name: deploy
-                  displayName: 'Deploy DSC Configuration'
-                  inputs:
-                    filePath: './build.ps1'
-                    arguments: '-Tasks startExistingDscConfiguration'
-                    pwsh: false
+    - task: PowerShell@2
+      name: deploy
+      displayName: Deploy DSC Configuration
+      inputs:
+        filePath: ./build.ps1
+        arguments: -Tasks startExistingDscConfiguration
+        pwsh: false

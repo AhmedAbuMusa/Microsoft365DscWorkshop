@@ -1,39 +1,34 @@
 parameters:
-- name: buildEnvironments
-  type: object
-  default: {}
 - name: poolName
   type: string
 
 stages:
-  - ${{ each buildEnvironment in parameters.buildEnvironments }}:
-    - stage: Init${{ buildEnvironment.Name }}
-      displayName: Initialization of environment ${{ buildEnvironment.Name }}
-      pool:
-        name: ${{ parameters.poolName }}
-        demands:
-          - buildEnvironment -equals ${{ buildEnvironment.Name }}
-      dependsOn: []
+- stage: Initialize
+  displayName: Initialize environments
+  dependsOn: GenerateBuildEnvironmentMatrix
+  jobs:
+  - job: Initialize
+    displayName: Initialize $(BuildEnvironment)
+    strategy:
+      matrix: $[ stageDependencies.GenerateBuildEnvironmentMatrix.CreateBuildEnvironmentMatrix.outputs['setMatrix.buildEnvironmentMatrix'] ]
+    pool:
+      name: ${{ parameters.poolName }}
+      demands:
+      - buildEnvironment -equals $(BuildEnvironment)
+    steps:
+    - task: PowerShell@2
+      name: displayEnvVariables
+      displayName: Display Environment Variables
+      inputs:
+        targetType: inline
+        pwsh: true
+        script: |
+          dir -Path env: | Format-Table -Property Name, Value -AutoSize | Out-String | Write-Host
 
-      jobs:
-        - job: Initialize${{ buildEnvironment.Name }}
-          displayName: Initialize of environment ${{ buildEnvironment.Name }}
-
-          steps:
-
-            - task: PowerShell@2
-              name: displayEnvVariables
-              displayName: Display Environment Variables
-              inputs:
-                targetType: inline
-                pwsh: true
-                script: |
-                  dir -Path env: | Format-Table -Property Name, Value -AutoSize | Out-String | Write-Host
-
-            - task: PowerShell@2
-              name: InitializeModuleFolder
-              displayName: Initialize Program Files Modules
-              inputs:
-                pwsh: true
-                filePath: ./build.ps1
-                arguments: -ResolveDependency -Tasks InitializeModuleFolder #-UseModuleFast
+    - task: PowerShell@2
+      name: InitializeModuleFolder
+      displayName: Initialize Program Files Modules
+      inputs:
+        pwsh: true
+        filePath: ./build.ps1
+        arguments: -ResolveDependency -Tasks InitializeModuleFolder #-UseModuleFast

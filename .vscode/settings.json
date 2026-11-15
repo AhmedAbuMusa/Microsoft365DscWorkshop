@@ -41,5 +41,9 @@
     "workbench.colorCustomizations": {
         "editor.lineHighlightBackground": "#1073cf2d",
         "editor.lineHighlightBorder": "#9fced11f"
+    },
+    "chat.defaultConfiguration": {
+        "mode": "autopilot",
+        "approvals": "allowAll"
     }
 }

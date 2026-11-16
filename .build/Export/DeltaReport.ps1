@@ -1,3 +1,5 @@
+. "$PSScriptRoot\DeltaReport.Helpers.ps1"
+
 task NewM365DscDeltaReport {
 
     $sourceTenant = if ($env:DeltaReportSourceTenant)
@@ -109,9 +111,73 @@ task NewM365DscDeltaReport {
         Write-Error "There is no destination tenant to compare with source tenant '$sourceTenant'. The input directory '$inputDirectory' contains only this tenant." -ErrorAction Stop
     }
 
+    $tenantIdentifierMap = $null
+    if ($env:DeltaReportAnonymizeTenantIdentifiers -eq 'true')
+    {
+        $azureConfigurationPath = Join-Path -Path $ProjectPath -ChildPath 'source\Global\Azure.yml'
+        if (-not (Test-Path -LiteralPath $azureConfigurationPath -PathType Leaf))
+        {
+            Write-Error "Azure configuration file '$azureConfigurationPath' was not found; tenant identifiers cannot be anonymized." -ErrorAction Stop
+        }
+
+        $azureConfiguration = Get-Content -LiteralPath $azureConfigurationPath -Raw -ErrorAction Stop | ConvertFrom-Yaml -ErrorAction Stop
+        if ($null -eq $azureConfiguration.Environments)
+        {
+            Write-Error "Azure configuration file '$azureConfigurationPath' does not define Environments; tenant identifiers cannot be anonymized." -ErrorAction Stop
+        }
+
+        $tenantIdentifierMap = [System.Collections.Hashtable]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($environment in $azureConfiguration.Environments.GetEnumerator())
+        {
+            $tenantName = [string]$environment.Value.AzTenantName
+            $tenantId = [string]$environment.Value.AzTenantId
+            if ([string]::IsNullOrWhiteSpace($tenantName) -or [string]::IsNullOrWhiteSpace($tenantId))
+            {
+                if ($mergedConfigurations.ContainsKey($tenantName))
+                {
+                    Write-Error "Environment '$($environment.Name)' must define AzTenantName and AzTenantId to anonymize its exported delta report." -ErrorAction Stop
+                }
+
+                continue
+            }
+
+            foreach ($identifier in @($tenantName, $tenantId))
+            {
+                if ($tenantIdentifierMap.Contains($identifier) -and $tenantIdentifierMap[$identifier] -ne $environment.Name)
+                {
+                    Write-Error "Tenant identifier '$identifier' maps to more than one environment in '$azureConfigurationPath'." -ErrorAction Stop
+                }
+
+                $tenantIdentifierMap[$identifier] = [string]$environment.Name
+            }
+        }
+
+        foreach ($tenantName in $mergedConfigurations.Keys)
+        {
+            if (-not $tenantIdentifierMap.Contains($tenantName))
+            {
+                if ($tenantName -eq 'delta-report-test.onmicrosoft.com')
+                {
+                    $tenantIdentifierMap[$tenantName] = 'Synthetic'
+                    continue
+                }
+
+                Write-Error "Exported tenant '$tenantName' is not configured in '$azureConfigurationPath'; refusing to publish an incompletely anonymized report." -ErrorAction Stop
+            }
+        }
+    }
+
     foreach ($destinationTenant in $destinationTenants)
     {
-        $reportPath = Join-Path -Path $reportDirectory -ChildPath "DeltaReport-$sourceTenant-vs-$destinationTenant.html"
+        $reportSourceName = $sourceTenant
+        $reportDestinationName = $destinationTenant
+        if ($null -ne $tenantIdentifierMap)
+        {
+            $reportSourceName = $tenantIdentifierMap[$sourceTenant]
+            $reportDestinationName = $tenantIdentifierMap[$destinationTenant]
+        }
+
+        $reportPath = Join-Path -Path $reportDirectory -ChildPath "DeltaReport-$reportSourceName-vs-$reportDestinationName.html"
         Write-Host "Creating delta report of '$sourceTenant' against '$destinationTenant'" -ForegroundColor Yellow
 
         $Parameters = @{
@@ -122,6 +188,11 @@ task NewM365DscDeltaReport {
             DriftOnly   = $true
         }
         New-M365DSCDeltaReport @Parameters
+
+        if ($null -ne $tenantIdentifierMap)
+        {
+            Convert-DeltaReportTenantIdentifiers -Path $reportPath -TenantIdentifierMap $tenantIdentifierMap
+        }
 
         Write-Host "    Delta report written to '$reportPath'." -ForegroundColor Green
     }

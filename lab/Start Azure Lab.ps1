@@ -13,6 +13,23 @@
 #>
 
 $ErrorActionPreference = 'Stop'
+$script:BootstrapPhase = 0
+$script:BootstrapPhaseCount = 14
+
+function Write-BootstrapPhase
+{
+    param
+    (
+        [Parameter(Mandatory)]
+        [string]$Description
+    )
+
+    $script:BootstrapPhase++
+    Write-Host ''
+    Write-Host ('=' * 78) -ForegroundColor DarkCyan
+    Write-Host ('Phase {0:D2}/{1:D2}: {2}' -f $script:BootstrapPhase, $script:BootstrapPhaseCount, $Description) -ForegroundColor Cyan
+    Write-Host ('=' * 78) -ForegroundColor DarkCyan
+}
 
 function ConvertFrom-SecureStringPlainText
 {
@@ -144,6 +161,7 @@ function Wait-AzureDevOpsOperation
     )
 
     $operationUri = "https://dev.azure.com/$script:OrganizationName/_apis/operations/$OperationId`?api-version=7.1"
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     for ($attempt = 0; $attempt -lt 180; $attempt++)
     {
         $operation = Invoke-AzureDevOpsRestMethod -Uri $operationUri -Method Get
@@ -156,6 +174,10 @@ function Wait-AzureDevOpsOperation
             throw "$Description failed in Azure DevOps (status: '$($operation.status)')."
         }
 
+        if ($attempt % 3 -eq 0)
+        {
+            Write-Host "$Description is still in progress (elapsed: $([math]::Floor($stopwatch.Elapsed.TotalSeconds)) seconds)."
+        }
         Start-Sleep -Seconds 10
     }
 
@@ -267,6 +289,7 @@ function Ensure-AzureDevOpsRepository
         throw "Azure DevOps did not return an import request ID for repository '$script:RepositoryName'."
     }
 
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     for ($attempt = 0; $attempt -lt 180; $attempt++)
     {
         $importStatusUri = "$importRequestsUri/$importRequestId`?api-version=7.1"
@@ -281,6 +304,10 @@ function Ensure-AzureDevOpsRepository
             throw "GitHub import into '$script:RepositoryName' failed (status: '$($importStatus.status)')."
         }
 
+        if ($attempt % 3 -eq 0)
+        {
+            Write-Host "GitHub import into '$script:RepositoryName' is still in progress (elapsed: $([math]::Floor($stopwatch.Elapsed.TotalSeconds)) seconds)."
+        }
         Start-Sleep -Seconds 10
     }
 
@@ -345,8 +372,17 @@ function Invoke-LabScript
         throw "Required lab script '$Path' was not found."
     }
 
-    Write-Host "Running '$([IO.Path]::GetFileName($Path))'."
-    & $Path @Arguments
+    Write-Host "Running file: '$Path'." -ForegroundColor Yellow
+    try
+    {
+        & $Path @Arguments
+        Write-Host "Completed file: '$Path'." -ForegroundColor Green
+    }
+    catch
+    {
+        Write-Host "Failed file: '$Path'." -ForegroundColor Red
+        throw
+    }
 }
 
 function Invoke-LabScriptWithGitAuthorization
@@ -587,6 +623,7 @@ function Initialize-TargetDependencies
     $targetModules = Join-Path -Path $TargetRoot -ChildPath 'output\RequiredModules'
     if (-not (Test-Path -LiteralPath $targetModules))
     {
+        Write-Host "Copying restored dependencies into '$targetModules'."
         $null = New-Item -ItemType Directory -Path $targetModules -Force
         Copy-Item -Path (Join-Path -Path $sourceModules -ChildPath '*') -Destination $targetModules -Recurse -Force
     }
@@ -594,11 +631,17 @@ function Initialize-TargetDependencies
     {
         $pwshCommand = Get-Command -Name pwsh -ErrorAction Stop
         $buildScript = Join-Path -Path $TargetRoot -ChildPath 'build.ps1'
+        Write-Host "Running file: '$buildScript' -UsePSResourceGet -ResolveDependency."
         & $pwshCommand.Source -NoLogo -NoProfile -File $buildScript -UsePSResourceGet -ResolveDependency
         if ($LASTEXITCODE -ne 0)
         {
             throw "Dependency restore for the imported repository failed with exit code $LASTEXITCODE."
         }
+        Write-Host "Completed dependency restore for '$TargetRoot'." -ForegroundColor Green
+    }
+    else
+    {
+        Write-Host "Using dependencies already present in '$targetModules'."
     }
 }
 
@@ -638,8 +681,8 @@ if (-not (Test-Path -LiteralPath $sourceSettingsPath -PathType Leaf) -or
     throw 'Both source/Global/ProjectSettings.yml and source/Global/Azure.yml are required.'
 }
 
-$confirmation = Read-Host 'This will import the GitHub repository, create Azure DevOps resources, register tenant apps, and provision Azure VMs. Type YES to continue'
-if ($confirmation -cne 'YES')
+$confirmation = (Read-Host 'This will import the GitHub repository, create Azure DevOps resources, register tenant apps, and provision Azure VMs. Continue? [Y/n]').Trim()
+if ($confirmation -and $confirmation -notmatch '^(y|yes)$')
 {
     Write-Host 'Azure lab setup cancelled.'
     return
@@ -653,12 +696,22 @@ if (-not $pwshCommand)
 
 Remove-StaleMicrosoft365DscVersions -RepositoryRoot $repositoryRoot
 $sourceBuildScript = Join-Path -Path $repositoryRoot -ChildPath 'build.ps1'
-Write-Host 'Restoring the source checkout dependencies with PSResourceGet.'
-& $pwshCommand.Source -NoLogo -NoProfile -File $sourceBuildScript -UsePSResourceGet -ResolveDependency
-if ($LASTEXITCODE -ne 0)
+Write-BootstrapPhase -Description 'Restore dependencies for the source checkout'
+Write-Host "Running file: '$sourceBuildScript' -UsePSResourceGet -ResolveDependency."
+try
 {
-    throw "Source dependency restore failed with exit code $LASTEXITCODE."
+    & $pwshCommand.Source -NoLogo -NoProfile -File $sourceBuildScript -UsePSResourceGet -ResolveDependency
+    if ($LASTEXITCODE -ne 0)
+    {
+        throw "Source dependency restore failed with exit code $LASTEXITCODE."
+    }
 }
+catch
+{
+    Write-Host "Bootstrap failed during phase $($script:BootstrapPhase)/$($script:BootstrapPhaseCount): $($_.Exception.Message)" -ForegroundColor Red
+    throw
+}
+Write-Host 'Completed source checkout dependency restore.' -ForegroundColor Green
 
 $sourceRequiredModules = Join-Path -Path $repositoryRoot -ChildPath 'output\RequiredModules'
 if ($env:PSModulePath -notlike "*$sourceRequiredModules*")
@@ -668,6 +721,7 @@ if ($env:PSModulePath -notlike "*$sourceRequiredModules*")
 Import-Module -Name Datum -ErrorAction Stop
 Import-Module -Name Datum.ProtectedData -ErrorAction Stop
 
+Write-BootstrapPhase -Description 'Read and validate configuration; protect local credentials'
 $sourceDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $repositoryRoot -ChildPath 'source\Datum.yml')
 $sourceProjectSettings = $sourceDatum.Global.ProjectSettings
 $script:OrganizationName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'OrganizationName' -Path 'source/Global/ProjectSettings.yml: OrganizationName')
@@ -772,10 +826,14 @@ if (Test-Path -LiteralPath $resolvedLocalPath)
 $pwshCommand = Get-Command -Name pwsh -ErrorAction Stop
 try
 {
+    Write-BootstrapPhase -Description 'Ensure the Azure DevOps project exists'
     Ensure-AzureDevOpsProject
+
+    Write-BootstrapPhase -Description 'Import the GitHub repository into Azure DevOps'
     Ensure-AzureDevOpsRepository
     $script:AuthorizationHeader = $null
 
+    Write-BootstrapPhase -Description 'Clone and configure the Azure DevOps checkout'
     $newClone = $false
     if (-not (Test-Path -LiteralPath $resolvedLocalPath))
     {
@@ -818,6 +876,7 @@ try
     Push-Location -LiteralPath $resolvedLocalPath
     try
     {
+        Write-BootstrapPhase -Description 'Verify the imported Azure script versions'
         foreach ($scriptAndParameter in @(
                 @{ Path = 'lab\Azure\00 Prep.ps1'; Parameter = 'ProjectName' }
                 @{ Path = 'lab\Azure\30 Create Agent VMs.ps1'; Parameter = 'BuildAgentPassword' }
@@ -825,12 +884,20 @@ try
             ))
         {
             $scriptPath = Join-Path -Path $resolvedLocalPath -ChildPath $scriptAndParameter.Path
+            if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf))
+            {
+                throw "Required imported script '$($scriptAndParameter.Path)' was not found in the Azure DevOps clone. The clone likely contains an older GitHub import with the legacy 'lab\' layout. Publish the current Azure scripts to GitHub, refresh the Azure DevOps repository from that version, then remove this clone or set LocalPath to an empty directory before retrying."
+            }
+
             $tokens = $null
             $parseErrors = $null
             $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors)
             if ($parseErrors)
             {
-                throw "Imported script '$($scriptAndParameter.Path)' has PowerShell syntax errors."
+                $parseDetails = ($parseErrors | ForEach-Object {
+                        "line $($_.Extent.StartLineNumber): $($_.Message)"
+                    }) -join '; '
+                throw "Imported script '$($scriptAndParameter.Path)' has PowerShell parse errors: $parseDetails"
             }
 
             $parameterNames = @($scriptAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
@@ -840,17 +907,23 @@ try
             }
         }
 
+        Write-BootstrapPhase -Description 'Prepare the Azure lab machine'
         $targetProjectSettingsPath = Join-Path -Path $resolvedLocalPath -ChildPath 'source\Global\ProjectSettings.yml'
         Invoke-LabScript -Path (Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\00 Prep.ps1') `
             -Arguments @{ ProjectName = $script:ProjectName }
 
+        Write-BootstrapPhase -Description 'Restore dependencies for the imported checkout'
         Initialize-TargetDependencies -SourceRoot $repositoryRoot -TargetRoot $resolvedLocalPath
+
+        Write-BootstrapPhase -Description 'Initialize the imported repository build'
         $targetBuildScript = Join-Path -Path $resolvedLocalPath -ChildPath 'build.ps1'
+        Write-Host "Running file: '$targetBuildScript' -Tasks init."
         & $targetBuildScript -Tasks init
         if (-not $?)
         {
             throw 'The imported repository build initialization task failed.'
         }
+        Write-Host 'Completed imported repository build initialization.' -ForegroundColor Green
 
         $targetDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $resolvedLocalPath -ChildPath 'source\Datum.yml')
         $targetProjectSettings = $targetDatum.Global.ProjectSettings
@@ -886,15 +959,19 @@ try
         $script:GitAuthorizationHeader = "AUTHORIZATION: Basic $([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$targetPat")))"
         $targetPat = $null
 
+        Write-BootstrapPhase -Description 'Register tenant applications and store credentials'
         $appRegistrationScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\10 Setup App Registrations.ps1'
         Invoke-LabScript -Path $appRegistrationScript -Arguments @{}
 
+        Write-BootstrapPhase -Description 'Test tenant application connections'
         $connectionTestScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\11 Test Connection.ps1'
         Invoke-LabScript -Path $connectionTestScript -Arguments @{ EnvironmentName = $targetEnvironmentNames }
 
+        Write-BootstrapPhase -Description 'Configure Azure DevOps environments, agent pool, and pipelines'
         $projectSetupScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\20 Configure AzDo Project.ps1'
         Invoke-LabScriptWithGitAuthorization -Path $projectSetupScript -Arguments @{}
 
+        Write-BootstrapPhase -Description 'Install Bicep if needed and create Azure agent VMs'
         $bicepCommand = Get-Command -Name bicep -ErrorAction SilentlyContinue
         if (-not $bicepCommand)
         {
@@ -905,6 +982,7 @@ try
             }
 
             Write-Host 'Installing the Bicep CLI with winget.'
+            Write-Host "Running command: '$($wingetCommand.Source) install --exact --id Microsoft.Bicep'."
             & $wingetCommand.Source install --exact --id Microsoft.Bicep --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity
             if ($LASTEXITCODE -ne 0)
             {
@@ -920,6 +998,10 @@ try
                 throw 'Bicep installed but was not found on PATH. Open a new PowerShell session and rerun the VM setup stage.'
             }
         }
+        else
+        {
+            Write-Host "Using Bicep CLI at '$($bicepCommand.Source)'."
+        }
 
         $vmCreationScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\30 Create Agent VMs.ps1'
         Invoke-LabScript -Path $vmCreationScript -Arguments @{
@@ -929,6 +1011,7 @@ try
         $secureBuildAgentPassword.Dispose()
         $secureBuildAgentPassword = $null
 
+        Write-BootstrapPhase -Description 'Configure Azure DevOps agents on the new VMs'
         $agentSetupScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\31 Agent Setup.ps1'
         Invoke-LabScriptWithGitAuthorization -Path $agentSetupScript -Arguments @{ EnvironmentName = $targetEnvironmentNames }
         $script:GitAuthorizationHeader = $null
@@ -940,6 +1023,11 @@ try
 
     Write-Host "Azure lab bootstrap completed for '$script:OrganizationName/$script:ProjectName'." -ForegroundColor Green
     Write-Host 'No DSC push pipeline was queued. Review and run tenant-changing pipelines explicitly.'
+}
+catch
+{
+    Write-Host "Bootstrap failed during phase $($script:BootstrapPhase)/$($script:BootstrapPhaseCount): $($_.Exception.Message)" -ForegroundColor Red
+    throw
 }
 finally
 {

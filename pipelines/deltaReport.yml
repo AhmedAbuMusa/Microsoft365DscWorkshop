@@ -9,6 +9,10 @@ parameters:
     displayName: Create a synthetic destination tenant (test only)
     type: boolean
     default: false
+  - name: anonymizeTenantIdentifiers
+    displayName: Replace tenant identifiers with environment names
+    type: boolean
+    default: false
 
 variables:
   buildFolderName: output
@@ -84,6 +88,194 @@ steps:
             throw "No configuration files were copied to synthetic tenant folder '$syntheticFolder'."
           }
 
+          $repositoryDirectory = if ($env:BUILD_SOURCESDIRECTORY) { $env:BUILD_SOURCESDIRECTORY } else { (Get-Location).Path }
+          $exportConfigurationPath = Join-Path -Path $repositoryDirectory -ChildPath 'export\ExportConfiguration.yml'
+          if (-not (Test-Path -LiteralPath $exportConfigurationPath -PathType Leaf)) {
+            throw "Export configuration file '$exportConfigurationPath' was not found."
+          }
+
+          $inDscResources = $false
+          $exportedResourceNames = @(
+            foreach ($line in (Get-Content -LiteralPath $exportConfigurationPath -ErrorAction Stop)) {
+              if (-not $inDscResources) {
+                if ($line -match '^DscResources:\s*$') {
+                  $inDscResources = $true
+                }
+                continue
+              }
+              if ([string]::IsNullOrWhiteSpace($line)) {
+                continue
+              }
+              if ($line -match '^\s*-\s*(?<name>[A-Za-z0-9_]+)\s*$') {
+                $Matches['name']
+                continue
+              }
+              break
+            }
+          )
+          if ($exportedResourceNames.Count -eq 0) {
+            throw "No resources were found under DscResources in '$exportConfigurationPath'."
+          }
+
+          $marker = [guid]::NewGuid().ToString('N').Substring(0, 8)
+          $syntheticDifferenceCount = 0
+          $modifiedResources = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+          $stringAssignmentPattern = '(?:''(?:''''|[^''])*''|"(?:`"|[^"])*"|\[System\.String\]\$null|\$null)'
+          function Set-SyntheticExportProperty {
+            param (
+              [Parameter(Mandatory = $true)]
+              [string]$ResourceName,
+              [Parameter(Mandatory = $true)]
+              [string]$PropertyName,
+              [Parameter(Mandatory = $true)]
+              [string]$ValuePattern,
+              [Parameter(Mandatory = $true)]
+              [scriptblock]$Transform
+            )
+
+            $configurations = @($copiedConfigurations | Where-Object { $_.Directory.Name -eq $ResourceName } | Sort-Object -Property FullName)
+            foreach ($configuration in $configurations) {
+              $content = Get-Content -LiteralPath $configuration.FullName -Raw -ErrorAction Stop
+              $propertyPattern = "(?im)^(?<prefix>[ \t]*$([regex]::Escape($PropertyName))[ \t]*=[ \t]*)(?<value>$ValuePattern)(?<suffix>[ \t]*;?[ \t]*(?:#.*)?\r?)$"
+              $assignment = [regex]::Match($content, $propertyPattern)
+              if (-not $assignment.Success) {
+                continue
+              }
+
+              $currentValue = $assignment.Groups['value'].Value
+              $newValue = [string](& $Transform $currentValue)
+              $updatedContent = $content.Remove($assignment.Groups['value'].Index, $assignment.Groups['value'].Length).Insert($assignment.Groups['value'].Index, $newValue)
+              Set-Content -LiteralPath $configuration.FullName -Value $updatedContent -NoNewline -Encoding utf8 -ErrorAction Stop
+              Write-Host "Changed the copied $ResourceName.$PropertyName value in '$($configuration.FullName)'."
+              $null = $modifiedResources.Add($ResourceName)
+              return $true
+            }
+
+            Write-Warning "No exported $ResourceName.$PropertyName assignment was found for '$sourceTenant'; another exported property will be used for synthetic drift."
+            return $false
+          }
+
+          function Add-SyntheticResourcePair {
+            param (
+              [Parameter(Mandatory = $true)]
+              [string]$ResourceName,
+              [Parameter(Mandatory = $true)]
+              [string]$SourceBlock,
+              [Parameter(Mandatory = $true)]
+              [string]$DestinationBlock
+            )
+
+            foreach ($tenant in @(
+              @{ Path = $sourceFolders[0]; Block = $SourceBlock }
+              @{ Path = $syntheticFolder; Block = $DestinationBlock }
+            )) {
+              $resourceFolder = Join-Path -Path $tenant.Path -ChildPath $ResourceName
+              New-Item -Path $resourceFolder -ItemType Directory -Force -ErrorAction Stop | Out-Null
+              $configurationFile = Get-ChildItem -LiteralPath $resourceFolder -Filter '*.ps1' -File -ErrorAction Stop |
+                Sort-Object -Property FullName |
+                Select-Object -First 1
+              if ($configurationFile) {
+                $content = Get-Content -LiteralPath $configurationFile.FullName -Raw -ErrorAction Stop
+                $tokens = $null
+                $parseErrors = $null
+                $ast = [System.Management.Automation.Language.Parser]::ParseInput($content, [ref]$tokens, [ref]$parseErrors)
+                $node = $ast.Find({
+                  param ($item)
+                  $item -is [System.Management.Automation.Language.DynamicKeywordStatementAst] -and
+                    $item.CommandElements[0].Value -eq 'Node'
+                }, $true)
+                $nodeBlock = if ($node) {
+                  @($node.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.ScriptBlockExpressionAst] } |
+                    Select-Object -First 1)[0].ScriptBlock
+                }
+
+                if ($nodeBlock) {
+                  $closeBraceIndex = $nodeBlock.Extent.EndOffset - 1
+                  $insertIndex = $content.LastIndexOf("`n", $closeBraceIndex) + 1
+                  $updatedContent = $content.Insert($insertIndex, $tenant.Block + [Environment]::NewLine)
+                  Set-Content -LiteralPath $configurationFile.FullName -Value $updatedContent -NoNewline -Encoding utf8 -ErrorAction Stop
+                } elseif ([string]::IsNullOrWhiteSpace($content)) {
+                  $configurationName = "SyntheticDeltaReport_$ResourceName`_$marker"
+                  $configurationContent = @(
+                    "Configuration $configurationName"
+                    '{'
+                    '    Import-DscResource -ModuleName Microsoft365DSC'
+                    '    Node localhost'
+                    '    {'
+                    $tenant.Block
+                    '    }'
+                    '}'
+                  ) -join [Environment]::NewLine
+                  Set-Content -LiteralPath $configurationFile.FullName -Value $configurationContent -Encoding utf8 -ErrorAction Stop
+                } else {
+                  throw "Could not locate a Node localhost block in '$($configurationFile.FullName)' to add synthetic $ResourceName drift."
+                }
+              } else {
+                $configurationPath = Join-Path -Path $resourceFolder -ChildPath 'M365TenantConfig.ps1'
+                $configurationName = "SyntheticDeltaReport_$ResourceName`_$marker"
+                $configurationContent = @(
+                  "Configuration $configurationName"
+                  '{'
+                  '    Import-DscResource -ModuleName Microsoft365DSC'
+                  '    Node localhost'
+                  '    {'
+                  $tenant.Block
+                  '    }'
+                  '}'
+                ) -join [Environment]::NewLine
+                Set-Content -LiteralPath $configurationPath -Value $configurationContent -Encoding utf8 -ErrorAction Stop
+              }
+            }
+
+            $null = $modifiedResources.Add($ResourceName)
+            Write-Host "Added matching synthetic $ResourceName instances to the copied source and destination exports."
+          }
+
+          function Set-SyntheticPairedProperty {
+            param (
+              [Parameter(Mandatory = $true)]
+              [string]$ResourceName,
+              [Parameter(Mandatory = $true)]
+              [string]$PropertyName,
+              [Parameter(Mandatory = $true)]
+              [string]$SourceValue,
+              [Parameter(Mandatory = $true)]
+              [string]$DestinationValue
+            )
+
+            $anchorPattern = '(?im)^(?<indent>[ \t]*)IsSingleInstance[ \t]*=[ \t]*[''"]Yes[''"][ \t]*;?[ \t]*(?:#.*)?\r?$'
+            foreach ($tenant in @(
+              @{ Path = $sourceFolders[0]; Value = $SourceValue }
+              @{ Path = $syntheticFolder; Value = $DestinationValue }
+            )) {
+              $resourceFolder = Join-Path -Path $tenant.Path -ChildPath $ResourceName
+              $configurationFile = Get-ChildItem -LiteralPath $resourceFolder -Filter '*.ps1' -File -ErrorAction Stop |
+                Sort-Object -Property FullName |
+                Select-Object -First 1
+              if (-not $configurationFile) {
+                throw "No copied configuration file was found for '$ResourceName' under '$resourceFolder'."
+              }
+
+              $content = Get-Content -LiteralPath $configurationFile.FullName -Raw -ErrorAction Stop
+              $anchor = [regex]::Match($content, $anchorPattern)
+              if (-not $anchor.Success) {
+                throw "No IsSingleInstance = 'Yes' assignment was found for '$ResourceName' in '$($configurationFile.FullName)'."
+              }
+
+              $lineEnd = $content.IndexOf("`n", $anchor.Index + $anchor.Length)
+              $insertIndex = if ($lineEnd -ge 0) { $lineEnd + 1 } else { $content.Length }
+              $propertyLine = "$($anchor.Groups['indent'].Value)    $PropertyName = $($tenant.Value)$([Environment]::NewLine)"
+              if ($lineEnd -lt 0) {
+                $propertyLine = [Environment]::NewLine + $propertyLine
+              }
+              $updatedContent = $content.Insert($insertIndex, $propertyLine)
+              Set-Content -LiteralPath $configurationFile.FullName -Value $updatedContent -NoNewline -Encoding utf8 -ErrorAction Stop
+              Write-Host "Set the copied $ResourceName.$PropertyName value to '$($tenant.Value)' in '$($configurationFile.FullName)'."
+            }
+
+            $null = $modifiedResources.Add($ResourceName)
+          }
+
           $modifiedConfiguration = $null
           $modifiedProperty = $null
           $authMethodConfigurations = @($copiedConfigurations | Where-Object { $_.Directory.Name -eq 'AADAuthenticationMethodPolicyTemporary' } | Sort-Object -Property FullName)
@@ -108,34 +300,194 @@ steps:
             break
           }
 
-          if (-not $modifiedConfiguration) {
-            throw "No exported AADAuthenticationMethodPolicyTemporary DefaultLifetimeInMinutes property was found for '$sourceTenant'; cannot create the requested synthetic authentication-method drift."
+          if ($modifiedConfiguration) {
+            Write-Host "Changed '$modifiedProperty' in '$modifiedConfiguration'."
+            $syntheticDifferenceCount++
+            $null = $modifiedResources.Add('AADAuthenticationMethodPolicyTemporary')
+          } else {
+            Write-Warning "No exported AADAuthenticationMethodPolicyTemporary DefaultLifetimeInMinutes property was found for '$sourceTenant'; another exported property will be used for synthetic drift."
           }
 
-          Write-Host "Changed '$modifiedProperty' in '$modifiedConfiguration'."
-          $securityDefaultsConfigurations = @($copiedConfigurations | Where-Object { $_.Directory.Name -eq 'AADSecurityDefaults' } | Sort-Object -Property FullName)
-          $securityDescriptionPattern = '(?im)^(?<prefix>[ \t]*Description[ \t]*=[ \t]*)(?<value>''(?:''''|[^''])*''|"(?:`"|[^"])*"|\[System\.String\]\$null|\$null)(?<suffix>[ \t]*(?:#.*)?\r?)$'
-          $modifiedSecurityDescription = $false
-          foreach ($configuration in $securityDefaultsConfigurations) {
-            $content = Get-Content -LiteralPath $configuration.FullName -Raw -ErrorAction Stop
-            $assignment = [regex]::Match($content, $securityDescriptionPattern)
-            if (-not $assignment.Success) {
+          $booleanAssignmentPattern = '\$(?:true|false)'
+          if (Set-SyntheticExportProperty -ResourceName 'AADConditionalAccessPolicy' -PropertyName 'State' -ValuePattern $stringAssignmentPattern -Transform {
+            param ($value)
+            if ($value -match '(?i)^[''"]disabled[''"]$') { "'enabled'" } else { "'disabled'" }
+          }) {
+            $syntheticDifferenceCount++
+          }
+          if (Set-SyntheticExportProperty -ResourceName 'AADAuthenticationMethodPolicy' -PropertyName 'ReconfirmationInDays' -ValuePattern '\d+' -Transform {
+            param ($value)
+            [string]([int]$value + 1)
+          }) { $syntheticDifferenceCount++ }
+          if (Set-SyntheticExportProperty -ResourceName 'AADAuthenticationMethodPolicyExternal' -PropertyName 'State' -ValuePattern $stringAssignmentPattern -Transform {
+            param ($value)
+            if ($value -match '(?i)^[''"]disabled[''"]$') { "'enabled'" } else { "'disabled'" }
+          }) { $syntheticDifferenceCount++ }
+          if (Set-SyntheticExportProperty -ResourceName 'AADSecurityDefaults' -PropertyName 'IsEnabled' -ValuePattern $booleanAssignmentPattern -Transform {
+            param ($value)
+            if ($value -match '(?i)\$true') { '$False' } else { '$True' }
+          }) { $syntheticDifferenceCount++ }
+          if (Set-SyntheticExportProperty -ResourceName 'AADApplication' -PropertyName 'Description' -ValuePattern $stringAssignmentPattern -Transform {
+            param ($value)
+            "'DeltaReport synthetic test $marker'"
+          }) { $syntheticDifferenceCount++ }
+          if (Set-SyntheticExportProperty -ResourceName 'AADApplication' -PropertyName 'Notes' -ValuePattern $stringAssignmentPattern -Transform {
+            param ($value)
+            "'DeltaReport synthetic test notes $marker'"
+          }) { $syntheticDifferenceCount++ }
+          if (Set-SyntheticExportProperty -ResourceName 'AADGroupsSettings' -PropertyName 'UsageGuidelinesUrl' -ValuePattern $stringAssignmentPattern -Transform {
+            param ($value)
+            "'https://delta-report-test.invalid/groups/$marker'"
+          }) { $syntheticDifferenceCount++ }
+          if (Set-SyntheticExportProperty -ResourceName 'AADGroupsSettings' -PropertyName 'GuestUsageGuidelinesUrl' -ValuePattern $stringAssignmentPattern -Transform {
+            param ($value)
+            "'https://delta-report-test.invalid/guests/$marker'"
+          }) { $syntheticDifferenceCount++ }
+          if (Set-SyntheticExportProperty -ResourceName 'AADAuthenticationStrengthPolicy' -PropertyName 'Description' -ValuePattern $stringAssignmentPattern -Transform {
+            param ($value)
+            "'DeltaReport synthetic authentication strength $marker'"
+          }) { $syntheticDifferenceCount++ }
+          if (Set-SyntheticExportProperty -ResourceName 'AADAuthenticationContextClassReference' -PropertyName 'IsAvailable' -ValuePattern $booleanAssignmentPattern -Transform {
+            param ($value)
+            if ($value -match '(?i)\$true') { '$False' } else { '$True' }
+          }) { $syntheticDifferenceCount++ }
+
+          $ensurePattern = '(?im)^(?<prefix>[ \t]*Ensure[ \t]*=[ \t]*)(?<value>[''"]Present[''"])(?<suffix>[ \t]*;?[ \t]*(?:#.*)?\r?)$'
+          $scalarAssignmentPattern = '(?im)^(?<prefix>[ \t]*(?<property>[A-Za-z][A-Za-z0-9_]*)[ \t]*=[ \t]*)(?<value>\$(?:true|false)|\d+|' + $stringAssignmentPattern + ')(?<suffix>[ \t]*;?[ \t]*(?:#.*)?\r?)$'
+          foreach ($resourceName in $exportedResourceNames) {
+            if ($modifiedResources.Contains($resourceName)) {
               continue
             }
 
-            $description = "'DeltaReport synthetic test $([guid]::NewGuid().ToString('N').Substring(0, 8))'"
-            $updatedContent = $content.Remove($assignment.Groups['value'].Index, $assignment.Groups['value'].Length).Insert($assignment.Groups['value'].Index, $description)
-            Set-Content -LiteralPath $configuration.FullName -Value $updatedContent -NoNewline -Encoding utf8 -ErrorAction Stop
-            Write-Host "Changed the copied AADSecurityDefaults Description in '$($configuration.FullName)'."
-            $modifiedSecurityDescription = $true
-            break
+            $resourceConfigurations = @($copiedConfigurations | Where-Object { $_.Directory.Name -eq $resourceName } | Sort-Object -Property FullName)
+            $modifiedEnsure = $false
+            foreach ($configuration in $resourceConfigurations) {
+              $content = Get-Content -LiteralPath $configuration.FullName -Raw -ErrorAction Stop
+              $assignment = [regex]::Match($content, $ensurePattern)
+              if ($assignment.Success) {
+                $quote = $assignment.Groups['value'].Value.Substring(0, 1)
+                $newValue = "${quote}Absent${quote}"
+                $updatedContent = $content.Remove($assignment.Groups['value'].Index, $assignment.Groups['value'].Length).Insert($assignment.Groups['value'].Index, $newValue)
+                Set-Content -LiteralPath $configuration.FullName -Value $updatedContent -NoNewline -Encoding utf8 -ErrorAction Stop
+                $null = $modifiedResources.Add($resourceName)
+                $syntheticDifferenceCount++
+                Write-Host "Changed the copied $resourceName.Ensure value to Absent in '$($configuration.FullName)'."
+                $modifiedEnsure = $true
+                break
+              }
+
+              $scalarAssignments = [regex]::Matches($content, $scalarAssignmentPattern)
+              foreach ($scalarAssignment in $scalarAssignments) {
+                $propertyName = $scalarAssignment.Groups['property'].Value
+                if ($propertyName -match '^(?i:Ensure|IsSingleInstance|ApplicationId|TenantId|CertificateThumbprint|Id|ObjectId|PolicyId|AccessToken)$') {
+                  continue
+                }
+
+                $currentValue = $scalarAssignment.Groups['value'].Value
+                if ($currentValue -match '^\$(?:true|false)$') {
+                  $newValue = if ($currentValue -match '(?i)\$true') { '$False' } else { '$True' }
+                } elseif ($currentValue -match '^\d+$') {
+                  $number = [long]$currentValue
+                  $newValue = if ($number -lt [long]::MaxValue) { [string]($number + 1) } else { [string]($number - 1) }
+                } elseif ($currentValue.StartsWith('"')) {
+                  $newValue = "`"DeltaReport synthetic test $marker`""
+                } else {
+                  $newValue = "'DeltaReport synthetic test $marker'"
+                }
+
+                $updatedContent = $content.Remove($scalarAssignment.Groups['value'].Index, $scalarAssignment.Groups['value'].Length).Insert($scalarAssignment.Groups['value'].Index, $newValue)
+                Set-Content -LiteralPath $configuration.FullName -Value $updatedContent -NoNewline -Encoding utf8 -ErrorAction Stop
+                $null = $modifiedResources.Add($resourceName)
+                $syntheticDifferenceCount++
+                Write-Host "Changed the copied $resourceName.$propertyName value in '$($configuration.FullName)' because no Ensure assignment was available."
+                $modifiedEnsure = $true
+                break
+              }
+              if ($modifiedEnsure) {
+                break
+              }
+            }
+            if (-not $modifiedEnsure) {
+              switch ($resourceName) {
+                'AADAuthenticationMethodPolicy' {
+                  Set-SyntheticPairedProperty -ResourceName $resourceName -PropertyName 'ReconfirmationInDays' -SourceValue '30' -DestinationValue '31'
+                  $syntheticDifferenceCount++
+                  $modifiedEnsure = $true
+                }
+                'AADAuthenticationMethodPolicyExternal' {
+                  $displayName = "DeltaReportExternal-$marker"
+                  $sourceBlock = @(
+                    "        AADAuthenticationMethodPolicyExternal '$displayName'"
+                    '        {'
+                    "            DisplayName = '$displayName'"
+                    "            State = 'enabled'"
+                    "            Ensure = 'Present'"
+                    '        }'
+                  ) -join [Environment]::NewLine
+                  $destinationBlock = $sourceBlock.Replace("State = 'enabled'", "State = 'disabled'")
+                  Add-SyntheticResourcePair -ResourceName $resourceName -SourceBlock $sourceBlock -DestinationBlock $destinationBlock
+                  $syntheticDifferenceCount++
+                  $modifiedEnsure = $true
+                }
+                'AADAuthenticationStrengthPolicy' {
+                  $displayName = "DeltaTest-$marker"
+                  $sourceBlock = @(
+                    "        AADAuthenticationStrengthPolicy '$displayName'"
+                    '        {'
+                    "            DisplayName = '$displayName'"
+                    "            Description = 'Source synthetic strength $marker'"
+                    "            Ensure = 'Present'"
+                    '        }'
+                  ) -join [Environment]::NewLine
+                  $destinationBlock = $sourceBlock.Replace("Description = 'Source synthetic strength $marker'", "Description = 'Destination synthetic strength $marker'")
+                  Add-SyntheticResourcePair -ResourceName $resourceName -SourceBlock $sourceBlock -DestinationBlock $destinationBlock
+                  $syntheticDifferenceCount++
+                  $modifiedEnsure = $true
+                }
+                'AADAuthenticationContextClassReference' {
+                  $sourceConfigurationText = (Get-ChildItem -LiteralPath $sourceFolders[0] -Filter '*.ps1' -File -Recurse -ErrorAction Stop |
+                    ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw -ErrorAction Stop }) -join [Environment]::NewLine
+                  $contextId = $null
+                  foreach ($contextNumber in 1..25) {
+                    $candidateId = "c$contextNumber"
+                    $idPattern = '(?im)\bId\s*=\s*[''"]' + [regex]::Escape($candidateId) + '[''"]'
+                    if ($sourceConfigurationText -notmatch $idPattern) {
+                      $contextId = $candidateId
+                      break
+                    }
+                  }
+                  if (-not $contextId) {
+                    throw "No unused authentication-context ID is available for synthetic drift in '$sourceTenant'."
+                  }
+
+                  $displayName = "DeltaCtx-$marker"
+                  $sourceBlock = @(
+                    "        AADAuthenticationContextClassReference '$contextId'"
+                    '        {'
+                    "            Id = '$contextId'"
+                    "            DisplayName = '$displayName'"
+                    "            IsAvailable = `$false"
+                    "            Ensure = 'Present'"
+                    '        }'
+                  ) -join [Environment]::NewLine
+                  $destinationBlock = $sourceBlock.Replace('IsAvailable = $false', 'IsAvailable = $true')
+                  Add-SyntheticResourcePair -ResourceName $resourceName -SourceBlock $sourceBlock -DestinationBlock $destinationBlock
+                  $syntheticDifferenceCount++
+                  $modifiedEnsure = $true
+                }
+              }
+            }
+            if (-not $modifiedEnsure) {
+              Write-Warning "No writable scalar export assignment was found for '$resourceName' in '$sourceTenant'; no synthetic drift was added for this resource."
+            }
           }
 
-          if (-not $modifiedSecurityDescription) {
-            throw "No exported AADSecurityDefaults Description was found for '$sourceTenant'; cannot create the requested synthetic metadata drift."
+          $resourcesWithoutDrift = @($exportedResourceNames | Where-Object { -not $modifiedResources.Contains($_) })
+          if ($resourcesWithoutDrift.Count -gt 0) {
+            throw "Could not create synthetic drift for all configured resources in '$sourceTenant'. No writable export assignment was found for: $($resourcesWithoutDrift -join ', ')."
           }
 
-          Write-Host "Created synthetic destination '$syntheticTenant' with $($copiedConfigurations.Count) configuration file(s), a randomized TAP lifetime, and a synthetic Security Defaults description difference."
+          Write-Host "Created synthetic destination '$syntheticTenant' with drift for all $($exportedResourceNames.Count) resources from ExportConfiguration.yml, using $syntheticDifferenceCount copied PS1 property differences."
           Write-Host 'This is a test-only copy; no tenant, subscription, or VM agent was created.'
       env:
         DeltaReportInputDirectory: $(Pipeline.Workspace)/exportPipeline

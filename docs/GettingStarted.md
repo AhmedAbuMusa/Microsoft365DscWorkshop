@@ -361,6 +361,13 @@ tenant folder name in the export, and the export must contain that source tenant
 and at least one destination tenant. Change the parameter when using a different
 source tenant or after updating the Dev tenant in `source/Global/Azure.yml`.
 
+When **Replace tenant identifiers with environment names** is enabled, the
+report's HTML content and filenames replace configured tenant domains and
+tenant GUIDs with their environment keys from `source/Global/Azure.yml` (for
+example, `Dev` and `Test`). The pipeline fails rather than publishing a report
+if an exported tenant cannot be matched to that configuration. This option is
+disabled by default.
+
 To test the comparison workflow when only one real tenant is available, enable
 **Create a synthetic destination tenant (test only)** when queuing the run.
 This copies the selected source tenant's exported configuration files to a

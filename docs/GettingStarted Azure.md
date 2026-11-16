@@ -16,13 +16,15 @@ The VM agents run the workshop pipelines and apply the DSC configuration to thei
 
 `lab/Start Azure Lab.ps1` is parameterless. It reads the project, repository, clone, Git author, PAT, and build-agent settings from `source/Global/ProjectSettings.yml`, and reads tenant environments from `source/Global/Azure.yml`. The bootstrapper imports the public GitHub repository into Azure DevOps, clones it locally, restores dependencies with PSResourceGet, and runs the Azure preparation, app registration, connection test, project configuration, VM creation, and agent setup scripts in order.
 
+The bootstrapper prints a numbered phase heading before each major operation. It also prints the full path of each script or build command as it starts, followed by a completion message when that step succeeds. Long Azure DevOps project-creation and GitHub-import waits report elapsed time every 30 seconds. If an operation fails, the terminal reports the active phase; script failures also identify the file that failed.
+
 Before running it:
 
 - Review `OrganizationName`, `ProjectName`, `RepositoryName`, `GitHubRepositoryUrl`, `LocalPath`, `GitUserName`, and `GitUserEmail` in `ProjectSettings.yml`. This checkout has defaults for the repository name, sibling clone path, Git identity, and a generated Datum-protected lab password. Set `PersonalAccessToken`, `AgentPoolName`, and the remaining `BuildAgents` values (`UserName`, `AzureLocation`, and `AzureRoleSize`) as needed.
 - Configure the tenant IDs, tenant names, subscription IDs, service flags, and identities for each environment in `Azure.yml`.
-- Publish the updated bootstrap and Azure scripts on the GitHub repository's default branch. Keep your tenant and project-specific settings local; the bootstrapper copies the two YAML configuration files from your checkout into a newly cloned Azure DevOps repository.
+- Publish the updated bootstrap and Azure scripts on the GitHub repository's default branch before running the bootstrapper. The GitHub-to-Azure-DevOps import is a snapshot: an already completed import is reused, not refreshed. If the Azure DevOps repository was imported before the latest scripts were published, update that repository from the current GitHub version (or configure a fresh project/repository) before running the bootstrapper. Keep tenant and project-specific settings local; the bootstrapper copies the two YAML configuration files from your checkout into a newly cloned Azure DevOps repository.
 
-The script protects an unprotected PAT or VM password in `ProjectSettings.yml` before copying it. Do not publish plaintext credentials. Run elevated PowerShell 7 from the workshop checkout:
+The script protects an unprotected PAT or VM password in `ProjectSettings.yml` before copying it. Do not publish plaintext credentials. If bootstrap stops because an imported Azure script is missing, refresh the Azure DevOps repository from the current GitHub default branch and use an empty clone path before retrying. Run elevated PowerShell 7 from the workshop checkout:
 
 ```powershell
 & '.\lab\Start Azure Lab.ps1'

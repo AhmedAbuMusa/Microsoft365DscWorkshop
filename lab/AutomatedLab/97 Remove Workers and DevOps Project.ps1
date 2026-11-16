@@ -10,7 +10,7 @@ if ($env:PSModulePath -notlike "*$requiredModulesPath*")
     $env:PSModulePath = $env:PSModulePath + ";$requiredModulesPath"
 }
 
-$workerCleanupScript = Join-Path -Path $PSScriptRoot -ChildPath '..\Azure\96 Remove Workers.ps1'
+$workerCleanupScript = Join-Path -Path $PSScriptRoot -ChildPath '96 Remove Workers.ps1'
 & $workerCleanupScript @PSBoundParameters
 
 Import-Module -Name VSTeam -MinimumVersion 7.15.2 -ErrorAction Stop

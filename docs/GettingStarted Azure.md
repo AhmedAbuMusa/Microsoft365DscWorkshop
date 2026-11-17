@@ -8,13 +8,13 @@ The VM agents run the workshop pipelines and apply the DSC configuration to thei
 
 - An Azure DevOps organization and a project where you can create pipelines, environments, and an agent pool.
 - An Azure subscription and tenant for each environment you want to configure. You need sufficient permissions to create app registrations and grant tenant permissions, and to create the Azure resources and role assignments used by the agents.
-- A Windows machine with PowerShell 7.6.10 or later and Git. The preparation and bootstrap scripts run from an elevated PowerShell session.
+- A Windows machine with PowerShell 7.6.10 or later and Git. The preparation and bootstrap scripts run from a fresh elevated PowerShell session.
 - An Azure DevOps PAT with permissions to create projects and repositories, push code, and manage pipelines, environments, and agent pools.
 - The Bicep CLI when creating new VMs. The automated bootstrapper installs it with `winget` if needed.
 
 ## Automated bootstrap
 
-`lab/Start Azure Lab.ps1` is parameterless. It reads the project, repository, clone, Git author, PAT, and build-agent settings from `source/Global/ProjectSettings.yml`, and reads tenant environments from `source/Global/Azure.yml`. The bootstrapper imports the public GitHub repository into Azure DevOps, clones it locally, restores dependencies with PSResourceGet, and runs the Azure preparation, app registration, connection test, project configuration, VM creation, and agent setup scripts in order.
+`lab/Start Azure Lab.ps1` is parameterless. It reads the project, repository, clone, Git author, PAT, and build-agent settings from `source/Global/ProjectSettings.yml`, and reads tenant environments from `source/Global/Azure.yml`. The bootstrapper imports the public GitHub repository into Azure DevOps, clones it locally, restores dependencies with PSResourceGet, and runs the Azure preparation, app registration, connection test, project configuration, VM creation, and agent setup scripts in order. Start it from a fresh elevated PowerShell 7 session; it stops before doing setup if Az.Accounts or its assembly is already loaded.
 
 The import-and-clone stage can also be run separately with `lab/Azure/05 Import GitHub Repository.ps1`. It reads the same local project settings, imports the GitHub repository into Azure DevOps, and creates the configured local checkout without continuing to tenant or VM setup. Restore the source checkout dependencies first:
 
@@ -27,7 +27,11 @@ The bootstrap restores dependencies by running `Resolve-Dependency.ps1` directly
 
 The bootstrapper prints a numbered phase heading before each major operation. It also prints the full path of each script or build command as it starts, followed by a completion message when that step succeeds. Long Azure DevOps project-creation and GitHub-import waits report elapsed time every 30 seconds. If an operation fails, the terminal reports the active phase; script failures also identify the file that failed.
 
+Preparation errors are terminating: the bootstrapper will not mark the machine-preparation phase complete or continue to dependency restoration if the preparation script detects a loaded Az.Accounts assembly or another failure.
+
 After a failure, rerun `lab/Start Azure Lab.ps1` to resume automatically: successfully completed stages are skipped and the interrupted stage is retried. Dependency restore is skipped when every required package version is already present; otherwise it runs before the workflow resumes. Local configuration validation still runs on each start. Checkpoint data is stored under the current user's local application data and is bound to the checkout path and non-secret project/tenant settings; it does not contain credentials. Use `-Restart` to discard saved progress and force dependency restoration before starting over. A stage interrupted mid-operation is retried from its beginning, so its underlying operation may have partially completed before the failure.
+
+When resuming from a checkpoint created by an earlier bootstrap version, machine preparation is retried once because an earlier preparation warning could have been mistaken for success.
 
 If the local Azure DevOps checkout is missing the required Azure scripts or has outdated parameters, the bootstrap fetches its tracked upstream branch and validates the latest scripts before asking whether to refresh the checkout. Approving overwrites tracked local changes and commits, but preserves `source/Global/ProjectSettings.yml` and `source/Global/Azure.yml`; untracked files remain. Declining leaves the checkout unchanged.
 

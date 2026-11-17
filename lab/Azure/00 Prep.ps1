@@ -214,13 +214,20 @@ Write-Host 'Checking if the script is running with administrative privileges...'
 $currentIdentity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $currentIdentity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
 {
-    Write-Host
-    Write-Host 'This script installs modules for all users. Please start PowerShell as administrator and run the script again.' -ForegroundColor Red
-    return
+    throw 'This script installs modules for all users. Start a fresh elevated PowerShell session and run the script again.'
 }
 else
 {
     Write-Host 'ok.'
+}
+
+$loadedAzAccounts = Get-Module -Name Az.Accounts
+$assemblyLoading = [AppDomain]::CurrentDomain.GetAssemblies() |
+    Where-Object { $_.GetName().Name -eq 'Microsoft.Azure.PowerShell.AssemblyLoading' } |
+    Select-Object -First 1
+if ($loadedAzAccounts -or $assemblyLoading)
+{
+    throw 'This script requires a fresh elevated PowerShell session. Az.Accounts or its assembly is already loaded; close this session and start a new elevated session before running preparation.'
 }
 
 Write-Host 'Checking the module path of this session...' -NoNewline
@@ -238,8 +245,7 @@ $projectUrl = git remote get-url origin *>&1
 
 if ($projectUrl -like '*fatal: not a git repository*' -and $LASTEXITCODE -eq 128)
 {
-    Write-Host 'Not working in a git repository. Please run the script in a git repository.'
-    return
+    throw 'Not working in a git repository. Please run the script in a git repository.'
 }
 else
 {
@@ -249,8 +255,7 @@ else
 Write-Host 'Checking if the script is running in an Azure DevOps repository...' -NoNewline
 if ($projectUrl -notmatch '^https:\/\/(?:[^\/@]+@)?dev\.azure\.com\/[^\/]+\/[^\/]+\/_git\/[^\/]+\/?$')
 {
-    Write-Host 'The script is not running in an Azure DevOps repository. Please run the script in an Azure DevOps repository.'
-    return
+    throw 'The script is not running in an Azure DevOps repository. Please run the script in an Azure DevOps repository.'
 }
 else
 {
@@ -325,7 +330,7 @@ foreach ($module in $requiredModules.GetEnumerator())
     {
         Write-Host "Installing the module '$($module.Name)' failed: $($_.Exception.Message)" -ForegroundColor Red
         Write-Host 'PowerShellGet also reports missing administrator rights when the module files are locked by another PowerShell session. Please close all other PowerShell sessions and run the script again.' -ForegroundColor Red
-        return
+        throw
     }
 }
 
@@ -349,36 +354,19 @@ catch
 {
     Write-Host "Removing a shadowing module failed: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host 'The module files are most likely in use. Please close all other PowerShell sessions and run the script again.' -ForegroundColor Red
-    return
+    throw
 }
 
-$loadedAzAccounts = Get-Module -Name Az.Accounts | Sort-Object -Property Version | Select-Object -Last 1
 $requiredAzAccounts = Get-Module -Name Az.Accounts -ListAvailable |
     Where-Object { $_.Version -eq [version]'5.3.2' } |
     Select-Object -First 1
 if (-not $requiredAzAccounts)
 {
-    Write-Host "Az.Accounts 5.3.2 is not installed. Close the other PowerShell sessions and run the preparation script again." -ForegroundColor Red
-    return
+    throw 'Az.Accounts 5.3.2 is not installed. Close the other PowerShell sessions and run the preparation script again.'
 }
 
-if ($loadedAzAccounts -and $loadedAzAccounts.Version -ne [version]'5.3.2')
+if (-not (Get-Module -Name Az.Accounts))
 {
-    Write-Host "Az.Accounts version '$($loadedAzAccounts.Version)' is already loaded. Close this PowerShell session and run the script again." -ForegroundColor Red
-    return
-}
-
-if (-not $loadedAzAccounts)
-{
-    $assemblyLoading = [AppDomain]::CurrentDomain.GetAssemblies() |
-        Where-Object { $_.GetName().Name -eq 'Microsoft.Azure.PowerShell.AssemblyLoading' } |
-        Select-Object -First 1
-    if ($assemblyLoading)
-    {
-        Write-Host "The Az.Accounts assembly is already loaded in this PowerShell session. Close this session, open a new elevated PowerShell session, and run the preparation script again." -ForegroundColor Red
-        return
-    }
-
     try
     {
         Import-Module -Name Az.Accounts -RequiredVersion '5.3.2' -ErrorAction Stop
@@ -386,7 +374,7 @@ if (-not $loadedAzAccounts)
     catch
     {
         Write-Host "Importing Az.Accounts 5.3.2 failed: $($_.Exception.Message)" -ForegroundColor Red
-        return
+        throw
     }
 }
 
@@ -416,7 +404,7 @@ try
 catch
 {
     Write-Host "Configuring Azure PowerShell failed: $($_.Exception.Message)" -ForegroundColor Red
-    return
+    throw
 }
 
 Write-Host 'The preparation is done. You can now continue with the next steps.'

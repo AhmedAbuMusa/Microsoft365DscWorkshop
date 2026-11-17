@@ -15,7 +15,9 @@ BeforeAll {
             $astNode.Name -in @(
                 'Set-GitAuthorizationHeader',
                 'Restore-GitAuthorizationHeader',
+                'Assert-FreshAzureSession',
                 'Test-SourceDependencyRestoreComplete',
+                'Invoke-LabScript',
                 'Get-ImportedAzureScriptIssues',
                 'Confirm-AzureDevOpsCloneRefresh',
                 'Update-OutdatedAzureDevOpsClone'
@@ -69,6 +71,43 @@ Describe 'Azure repository import step' {
         $importAst.FindAll({ param($astNode) $astNode -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true).Name |
             Should -Contain 'Ensure-AzureDevOpsRepository'
         $bootstrapContent | Should -Not -Match 'function Ensure-AzureDevOpsRepository'
+    }
+}
+
+Describe 'Azure bootstrap session isolation' {
+    It 'Stops before setup when Az.Accounts is already loaded' {
+        Mock Get-Module { [pscustomobject]@{ Name = 'Az.Accounts' } }
+
+        { Assert-FreshAzureSession } | Should -Throw '*fresh elevated PowerShell 7 session*'
+    }
+
+    It 'Propagates preparation script failures to the bootstrap stage' {
+        $preparationScript = Join-Path -Path $TestDrive -ChildPath 'failed-preparation.ps1'
+        "throw 'Simulated preparation failure'" | Set-Content -LiteralPath $preparationScript
+
+        { Invoke-LabScript -Path $preparationScript } | Should -Throw '*Simulated preparation failure*'
+    }
+
+    It 'Makes the preparation script terminate when an Azure assembly is already loaded' {
+        $preparationPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\lab\Azure\00 Prep.ps1'
+        $tokens = $null
+        $parseErrors = $null
+        $preparationAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            $preparationPath,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        $parseErrors | Should -BeNullOrEmpty
+        $sessionGuard = $preparationAst.Find({
+                param($astNode)
+                $astNode -is [System.Management.Automation.Language.IfStatementAst] -and
+                $astNode.Extent.Text -match '\$loadedAzAccounts' -and
+                $astNode.Extent.Text -match '\$assemblyLoading'
+            }, $true)
+
+        $sessionGuard | Should -Not -BeNullOrEmpty
+        $sessionGuard.Extent.Text | Should -Match '\bthrow\b'
+        $sessionGuard.Extent.Text | Should -Not -Match '\breturn\b'
     }
 }
 

@@ -12,7 +12,12 @@ BeforeAll {
     $checkpointFunctions = $bootstrapAst.FindAll({
             param($astNode)
             $astNode -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $astNode.Name -in @('Write-BootstrapPhase', 'Save-BootstrapCheckpoint', 'Invoke-BootstrapStage')
+            $astNode.Name -in @(
+                'Write-BootstrapPhase',
+                'Save-BootstrapCheckpoint',
+                'Update-BootstrapCheckpointSchema',
+                'Invoke-BootstrapStage'
+            )
         }, $true)
     foreach ($functionAst in $checkpointFunctions)
     {
@@ -25,12 +30,24 @@ Describe 'Azure lab bootstrap checkpoint' {
         $script:BootstrapPhaseCount = 12
         $script:BootstrapCheckpointPath = Join-Path -Path $TestDrive -ChildPath 'bootstrap-checkpoint.json'
         $script:BootstrapCheckpoint = @{
-            SchemaVersion   = 1
+            SchemaVersion   = 2
             Fingerprint     = 'test'
             CompletedStages = @()
             CurrentStage    = $null
         }
         $script:StageActionCount = 0
+    }
+
+    It 'Migrates old checkpoints and retries machine preparation once' {
+        $checkpoint = '{"SchemaVersion":1,"Fingerprint":"test","CompletedStages":["import-repository","prepare-machine","verify-import"],"CurrentStage":"restore-target-dependencies"}' |
+            ConvertFrom-Json -AsHashtable
+
+        Update-BootstrapCheckpointSchema -Checkpoint $checkpoint | Should -BeTrue
+
+        $checkpoint.SchemaVersion | Should -Be 2
+        $checkpoint.CompletedStages | Should -Be @('import-repository', 'verify-import')
+        $checkpoint.CurrentStage | Should -Be 'restore-target-dependencies'
+        Update-BootstrapCheckpointSchema -Checkpoint $checkpoint | Should -BeFalse
     }
 
     It 'Skips a stage after its completion was persisted' {

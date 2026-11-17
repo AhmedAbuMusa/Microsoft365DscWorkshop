@@ -8,9 +8,9 @@
     Tenant administrator sign-in and consent remain interactive.
 
 .NOTES
-    Run from an elevated PowerShell 7.6.10 or later session. Set all configuration values
-    in the two YAML files before starting. If a run fails, rerun this script to resume from
-    the failed stage; use -Restart to discard its saved progress and start over.
+    Run from a fresh elevated PowerShell 7.6.10 or later session. Set all configuration
+    values in the two YAML files before starting. If a run fails, rerun this script to
+    resume from the failed stage; use -Restart to discard its saved progress and start over.
 #>
 
 [CmdletBinding()]
@@ -43,6 +43,19 @@ function Write-BootstrapPhase
     Write-Host ('=' * 78) -ForegroundColor DarkCyan
 }
 
+function Assert-FreshAzureSession
+{
+    $loadedAzAccounts = Get-Module -Name Az.Accounts
+    $assemblyLoading = [AppDomain]::CurrentDomain.GetAssemblies() |
+        Where-Object { $_.GetName().Name -eq 'Microsoft.Azure.PowerShell.AssemblyLoading' } |
+        Select-Object -First 1
+
+    if ($loadedAzAccounts -or $assemblyLoading)
+    {
+        throw 'This bootstrap requires a fresh elevated PowerShell 7 session. Az.Accounts or its assembly is already loaded; close this session and start a new elevated session before running the bootstrap.'
+    }
+}
+
 function Save-BootstrapCheckpoint
 {
     $checkpointDirectory = Split-Path -Path $script:BootstrapCheckpointPath -Parent
@@ -52,6 +65,34 @@ function Save-BootstrapCheckpoint
         ConvertTo-Json -Depth 5 |
         Set-Content -LiteralPath $temporaryPath -Encoding utf8
     Move-Item -LiteralPath $temporaryPath -Destination $script:BootstrapCheckpointPath -Force
+}
+
+function Update-BootstrapCheckpointSchema
+{
+    [CmdletBinding()]
+    param
+    (
+        [Parameter(Mandatory)]
+        [System.Collections.IDictionary]$Checkpoint
+    )
+
+    switch ([int]$Checkpoint['SchemaVersion'])
+    {
+        1
+        {
+            $Checkpoint['CompletedStages'] = @($Checkpoint['CompletedStages'] | Where-Object { $_ -ne 'prepare-machine' })
+            $Checkpoint['SchemaVersion'] = 2
+            return $true
+        }
+        2
+        {
+            return $false
+        }
+        default
+        {
+            throw 'The checkpoint schema version is not supported.'
+        }
+    }
 }
 
 function Invoke-BootstrapStage
@@ -823,6 +864,8 @@ if (-not $windowsPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
     throw 'Run this bootstrapper from an elevated PowerShell 7 session; the Azure preparation script installs machine-wide modules.'
 }
 
+Assert-FreshAzureSession
+
 $script:GitCommand = Get-Command -Name git -ErrorAction SilentlyContinue
 if (-not $script:GitCommand)
 {
@@ -1023,9 +1066,9 @@ if (-not $Restart -and (Test-Path -LiteralPath $script:BootstrapCheckpointPath -
     {
         $script:BootstrapCheckpoint = Get-Content -LiteralPath $script:BootstrapCheckpointPath -Raw |
             ConvertFrom-Json -AsHashtable -ErrorAction Stop
+        $checkpointMigrated = Update-BootstrapCheckpointSchema -Checkpoint $script:BootstrapCheckpoint
         $savedStages = @($script:BootstrapCheckpoint.CompletedStages)
-        if ($script:BootstrapCheckpoint.SchemaVersion -ne 1 -or
-            $script:BootstrapCheckpoint.Fingerprint -ne $identityHash -or
+        if ($script:BootstrapCheckpoint.Fingerprint -ne $identityHash -or
             @($savedStages | Where-Object { $_ -notin $allowedStages }).Count -gt 0 -or
             ($script:BootstrapCheckpoint.CurrentStage -and $script:BootstrapCheckpoint.CurrentStage -notin $allowedStages))
         {
@@ -1033,6 +1076,11 @@ if (-not $Restart -and (Test-Path -LiteralPath $script:BootstrapCheckpointPath -
         }
 
         $script:BootstrapCheckpoint.CompletedStages = $savedStages
+        if ($checkpointMigrated)
+        {
+            Save-BootstrapCheckpoint
+            Write-Host 'Updated the saved checkpoint and will repeat machine preparation, which may have stopped early in a previous run.' -ForegroundColor Yellow
+        }
         if ($script:BootstrapCheckpoint.CurrentStage)
         {
             Write-Host "Resuming by retrying the previously interrupted stage '$($script:BootstrapCheckpoint.CurrentStage)'." -ForegroundColor Yellow
@@ -1055,7 +1103,7 @@ else
     }
 
     $script:BootstrapCheckpoint = @{
-        SchemaVersion   = 1
+        SchemaVersion   = 2
         Fingerprint     = $identityHash
         CompletedStages = @()
         CurrentStage    = $null

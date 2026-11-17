@@ -10,7 +10,7 @@ The VM agents run the workshop pipelines and apply the DSC configuration to thei
 - An Azure subscription and tenant for each environment you want to configure. You need sufficient permissions to create app registrations and grant tenant permissions, and to create the Azure resources and role assignments used by the agents.
 - A Windows machine with PowerShell 7.6.10 or later and Git. The preparation and bootstrap scripts run from a fresh elevated PowerShell session.
 - An Azure DevOps PAT with permissions to create projects and repositories, push code, and manage pipelines, environments, and agent pools.
-- The Bicep CLI when creating new VMs. The automated bootstrapper installs it with `winget` if needed.
+- The Bicep CLI when creating new VMs. The automated bootstrapper checks PATH and common per-user install locations before using `winget`, then verifies the CLI version.
 
 ## Automated bootstrap
 
@@ -132,11 +132,13 @@ The script creates the agent pool, environments, and workshop pipelines in Azure
 
 ### 7. Create the Azure build-agent VMs
 
-Install the Bicep CLI if it is not already available:
+Install the Bicep CLI if it is not already available to your PowerShell session:
 
 ```powershell
 winget install --exact --id Microsoft.Bicep --source winget --accept-source-agreements --accept-package-agreements
 ```
+
+The bootstrapper also detects existing installs in `%LOCALAPPDATA%\Programs\Bicep CLI` and `%LOCALAPPDATA%\Microsoft\WinGet\Links`, adding the executable's directory to the current process PATH before checking it. It won't treat Winget's “no available upgrade” response as a failure if the existing CLI is available and passes `bicep --version`.
 
 Review the agent settings in [ProjectSettings.yml](../source/Global/ProjectSettings.yml), then run the Azure-specific VM creation script:
 

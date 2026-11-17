@@ -60,6 +60,34 @@ function Assert-FreshAzureSession
     }
 }
 
+function Add-BicepInstallDirectoriesToPath
+{
+    [CmdletBinding()]
+    param
+    (
+        [Parameter()]
+        [string[]]$ExecutablePaths = @(
+            (Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Programs\Bicep CLI\bicep.exe')
+            (Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Microsoft\WinGet\Links\bicep.exe')
+        )
+    )
+
+    foreach ($executablePath in $ExecutablePaths)
+    {
+        if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf))
+        {
+            continue
+        }
+
+        $installDirectory = Split-Path -Path $executablePath -Parent
+        $pathEntries = @($env:PATH -split [regex]::Escape([string][IO.Path]::PathSeparator))
+        if ($installDirectory -notin $pathEntries)
+        {
+            $env:PATH = "$installDirectory$([IO.Path]::PathSeparator)$env:PATH"
+        }
+    }
+}
+
 function Save-BootstrapCheckpoint
 {
     $checkpointDirectory = Split-Path -Path $script:BootstrapCheckpointPath -Parent
@@ -1338,6 +1366,7 @@ try
         Invoke-BootstrapStage -Index 11 -Name 'create-vms' `
             -Description 'Install Bicep if needed and create Azure agent VMs' `
             -Action {
+                Add-BicepInstallDirectoriesToPath
                 $bicepCommand = Get-Command -Name bicep -ErrorAction SilentlyContinue
                 if (-not $bicepCommand)
                 {
@@ -1350,23 +1379,31 @@ try
                     Write-Host 'Installing the Bicep CLI with winget.'
                     Write-Host "Running command: '$($wingetCommand.Source) install --exact --id Microsoft.Bicep'."
                     & $wingetCommand.Source install --exact --id Microsoft.Bicep --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity
-                    if ($LASTEXITCODE -ne 0)
+                    $wingetExitCode = $LASTEXITCODE
+                    Add-BicepInstallDirectoriesToPath
+                    $bicepCommand = Get-Command -Name bicep -ErrorAction SilentlyContinue
+                    if (-not $bicepCommand)
                     {
-                        throw "Bicep CLI installation failed with exit code $LASTEXITCODE."
+                        if ($wingetExitCode -ne 0)
+                        {
+                            throw "Bicep CLI installation failed with exit code $wingetExitCode and no executable was found."
+                        }
+
+                        throw 'Winget completed but Bicep was not found. Open a new PowerShell session or install Bicep to a directory on PATH.'
                     }
-                    $bicepInstallPath = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Programs\Bicep CLI'
-                    if (Test-Path -LiteralPath (Join-Path -Path $bicepInstallPath -ChildPath 'bicep.exe'))
+
+                    if ($wingetExitCode -ne 0)
                     {
-                        $env:PATH = "$bicepInstallPath;$env:PATH"
-                    }
-                    if (-not (Get-Command -Name bicep -ErrorAction SilentlyContinue))
-                    {
-                        throw 'Bicep installed but was not found on PATH. Open a new PowerShell session and rerun the VM setup stage.'
+                        Write-Warning "Winget returned exit code $wingetExitCode, but the existing Bicep CLI is available at '$($bicepCommand.Source)'. Continuing."
                     }
                 }
-                else
+
+                Write-Host "Using Bicep CLI at '$($bicepCommand.Source)'."
+                & $bicepCommand.Source --version
+                $bicepVersionExitCode = $LASTEXITCODE
+                if ($bicepVersionExitCode -ne 0)
                 {
-                    Write-Host "Using Bicep CLI at '$($bicepCommand.Source)'."
+                    throw "Bicep CLI failed its version check with exit code $bicepVersionExitCode."
                 }
 
                 $vmCreationScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\30 Create Agent VMs.ps1'

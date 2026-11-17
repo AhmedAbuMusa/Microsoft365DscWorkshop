@@ -16,6 +16,7 @@ BeforeAll {
                 'Set-GitAuthorizationHeader',
                 'Restore-GitAuthorizationHeader',
                 'Assert-FreshAzureSession',
+                'Add-BicepInstallDirectoriesToPath',
                 'Test-SourceDependencyRestoreComplete',
                 'Invoke-LabScript',
                 'Get-ImportedAzureScriptIssues',
@@ -123,6 +124,25 @@ Describe 'Azure bootstrap dependency restore' {
         $bootstrapContent | Should -Match ([regex]::Escape('$dependencyRestoreArguments += ''-WithYAML:$false'''))
         $bootstrapContent | Should -Match ([regex]::Escape('-File $sourceDependencyScript @dependencyRestoreArguments'))
         $bootstrapContent | Should -Not -Match ([regex]::Escape('-File $sourceBuildScript -UsePSResourceGet -ResolveDependency'))
+    }
+
+    It 'Adds an existing Bicep install directory to the process PATH' {
+        $previousPath = $env:PATH
+        $installDirectory = Join-Path -Path $TestDrive -ChildPath 'Bicep CLI'
+        $null = New-Item -ItemType Directory -Path $installDirectory -Force
+        $executablePath = Join-Path -Path $installDirectory -ChildPath 'bicep.exe'
+        Set-Content -LiteralPath $executablePath -Value 'test executable'
+        try
+        {
+            Add-BicepInstallDirectoriesToPath -ExecutablePaths @($executablePath)
+
+            @($env:PATH -split [regex]::Escape([string][IO.Path]::PathSeparator)) |
+                Should -Contain $installDirectory
+        }
+        finally
+        {
+            $env:PATH = $previousPath
+        }
     }
 
     It 'Runs the Azure-specific build initialization workflow in a clean process' {

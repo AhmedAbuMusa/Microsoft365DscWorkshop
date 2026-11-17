@@ -16,6 +16,13 @@ The VM agents run the workshop pipelines and apply the DSC configuration to thei
 
 `lab/Start Azure Lab.ps1` is parameterless. It reads the project, repository, clone, Git author, PAT, and build-agent settings from `source/Global/ProjectSettings.yml`, and reads tenant environments from `source/Global/Azure.yml`. The bootstrapper imports the public GitHub repository into Azure DevOps, clones it locally, restores dependencies with PSResourceGet, and runs the Azure preparation, app registration, connection test, project configuration, VM creation, and agent setup scripts in order.
 
+The import-and-clone stage can also be run separately with `lab/Azure/05 Import GitHub Repository.ps1`. It reads the same local project settings, imports the GitHub repository into Azure DevOps, and creates the configured local checkout without continuing to tenant or VM setup. Restore the source checkout dependencies first:
+
+```powershell
+pwsh -NoLogo -NoProfile -File .\build.ps1 -UsePSResourceGet -ResolveDependency
+& '.\lab\Azure\05 Import GitHub Repository.ps1'
+```
+
 The bootstrapper prints a numbered phase heading before each major operation. It also prints the full path of each script or build command as it starts, followed by a completion message when that step succeeds. Long Azure DevOps project-creation and GitHub-import waits report elapsed time every 30 seconds. If an operation fails, the terminal reports the active phase; script failures also identify the file that failed.
 
 Before running it:

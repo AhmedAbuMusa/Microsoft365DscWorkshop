@@ -125,6 +125,18 @@ Describe 'Azure bootstrap dependency restore' {
         $bootstrapContent | Should -Not -Match ([regex]::Escape('-File $sourceBuildScript -UsePSResourceGet -ResolveDependency'))
     }
 
+    It 'Runs the Azure-specific build initialization workflow in a clean process' {
+        $bootstrapPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\lab\Start Azure Lab.ps1'
+        $bootstrapContent = Get-Content -LiteralPath $bootstrapPath -Raw
+        $buildConfigurationPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\build.yaml'
+        $buildConfiguration = Get-Content -LiteralPath $buildConfigurationPath -Raw
+
+        $bootstrapContent | Should -Match ([regex]::Escape('-NoLogo -NoProfile -File $targetBuildScript -Tasks azureinit'))
+        $buildConfiguration | Should -Match '(?ms)^\s+azureinit:\s*\r?\n\s+- test7\s*\r?\n\s+- LoadDatumConfigData\s*\r?\n\s+- ConfigDataPreparation'
+        $bootstrapContent | Should -Not -Match ([regex]::Escape('-Tasks shellinit'))
+        $bootstrapContent | Should -Not -Match ([regex]::Escape('-Tasks init'))
+    }
+
     It 'Skips dependency restore only when every required package version is present' {
         $repositoryRoot = (Resolve-Path (Join-Path -Path $PSScriptRoot -ChildPath '..\..')).Path
         $requiredModules = Import-PowerShellDataFile (Join-Path -Path $repositoryRoot -ChildPath 'RequiredModules.psd1')

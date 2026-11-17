@@ -29,6 +29,8 @@ The bootstrapper prints a numbered phase heading before each major operation. It
 
 Preparation errors are terminating: the bootstrapper will not mark the machine-preparation phase complete or continue to dependency restoration if the preparation script detects a loaded Az.Accounts assembly or another failure.
 
+The imported Azure build initialization runs the dedicated `azureinit` workflow in a separate no-profile PowerShell process. It loads configuration and Azure build settings without reusing loaded YAML/Datum modules or running the shared `init` workflow, which also performs AutomatedLab-specific initialization.
+
 After a failure, rerun `lab/Start Azure Lab.ps1` to resume automatically: successfully completed stages are skipped and the interrupted stage is retried. Dependency restore is skipped when every required package version is already present; otherwise it runs before the workflow resumes. Local configuration validation still runs on each start. Checkpoint data is stored under the current user's local application data and is bound to the checkout path and non-secret project/tenant settings; it does not contain credentials. Use `-Restart` to discard saved progress and force dependency restoration before starting over. A stage interrupted mid-operation is retried from its beginning, so its underlying operation may have partially completed before the failure.
 
 When resuming from a checkpoint created by an earlier bootstrap version, machine preparation is retried once because an earlier preparation warning could have been mistaken for success.
@@ -93,7 +95,7 @@ The initial restore downloads the dependencies in `RequiredModules.psd1` and can
 After the build succeeds, open a fresh PowerShell session at the repository root and initialize its modules:
 
 ```powershell
-.\build.ps1 -Tasks init
+.\build.ps1 -Tasks azureinit
 ```
 
 ### 4. Configure the tenant and environment

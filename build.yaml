@@ -34,6 +34,11 @@ BuildWorkflow:
     - InitLab
     - LoadDatumConfigData
 
+  azureinit:
+    - test7
+    - LoadDatumConfigData
+    - ConfigDataPreparation
+
   export:
     - Clean
     - InitLab

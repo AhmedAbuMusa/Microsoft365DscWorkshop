@@ -1189,16 +1189,16 @@ try
         }
 
         Invoke-BootstrapStage -Index 7 -Name 'initialize-target-build' `
-            -Description 'Initialize the imported repository build' `
+            -Description 'Initialize the imported Azure build' `
             -Action {
                 $targetBuildScript = Join-Path -Path $resolvedLocalPath -ChildPath 'build.ps1'
-                Write-Host "Running file: '$targetBuildScript' -Tasks init."
-                & $targetBuildScript -Tasks init
-                if (-not $?)
+                Write-Host "Running file: '$targetBuildScript' -Tasks azureinit in a clean PowerShell process."
+                & $pwshCommand.Source -NoLogo -NoProfile -File $targetBuildScript -Tasks azureinit
+                if ($LASTEXITCODE -ne 0)
                 {
-                    throw 'The imported repository build initialization task failed.'
+                    throw "The imported Azure build initialization task failed with exit code $LASTEXITCODE."
                 }
-                Write-Host 'Completed imported repository build initialization.' -ForegroundColor Green
+                Write-Host 'Completed imported Azure build initialization.' -ForegroundColor Green
             }
 
         $targetProjectSettingsPath = Join-Path -Path $resolvedLocalPath -ChildPath 'source\Global\ProjectSettings.yml'

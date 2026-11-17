@@ -9,8 +9,16 @@
 
 .NOTES
     Run from an elevated PowerShell 7.6.10 or later session. Set all configuration values
-    in the two YAML files before starting this parameterless script.
+    in the two YAML files before starting. If a run fails, rerun this script to resume from
+    the failed stage; use -Restart to discard its saved progress and start over.
 #>
+
+[CmdletBinding()]
+param
+(
+    [Parameter()]
+    [switch]$Restart
+)
 
 $ErrorActionPreference = 'Stop'
 $script:BootstrapPhase = 0
@@ -21,14 +29,75 @@ function Write-BootstrapPhase
     param
     (
         [Parameter(Mandatory)]
+        [ValidateRange(1, 12)]
+        [int]$Index,
+
+        [Parameter(Mandatory)]
         [string]$Description
     )
 
-    $script:BootstrapPhase++
+    $script:BootstrapPhase = $Index
     Write-Host ''
     Write-Host ('=' * 78) -ForegroundColor DarkCyan
-    Write-Host ('Phase {0:D2}/{1:D2}: {2}' -f $script:BootstrapPhase, $script:BootstrapPhaseCount, $Description) -ForegroundColor Cyan
+    Write-Host ('Phase {0:D2}/{1:D2}: {2}' -f $Index, $script:BootstrapPhaseCount, $Description) -ForegroundColor Cyan
     Write-Host ('=' * 78) -ForegroundColor DarkCyan
+}
+
+function Save-BootstrapCheckpoint
+{
+    $checkpointDirectory = Split-Path -Path $script:BootstrapCheckpointPath -Parent
+    $null = New-Item -ItemType Directory -Path $checkpointDirectory -Force
+    $temporaryPath = "$($script:BootstrapCheckpointPath).$PID.tmp"
+    $script:BootstrapCheckpoint |
+        ConvertTo-Json -Depth 5 |
+        Set-Content -LiteralPath $temporaryPath -Encoding utf8
+    Move-Item -LiteralPath $temporaryPath -Destination $script:BootstrapCheckpointPath -Force
+}
+
+function Invoke-BootstrapStage
+{
+    param
+    (
+        [Parameter(Mandatory)]
+        [ValidateRange(3, 12)]
+        [int]$Index,
+
+        [Parameter(Mandatory)]
+        [string]$Name,
+
+        [Parameter(Mandatory)]
+        [string]$Description,
+
+        [Parameter(Mandatory)]
+        [scriptblock]$Action
+    )
+
+    $script:BootstrapPhase = $Index
+    if ($Name -in $script:BootstrapCheckpoint.CompletedStages)
+    {
+        $phaseLabel = '{0:D2}/{1:D2}' -f $Index, $script:BootstrapPhaseCount
+        Write-Host "Skipping completed phase $phaseLabel`: $Description" -ForegroundColor DarkGray
+        return
+    }
+
+    Write-BootstrapPhase -Index $Index -Description $Description
+    $script:BootstrapCheckpoint.CurrentStage = $Name
+    Save-BootstrapCheckpoint
+    try
+    {
+        & $Action
+        $script:BootstrapCheckpoint.CompletedStages = @(
+            $script:BootstrapCheckpoint.CompletedStages
+            $Name
+        ) | Select-Object -Unique
+        $script:BootstrapCheckpoint.CurrentStage = $null
+        Save-BootstrapCheckpoint
+    }
+    catch
+    {
+        Write-Host "Bootstrap failed during phase $($Index)/$($script:BootstrapPhaseCount): $($_.Exception.Message)" -ForegroundColor Red
+        throw
+    }
 }
 
 function ConvertFrom-SecureStringPlainText
@@ -421,13 +490,6 @@ if (-not (Test-Path -LiteralPath $sourceSettingsPath -PathType Leaf) -or
     throw 'Both source/Global/ProjectSettings.yml and source/Global/Azure.yml are required.'
 }
 
-$confirmation = (Read-Host 'This will import the GitHub repository, create Azure DevOps resources, register tenant apps, and provision Azure VMs. Continue? [Y/n]').Trim()
-if ($confirmation -and $confirmation -notmatch '^(y|yes)$')
-{
-    Write-Host 'Azure lab setup cancelled.'
-    return
-}
-
 $pwshCommand = Get-Command -Name pwsh -ErrorAction SilentlyContinue
 if (-not $pwshCommand)
 {
@@ -436,7 +498,7 @@ if (-not $pwshCommand)
 
 Remove-StaleMicrosoft365DscVersions -RepositoryRoot $repositoryRoot
 $sourceBuildScript = Join-Path -Path $repositoryRoot -ChildPath 'build.ps1'
-Write-BootstrapPhase -Description 'Restore dependencies for the source checkout'
+Write-BootstrapPhase -Index 1 -Description 'Restore dependencies for the source checkout'
 Write-Host "Running file: '$sourceBuildScript' -UsePSResourceGet -ResolveDependency."
 try
 {
@@ -461,7 +523,7 @@ if ($env:PSModulePath -notlike "*$sourceRequiredModules*")
 Import-Module -Name Datum -ErrorAction Stop
 Import-Module -Name Datum.ProtectedData -ErrorAction Stop
 
-Write-BootstrapPhase -Description 'Read and validate configuration; protect local credentials'
+Write-BootstrapPhase -Index 2 -Description 'Read and validate configuration; protect local credentials'
 $sourceDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $repositoryRoot -ChildPath 'source\Datum.yml')
 $sourceProjectSettings = $sourceDatum.Global.ProjectSettings
 $script:OrganizationName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'OrganizationName' -Path 'source/Global/ProjectSettings.yml: OrganizationName')
@@ -528,67 +590,185 @@ finally
 $plainBuildAgentPassword = $null
 $protectionPassword = $null
 $secureProtectionPassword = $null
+
+$resumeIdentity = [ordered]@{
+    RepositoryRoot       = $repositoryRoot
+    OrganizationName     = $script:OrganizationName
+    ProjectName          = $script:ProjectName
+    RepositoryName       = $script:RepositoryName
+    GitHubRepositoryUrl  = [string]$sourceProjectSettings.GitHubRepositoryUrl
+    LocalPath            = $resolvedLocalPath
+    AgentPoolName        = [string]$sourceProjectSettings.AgentPoolName
+    NumberOfBuildAgents  = [string]$sourceProjectSettings.NumbertOfBuildAgents
+    GitUserName          = [string]$sourceProjectSettings.GitUserName
+    GitUserEmail         = [string]$sourceProjectSettings.GitUserEmail
+    BuildAgentUserName   = [string]$sourceProjectSettings.BuildAgents.UserName
+    BuildAgentLocation   = [string]$sourceProjectSettings.BuildAgents.AzureLocation
+    BuildAgentVmSize     = [string]$sourceProjectSettings.BuildAgents.AzureRoleSize
+    Environments         = @(
+        foreach ($environmentName in ($script:EnvironmentNames | Sort-Object))
+        {
+            $environment = $sourceDatum.Global.Azure.Environments[$environmentName]
+            [ordered]@{
+                Name                = $environmentName
+                TenantId            = [string]$environment.AzTenantId
+                SubscriptionId      = [string]$environment.AzSubscriptionId
+                HasExchangeOnline   = [string]$environment.HasExchangeOnline
+                HasSharePointOnline = [string]$environment.HasSharePointOnline
+            }
+        }
+    )
+}
+$identityJson = ConvertTo-Json -InputObject $resumeIdentity -Depth 10 -Compress
+$identityBytes = [Text.Encoding]::UTF8.GetBytes($identityJson)
+$identityHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($identityBytes)).ToLowerInvariant()
+$checkpointDirectory = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Microsoft365DscWorkshop\AzureLabBootstrap'
+$script:BootstrapCheckpointPath = Join-Path -Path $checkpointDirectory -ChildPath "$identityHash.json"
+$allowedStages = @(
+    'import-repository'
+    'verify-import'
+    'prepare-machine'
+    'restore-target-dependencies'
+    'initialize-target-build'
+    'register-applications'
+    'test-connections'
+    'configure-devops'
+    'create-vms'
+    'configure-agents'
+)
+
+if (-not $Restart -and (Test-Path -LiteralPath $script:BootstrapCheckpointPath -PathType Leaf))
+{
+    try
+    {
+        $script:BootstrapCheckpoint = Get-Content -LiteralPath $script:BootstrapCheckpointPath -Raw |
+            ConvertFrom-Json -AsHashtable -ErrorAction Stop
+        $savedStages = @($script:BootstrapCheckpoint.CompletedStages)
+        if ($script:BootstrapCheckpoint.SchemaVersion -ne 1 -or
+            $script:BootstrapCheckpoint.Fingerprint -ne $identityHash -or
+            @($savedStages | Where-Object { $_ -notin $allowedStages }).Count -gt 0 -or
+            ($script:BootstrapCheckpoint.CurrentStage -and $script:BootstrapCheckpoint.CurrentStage -notin $allowedStages))
+        {
+            throw 'The checkpoint schema or contents are invalid.'
+        }
+
+        $script:BootstrapCheckpoint.CompletedStages = $savedStages
+        if ($script:BootstrapCheckpoint.CurrentStage)
+        {
+            Write-Host "Resuming by retrying the previously interrupted stage '$($script:BootstrapCheckpoint.CurrentStage)'." -ForegroundColor Yellow
+        }
+        else
+        {
+            Write-Host 'Resuming from the last successfully completed stage.' -ForegroundColor Yellow
+        }
+    }
+    catch
+    {
+        throw "Could not load the Azure lab resume checkpoint '$script:BootstrapCheckpointPath'. Use -Restart to discard it and start over. $($_.Exception.Message)"
+    }
+}
+else
+{
+    if ($Restart -and (Test-Path -LiteralPath $script:BootstrapCheckpointPath -PathType Leaf))
+    {
+        Write-Host 'Discarding the saved Azure lab checkpoint and starting over.' -ForegroundColor Yellow
+    }
+
+    $script:BootstrapCheckpoint = @{
+        SchemaVersion   = 1
+        Fingerprint     = $identityHash
+        CompletedStages = @()
+        CurrentStage    = $null
+    }
+}
+
 $sourceDatum = $null
 $sourceProjectSettings = $null
 
 try
 {
-    Write-BootstrapPhase -Description 'Import GitHub repository and prepare the Azure DevOps checkout'
-    $repositoryImportScript = Join-Path -Path $PSScriptRoot -ChildPath 'Azure\05 Import GitHub Repository.ps1'
-    Invoke-LabScript -Path $repositoryImportScript
+    Invoke-BootstrapStage -Index 3 -Name 'import-repository' `
+        -Description 'Import GitHub repository and prepare the Azure DevOps checkout' `
+        -Action {
+            $repositoryImportScript = Join-Path -Path $repositoryRoot -ChildPath 'lab\Azure\05 Import GitHub Repository.ps1'
+            Invoke-LabScript -Path $repositoryImportScript
+        }
+
+    # Keep mutable project settings current on resume without overwriting generated Azure app credentials.
+    $localProjectSettingsPath = Join-Path -Path $resolvedLocalPath -ChildPath 'source\Global\ProjectSettings.yml'
+    Copy-Item -LiteralPath $sourceSettingsPath -Destination $localProjectSettingsPath -Force
 
     Push-Location -LiteralPath $resolvedLocalPath
     try
     {
-        Write-BootstrapPhase -Description 'Verify the imported Azure script versions'
-        foreach ($scriptAndParameter in @(
-                @{ Path = 'lab\Azure\00 Prep.ps1'; Parameter = 'ProjectName' }
-                @{ Path = 'lab\Azure\30 Create Agent VMs.ps1'; Parameter = 'BuildAgentPassword' }
-                @{ Path = 'lab\Azure\31 Agent Setup.ps1'; Parameter = 'EnvironmentName' }
-            ))
+        Invoke-BootstrapStage -Index 4 -Name 'verify-import' `
+            -Description 'Verify the imported Azure script versions' `
+            -Action {
+                foreach ($scriptAndParameter in @(
+                        @{ Path = 'lab\Azure\00 Prep.ps1'; Parameter = 'ProjectName' }
+                        @{ Path = 'lab\Azure\30 Create Agent VMs.ps1'; Parameter = 'BuildAgentPassword' }
+                        @{ Path = 'lab\Azure\31 Agent Setup.ps1'; Parameter = 'EnvironmentName' }
+                    ))
+                {
+                    $scriptPath = Join-Path -Path $resolvedLocalPath -ChildPath $scriptAndParameter.Path
+                    if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf))
+                    {
+                        throw "Required imported script '$($scriptAndParameter.Path)' was not found in the Azure DevOps clone. The clone likely contains an older GitHub import with the legacy 'lab\' layout. Publish the current Azure scripts to GitHub, refresh the Azure DevOps repository from that version, then remove this clone or set LocalPath to an empty directory before retrying."
+                    }
+
+                    $tokens = $null
+                    $parseErrors = $null
+                    $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors)
+                    if ($parseErrors)
+                    {
+                        $parseDetails = ($parseErrors | ForEach-Object {
+                                "line $($_.Extent.StartLineNumber): $($_.Message)"
+                            }) -join '; '
+                        throw "Imported script '$($scriptAndParameter.Path)' has PowerShell parse errors: $parseDetails"
+                    }
+
+                    $parameterNames = @($scriptAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+                    if ($scriptAndParameter.Parameter -notin $parameterNames)
+                    {
+                        throw "Imported script '$($scriptAndParameter.Path)' is outdated. Import the current GitHub default branch before retrying."
+                    }
+                }
+            }
+
+        Invoke-BootstrapStage -Index 5 -Name 'prepare-machine' `
+            -Description 'Prepare the Azure lab machine' `
+            -Action {
+                Invoke-LabScript -Path (Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\00 Prep.ps1') `
+                    -Arguments @{ ProjectName = $script:ProjectName }
+            }
+
+        Invoke-BootstrapStage -Index 6 -Name 'restore-target-dependencies' `
+            -Description 'Restore dependencies for the imported checkout' `
+            -Action {
+                Initialize-TargetDependencies -SourceRoot $repositoryRoot -TargetRoot $resolvedLocalPath
+            }
+
+        $targetRequiredModules = Join-Path -Path $resolvedLocalPath -ChildPath 'output\RequiredModules'
+        if ((Test-Path -LiteralPath $targetRequiredModules -PathType Container) -and
+            $env:PSModulePath -notlike "*$targetRequiredModules*")
         {
-            $scriptPath = Join-Path -Path $resolvedLocalPath -ChildPath $scriptAndParameter.Path
-            if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf))
-            {
-                throw "Required imported script '$($scriptAndParameter.Path)' was not found in the Azure DevOps clone. The clone likely contains an older GitHub import with the legacy 'lab\' layout. Publish the current Azure scripts to GitHub, refresh the Azure DevOps repository from that version, then remove this clone or set LocalPath to an empty directory before retrying."
-            }
-
-            $tokens = $null
-            $parseErrors = $null
-            $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors)
-            if ($parseErrors)
-            {
-                $parseDetails = ($parseErrors | ForEach-Object {
-                        "line $($_.Extent.StartLineNumber): $($_.Message)"
-                    }) -join '; '
-                throw "Imported script '$($scriptAndParameter.Path)' has PowerShell parse errors: $parseDetails"
-            }
-
-            $parameterNames = @($scriptAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
-            if ($scriptAndParameter.Parameter -notin $parameterNames)
-            {
-                throw "Imported script '$($scriptAndParameter.Path)' is outdated. Import the current GitHub default branch before retrying."
-            }
+            $env:PSModulePath = "$targetRequiredModules;$env:PSModulePath"
         }
 
-        Write-BootstrapPhase -Description 'Prepare the Azure lab machine'
+        Invoke-BootstrapStage -Index 7 -Name 'initialize-target-build' `
+            -Description 'Initialize the imported repository build' `
+            -Action {
+                $targetBuildScript = Join-Path -Path $resolvedLocalPath -ChildPath 'build.ps1'
+                Write-Host "Running file: '$targetBuildScript' -Tasks init."
+                & $targetBuildScript -Tasks init
+                if (-not $?)
+                {
+                    throw 'The imported repository build initialization task failed.'
+                }
+                Write-Host 'Completed imported repository build initialization.' -ForegroundColor Green
+            }
+
         $targetProjectSettingsPath = Join-Path -Path $resolvedLocalPath -ChildPath 'source\Global\ProjectSettings.yml'
-        Invoke-LabScript -Path (Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\00 Prep.ps1') `
-            -Arguments @{ ProjectName = $script:ProjectName }
-
-        Write-BootstrapPhase -Description 'Restore dependencies for the imported checkout'
-        Initialize-TargetDependencies -SourceRoot $repositoryRoot -TargetRoot $resolvedLocalPath
-
-        Write-BootstrapPhase -Description 'Initialize the imported repository build'
-        $targetBuildScript = Join-Path -Path $resolvedLocalPath -ChildPath 'build.ps1'
-        Write-Host "Running file: '$targetBuildScript' -Tasks init."
-        & $targetBuildScript -Tasks init
-        if (-not $?)
-        {
-            throw 'The imported repository build initialization task failed.'
-        }
-        Write-Host 'Completed imported repository build initialization.' -ForegroundColor Green
-
         $targetDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $resolvedLocalPath -ChildPath 'source\Datum.yml')
         $targetProjectSettings = $targetDatum.Global.ProjectSettings
         if ([string]$targetProjectSettings.OrganizationName -ne $script:OrganizationName -or
@@ -597,11 +777,11 @@ try
         {
             throw 'The imported ProjectSettings.yml does not match the Azure DevOps organization, project, or repository used for this setup.'
         }
-        $targetEnvironmentNames = @(Get-EnvironmentNames -Datum $targetDatum)
+        $script:targetEnvironmentNames = @(Get-EnvironmentNames -Datum $targetDatum)
         $targetPat = [string](Get-RequiredConfigurationValue -Configuration $targetProjectSettings -Name 'PersonalAccessToken' -Path 'ProjectSettings.yml: PersonalAccessToken')
         $targetBuildPassword = [string](Get-RequiredConfigurationValue -Configuration $targetProjectSettings.BuildAgents -Name 'Password' -Path 'ProjectSettings.yml: BuildAgents.Password')
-        $secureBuildAgentPassword = ConvertTo-SecureStringFromConfiguration -Value $targetBuildPassword
-        Assert-BuildAgentPassword -Password $secureBuildAgentPassword
+        $script:secureBuildAgentPassword = ConvertTo-SecureStringFromConfiguration -Value $targetBuildPassword
+        Assert-BuildAgentPassword -Password $script:secureBuildAgentPassword
         $targetProtectionPassword = [string]$targetDatum.__Definition.DatumHandlers.'Datum.ProtectedData::ProtectedDatum'.CommandOptions.PlainTextPassword
         $secureTargetProtectionPassword = ConvertTo-SecureStringFromConfiguration -Value $targetProtectionPassword
         try
@@ -623,68 +803,84 @@ try
         $script:GitAuthorizationHeader = "AUTHORIZATION: Basic $([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$targetPat")))"
         $targetPat = $null
 
-        Write-BootstrapPhase -Description 'Register tenant applications and store credentials'
-        $appRegistrationScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\10 Setup App Registrations.ps1'
-        Invoke-LabScript -Path $appRegistrationScript -Arguments @{}
-
-        Write-BootstrapPhase -Description 'Test tenant application connections'
-        $connectionTestScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\11 Test Connection.ps1'
-        Invoke-LabScript -Path $connectionTestScript -Arguments @{ EnvironmentName = $targetEnvironmentNames }
-
-        Write-BootstrapPhase -Description 'Configure Azure DevOps environments, agent pool, and pipelines'
-        $projectSetupScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\20 Configure AzDo Project.ps1'
-        Invoke-LabScriptWithGitAuthorization -Path $projectSetupScript -Arguments @{}
-
-        Write-BootstrapPhase -Description 'Install Bicep if needed and create Azure agent VMs'
-        $bicepCommand = Get-Command -Name bicep -ErrorAction SilentlyContinue
-        if (-not $bicepCommand)
-        {
-            $wingetCommand = Get-Command -Name winget -ErrorAction SilentlyContinue
-            if (-not $wingetCommand)
-            {
-                throw 'Bicep CLI and winget are both missing. Install Bicep before creating the agent VMs.'
+        Invoke-BootstrapStage -Index 8 -Name 'register-applications' `
+            -Description 'Register tenant applications and store credentials' `
+            -Action {
+                $appRegistrationScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\10 Setup App Registrations.ps1'
+                Invoke-LabScript -Path $appRegistrationScript -Arguments @{}
             }
 
-            Write-Host 'Installing the Bicep CLI with winget.'
-            Write-Host "Running command: '$($wingetCommand.Source) install --exact --id Microsoft.Bicep'."
-            & $wingetCommand.Source install --exact --id Microsoft.Bicep --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity
-            if ($LASTEXITCODE -ne 0)
-            {
-                throw "Bicep CLI installation failed with exit code $LASTEXITCODE."
+        Invoke-BootstrapStage -Index 9 -Name 'test-connections' `
+            -Description 'Test tenant application connections' `
+            -Action {
+                $connectionTestScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\11 Test Connection.ps1'
+                Invoke-LabScript -Path $connectionTestScript -Arguments @{ EnvironmentName = $script:targetEnvironmentNames }
             }
-            $bicepInstallPath = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Programs\Bicep CLI'
-            if (Test-Path -LiteralPath (Join-Path -Path $bicepInstallPath -ChildPath 'bicep.exe'))
-            {
-                $env:PATH = "$bicepInstallPath;$env:PATH"
-            }
-            if (-not (Get-Command -Name bicep -ErrorAction SilentlyContinue))
-            {
-                throw 'Bicep installed but was not found on PATH. Open a new PowerShell session and rerun the VM setup stage.'
-            }
-        }
-        else
-        {
-            Write-Host "Using Bicep CLI at '$($bicepCommand.Source)'."
-        }
 
-        $vmCreationScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\30 Create Agent VMs.ps1'
-        Invoke-LabScript -Path $vmCreationScript -Arguments @{
-            EnvironmentName    = $targetEnvironmentNames
-            BuildAgentPassword = $secureBuildAgentPassword
-        }
-        $secureBuildAgentPassword.Dispose()
-        $secureBuildAgentPassword = $null
+        Invoke-BootstrapStage -Index 10 -Name 'configure-devops' `
+            -Description 'Configure Azure DevOps environments, agent pool, and pipelines' `
+            -Action {
+                $projectSetupScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\20 Configure AzDo Project.ps1'
+                Invoke-LabScriptWithGitAuthorization -Path $projectSetupScript -Arguments @{}
+            }
 
-        Write-BootstrapPhase -Description 'Configure Azure DevOps agents on the new VMs'
-        $agentSetupScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\31 Agent Setup.ps1'
-        Invoke-LabScriptWithGitAuthorization -Path $agentSetupScript -Arguments @{ EnvironmentName = $targetEnvironmentNames }
-        $script:GitAuthorizationHeader = $null
+        Invoke-BootstrapStage -Index 11 -Name 'create-vms' `
+            -Description 'Install Bicep if needed and create Azure agent VMs' `
+            -Action {
+                $bicepCommand = Get-Command -Name bicep -ErrorAction SilentlyContinue
+                if (-not $bicepCommand)
+                {
+                    $wingetCommand = Get-Command -Name winget -ErrorAction SilentlyContinue
+                    if (-not $wingetCommand)
+                    {
+                        throw 'Bicep CLI and winget are both missing. Install Bicep before creating the agent VMs.'
+                    }
+
+                    Write-Host 'Installing the Bicep CLI with winget.'
+                    Write-Host "Running command: '$($wingetCommand.Source) install --exact --id Microsoft.Bicep'."
+                    & $wingetCommand.Source install --exact --id Microsoft.Bicep --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity
+                    if ($LASTEXITCODE -ne 0)
+                    {
+                        throw "Bicep CLI installation failed with exit code $LASTEXITCODE."
+                    }
+                    $bicepInstallPath = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Programs\Bicep CLI'
+                    if (Test-Path -LiteralPath (Join-Path -Path $bicepInstallPath -ChildPath 'bicep.exe'))
+                    {
+                        $env:PATH = "$bicepInstallPath;$env:PATH"
+                    }
+                    if (-not (Get-Command -Name bicep -ErrorAction SilentlyContinue))
+                    {
+                        throw 'Bicep installed but was not found on PATH. Open a new PowerShell session and rerun the VM setup stage.'
+                    }
+                }
+                else
+                {
+                    Write-Host "Using Bicep CLI at '$($bicepCommand.Source)'."
+                }
+
+                $vmCreationScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\30 Create Agent VMs.ps1'
+                Invoke-LabScript -Path $vmCreationScript -Arguments @{
+                    EnvironmentName    = $script:targetEnvironmentNames
+                    BuildAgentPassword = $script:secureBuildAgentPassword
+                }
+                $script:secureBuildAgentPassword.Dispose()
+                $script:secureBuildAgentPassword = $null
+            }
+
+        Invoke-BootstrapStage -Index 12 -Name 'configure-agents' `
+            -Description 'Configure Azure DevOps agents on the new VMs' `
+            -Action {
+                $agentSetupScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\31 Agent Setup.ps1'
+                Invoke-LabScriptWithGitAuthorization -Path $agentSetupScript -Arguments @{ EnvironmentName = $script:targetEnvironmentNames }
+                $script:GitAuthorizationHeader = $null
+            }
     }
     finally
     {
         Pop-Location
     }
 
+    Remove-Item -LiteralPath $script:BootstrapCheckpointPath -Force -ErrorAction Stop
     Write-Host "Azure lab bootstrap completed for '$script:OrganizationName/$script:ProjectName'." -ForegroundColor Green
     Write-Host 'No DSC push pipeline was queued. Review and run tenant-changing pipelines explicitly.'
 }
@@ -696,9 +892,10 @@ catch
 finally
 {
     Restore-GitAuthorizationHeader
-    if ($secureBuildAgentPassword)
+    if ($script:secureBuildAgentPassword)
     {
-        $secureBuildAgentPassword.Dispose()
+        $script:secureBuildAgentPassword.Dispose()
     }
+    $script:secureBuildAgentPassword = $null
     $script:GitAuthorizationHeader = $null
 }

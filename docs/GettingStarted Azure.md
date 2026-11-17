@@ -19,13 +19,17 @@ The VM agents run the workshop pipelines and apply the DSC configuration to thei
 The import-and-clone stage can also be run separately with `lab/Azure/05 Import GitHub Repository.ps1`. It reads the same local project settings, imports the GitHub repository into Azure DevOps, and creates the configured local checkout without continuing to tenant or VM setup. Restore the source checkout dependencies first:
 
 ```powershell
-pwsh -NoLogo -NoProfile -File .\build.ps1 -UsePSResourceGet -ResolveDependency
+pwsh -NoLogo -NoProfile -File .\Resolve-Dependency.ps1 -UsePSResourceGet -WithYAML
 & '.\lab\Azure\05 Import GitHub Repository.ps1'
 ```
+
+The bootstrap restores dependencies by running `Resolve-Dependency.ps1` directly in a fresh PowerShell process. This avoids loading the YAML parser through `build.ps1` before the restore. If `PowerShell-Yaml` is already installed in `output/RequiredModules`, the bootstrap reuses it rather than replacing files that another open PowerShell session may have loaded. To refresh it manually, close all sessions using the module and rerun the dependency command with `-WithYAML`.
 
 The bootstrapper prints a numbered phase heading before each major operation. It also prints the full path of each script or build command as it starts, followed by a completion message when that step succeeds. Long Azure DevOps project-creation and GitHub-import waits report elapsed time every 30 seconds. If an operation fails, the terminal reports the active phase; script failures also identify the file that failed.
 
 After a failure, rerun `lab/Start Azure Lab.ps1` to resume automatically: successfully completed stages are skipped and the interrupted stage is retried. The initial dependency restore and local configuration validation run again as preflight. Checkpoint data is stored under the current user's local application data and is bound to the checkout path and non-secret project/tenant settings; it does not contain credentials. Use `-Restart` to discard the saved progress and start the workflow over. A stage interrupted mid-operation is retried from its beginning, so its underlying operation may have partially completed before the failure.
+
+If the local Azure DevOps checkout is missing the required Azure scripts or has outdated parameters, the bootstrap fetches its tracked upstream branch and validates the latest scripts before asking whether to refresh the checkout. Approving overwrites tracked local changes and commits, but preserves `source/Global/ProjectSettings.yml` and `source/Global/Azure.yml`; untracked files remain. Declining leaves the checkout unchanged.
 
 Before running it:
 
@@ -33,7 +37,7 @@ Before running it:
 - Configure the tenant IDs, tenant names, subscription IDs, service flags, and identities for each environment in `Azure.yml`.
 - Publish the updated bootstrap and Azure scripts on the GitHub repository's default branch before running the bootstrapper. The GitHub-to-Azure-DevOps import is a snapshot: an already completed import is reused, not refreshed. If the Azure DevOps repository was imported before the latest scripts were published, update that repository from the current GitHub version (or configure a fresh project/repository) before running the bootstrapper. Keep tenant and project-specific settings local; the bootstrapper copies the two YAML configuration files from your checkout into a newly cloned Azure DevOps repository.
 
-The script protects an unprotected PAT or VM password in `ProjectSettings.yml` before copying it. Do not publish plaintext credentials. If bootstrap stops because an imported Azure script is missing, refresh the Azure DevOps repository from the current GitHub default branch and use an empty clone path before retrying. Run elevated PowerShell 7 from the workshop checkout:
+The script protects an unprotected PAT or VM password in `ProjectSettings.yml` before copying it. Do not publish plaintext credentials. If the Azure DevOps repository itself does not contain the current Azure scripts, update its GitHub import before approving a local checkout refresh. Run elevated PowerShell 7 from the workshop checkout:
 
 ```powershell
 & '.\lab\Start Azure Lab.ps1'
@@ -73,7 +77,7 @@ This installs the pinned `VSTeam` and `Az.Accounts` modules, sets the project na
 Run dependency restoration from a fresh PowerShell 7 process at the repository root, so modules loaded in the setup session do not keep package files locked:
 
 ```powershell
-.\build.ps1 -UsePSResourceGet -ResolveDependency
+pwsh -NoLogo -NoProfile -File .\Resolve-Dependency.ps1 -UsePSResourceGet -WithYAML
 ```
 
 The initial restore downloads the dependencies in `RequiredModules.psd1` and can take 15–20 minutes. If PSResourceGet repeatedly fails, close other PowerShell sessions that may have loaded modules from `output/RequiredModules`, then retry. ModuleFast is an alternative:

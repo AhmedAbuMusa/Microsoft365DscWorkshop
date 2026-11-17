@@ -214,6 +214,247 @@ function Restore-GitAuthorizationHeader
     $script:GitEnvironmentBackup = $null
 }
 
+function Get-ImportedAzureScriptIssues
+{
+    [CmdletBinding()]
+    param
+    (
+        [Parameter(Mandatory)]
+        [string]$RepositoryPath,
+
+        [Parameter()]
+        [string]$Revision
+    )
+
+    $requiredScripts = @(
+        @{ Path = 'lab\Azure\00 Prep.ps1'; Parameter = 'ProjectName' }
+        @{ Path = 'lab\Azure\30 Create Agent VMs.ps1'; Parameter = 'BuildAgentPassword' }
+        @{ Path = 'lab\Azure\31 Agent Setup.ps1'; Parameter = 'EnvironmentName' }
+    )
+    $issues = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($scriptAndParameter in $requiredScripts)
+    {
+        $scriptPath = Join-Path -Path $RepositoryPath -ChildPath $scriptAndParameter.Path
+        if ($Revision)
+        {
+            $gitPath = $scriptAndParameter.Path -replace '\\', '/'
+            $scriptContent = & $script:GitCommand.Source -C $RepositoryPath show "${Revision}:$gitPath" 2>$null
+            if ($LASTEXITCODE -ne 0)
+            {
+                $issues.Add("Required script '$($scriptAndParameter.Path)' is missing from '$Revision'.")
+                continue
+            }
+            $scriptContent = $scriptContent -join [Environment]::NewLine
+        }
+        elseif (Test-Path -LiteralPath $scriptPath -PathType Leaf)
+        {
+            $scriptContent = Get-Content -LiteralPath $scriptPath -Raw
+        }
+        else
+        {
+            $issues.Add("Required script '$($scriptAndParameter.Path)' is missing.")
+            continue
+        }
+
+        $tokens = $null
+        $parseErrors = $null
+        $scriptAst = [System.Management.Automation.Language.Parser]::ParseInput(
+            $scriptContent,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        if ($parseErrors)
+        {
+            $parseDetails = ($parseErrors | ForEach-Object {
+                    "line $($_.Extent.StartLineNumber): $($_.Message)"
+                }) -join '; '
+            $issues.Add("Imported script '$($scriptAndParameter.Path)' has PowerShell parse errors: $parseDetails")
+            continue
+        }
+
+        $parameterNames = @($scriptAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+        if ($scriptAndParameter.Parameter -notin $parameterNames)
+        {
+            $issues.Add("Imported script '$($scriptAndParameter.Path)' is outdated and does not declare parameter '$($scriptAndParameter.Parameter)'.")
+        }
+    }
+
+    return $issues.ToArray()
+}
+
+function Confirm-AzureDevOpsCloneRefresh
+{
+    [CmdletBinding()]
+    param
+    (
+        [Parameter(Mandatory)]
+        [string]$Upstream,
+
+        [Parameter(Mandatory)]
+        [int]$Behind,
+
+        [Parameter(Mandatory)]
+        [int]$Ahead
+    )
+
+    $approval = Read-Host -Prompt "Local clone is $Behind commit(s) behind and $Ahead commit(s) ahead of '$Upstream'. Refresh it from the latest Azure DevOps version? Tracked local changes and commits will be overwritten except source/Global/ProjectSettings.yml and source/Global/Azure.yml, which are preserved. Untracked files will remain. [y/N]"
+    return $approval -match '^(?i:y|yes)$'
+}
+
+function Update-OutdatedAzureDevOpsClone
+{
+    [CmdletBinding()]
+    param
+    (
+        [Parameter(Mandatory)]
+        [string]$RepositoryPath,
+
+        [Parameter(Mandatory)]
+        [string]$AuthorizationHeader,
+
+        [Parameter()]
+        [string]$BackupRoot = (Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Microsoft365DscWorkshop\AzureLabBootstrap\CloneBackups')
+    )
+
+    $upstream = & $script:GitCommand.Source -C $RepositoryPath rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$upstream))
+    {
+        throw "The local clone at '$RepositoryPath' has no upstream tracking branch; it cannot be refreshed automatically."
+    }
+
+    Set-GitAuthorizationHeader -AuthorizationHeader $AuthorizationHeader
+    try
+    {
+        & $script:GitCommand.Source -C $RepositoryPath fetch --prune origin
+        if ($LASTEXITCODE -ne 0)
+        {
+            throw "Could not fetch the latest Azure DevOps branch '$upstream'."
+        }
+    }
+    finally
+    {
+        Restore-GitAuthorizationHeader
+    }
+
+    $behind = 0
+    $behindText = & $script:GitCommand.Source -C $RepositoryPath rev-list --count "HEAD..$upstream"
+    if ($LASTEXITCODE -ne 0 -or -not [int]::TryParse([string]$behindText, [ref]$behind))
+    {
+        throw "Could not determine whether the local clone is behind '$upstream'."
+    }
+
+    $ahead = 0
+    $aheadText = & $script:GitCommand.Source -C $RepositoryPath rev-list --count "$upstream..HEAD"
+    if ($LASTEXITCODE -ne 0 -or -not [int]::TryParse([string]$aheadText, [ref]$ahead))
+    {
+        throw "Could not determine whether the local clone has commits ahead of '$upstream'."
+    }
+
+    if ($behind -eq 0)
+    {
+        throw "The required Azure scripts are outdated, but the local clone is not behind '$upstream'. Verify the Azure DevOps repository and branch before retrying."
+    }
+
+    $remoteIssues = @(Get-ImportedAzureScriptIssues -RepositoryPath $RepositoryPath -Revision $upstream)
+    if ($remoteIssues.Count -gt 0)
+    {
+        throw "The latest Azure DevOps version at '$upstream' does not contain compatible Azure scripts: $($remoteIssues -join ' ')"
+    }
+
+    if (-not (Confirm-AzureDevOpsCloneRefresh -Upstream $upstream -Behind $behind -Ahead $ahead))
+    {
+        throw "The local clone was not changed. Approve the refresh when prompted or configure a new empty LocalPath."
+    }
+
+    $backupDirectory = Join-Path -Path $BackupRoot -ChildPath ([guid]::NewGuid().ToString('N'))
+    $configurationBackups = [System.Collections.Generic.List[object]]::new()
+    $configurationPaths = @(
+        'source\Global\ProjectSettings.yml'
+        'source\Global\Azure.yml'
+    )
+
+    try
+    {
+        foreach ($relativePath in $configurationPaths)
+        {
+            $configurationPath = Join-Path -Path $RepositoryPath -ChildPath $relativePath
+            if (Test-Path -LiteralPath $configurationPath -PathType Leaf)
+            {
+                $backupPath = Join-Path -Path $backupDirectory -ChildPath $relativePath
+                $backupParent = Split-Path -Path $backupPath -Parent
+                $null = New-Item -ItemType Directory -Path $backupParent -Force
+                Copy-Item -LiteralPath $configurationPath -Destination $backupPath -Force
+                $configurationBackups.Add(@{
+                        Path       = $configurationPath
+                        BackupPath = $backupPath
+                    })
+            }
+        }
+    }
+    catch
+    {
+        if (Test-Path -LiteralPath $backupDirectory)
+        {
+            Remove-Item -LiteralPath $backupDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        throw "Could not safely back up local configuration before refreshing the clone: $($_.Exception.Message)"
+    }
+
+    $refreshError = $null
+    try
+    {
+        & $script:GitCommand.Source -C $RepositoryPath reset --hard $upstream
+        if ($LASTEXITCODE -ne 0)
+        {
+            throw "Git reset to '$upstream' failed with exit code $LASTEXITCODE."
+        }
+    }
+    catch
+    {
+        $refreshError = $_.Exception.Message
+    }
+
+    $restoreErrors = [System.Collections.Generic.List[string]]::new()
+    foreach ($configurationBackup in $configurationBackups)
+    {
+        try
+        {
+            Copy-Item -LiteralPath $configurationBackup.BackupPath -Destination $configurationBackup.Path -Force
+        }
+        catch
+        {
+            $restoreErrors.Add("$($configurationBackup.Path): $($_.Exception.Message)")
+        }
+    }
+
+    if ($restoreErrors.Count -gt 0)
+    {
+        throw "Could not restore local configuration after refreshing the clone. Backups were retained at '$backupDirectory'. $($restoreErrors -join '; ')"
+    }
+
+    if ($refreshError)
+    {
+        Remove-Item -LiteralPath $backupDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        throw "Could not refresh the local clone: $refreshError"
+    }
+
+    if (Test-Path -LiteralPath $backupDirectory)
+    {
+        try
+        {
+            Remove-Item -LiteralPath $backupDirectory -Recurse -Force -ErrorAction Stop
+        }
+        catch
+        {
+            Write-Warning "The clone was refreshed, but temporary configuration backups could not be removed from '$backupDirectory': $($_.Exception.Message)"
+        }
+    }
+
+    Write-Host "Refreshed local Azure DevOps clone to '$upstream'; local configuration files were preserved." -ForegroundColor Green
+}
+
 function Invoke-LabScript
 {
     param
@@ -497,12 +738,27 @@ if (-not $pwshCommand)
 }
 
 Remove-StaleMicrosoft365DscVersions -RepositoryRoot $repositoryRoot
-$sourceBuildScript = Join-Path -Path $repositoryRoot -ChildPath 'build.ps1'
+$sourceRequiredModules = Join-Path -Path $repositoryRoot -ChildPath 'output\RequiredModules'
+$yamlModuleRoot = Join-Path -Path $sourceRequiredModules -ChildPath 'powershell-yaml'
+$yamlModuleManifest = Get-ChildItem -LiteralPath $yamlModuleRoot -Filter 'powershell-yaml.psd1' -File -Recurse -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+$dependencyRestoreArguments = @('-UsePSResourceGet')
+if (-not $yamlModuleManifest)
+{
+    $dependencyRestoreArguments += '-WithYAML'
+}
+else
+{
+    $dependencyRestoreArguments += '-WithYAML:$false'
+    Write-Host "Using existing PowerShell-Yaml module at '$($yamlModuleManifest.FullName)'; skipping its refresh because another PowerShell session may have it loaded." -ForegroundColor Yellow
+}
+
+$sourceDependencyScript = Join-Path -Path $repositoryRoot -ChildPath 'Resolve-Dependency.ps1'
 Write-BootstrapPhase -Index 1 -Description 'Restore dependencies for the source checkout'
-Write-Host "Running file: '$sourceBuildScript' -UsePSResourceGet -ResolveDependency."
+Write-Host "Running file: '$sourceDependencyScript' $($dependencyRestoreArguments -join ' ')."
 try
 {
-    & $pwshCommand.Source -NoLogo -NoProfile -File $sourceBuildScript -UsePSResourceGet -ResolveDependency
+    & $pwshCommand.Source -NoLogo -NoProfile -File $sourceDependencyScript @dependencyRestoreArguments
     if ($LASTEXITCODE -ne 0)
     {
         throw "Source dependency restore failed with exit code $LASTEXITCODE."
@@ -515,7 +771,6 @@ catch
 }
 Write-Host 'Completed source checkout dependency restore.' -ForegroundColor Green
 
-$sourceRequiredModules = Join-Path -Path $repositoryRoot -ChildPath 'output\RequiredModules'
 if ($env:PSModulePath -notlike "*$sourceRequiredModules*")
 {
     $env:PSModulePath = "$sourceRequiredModules;$env:PSModulePath"
@@ -704,33 +959,38 @@ try
         Invoke-BootstrapStage -Index 4 -Name 'verify-import' `
             -Description 'Verify the imported Azure script versions' `
             -Action {
-                foreach ($scriptAndParameter in @(
-                        @{ Path = 'lab\Azure\00 Prep.ps1'; Parameter = 'ProjectName' }
-                        @{ Path = 'lab\Azure\30 Create Agent VMs.ps1'; Parameter = 'BuildAgentPassword' }
-                        @{ Path = 'lab\Azure\31 Agent Setup.ps1'; Parameter = 'EnvironmentName' }
-                    ))
+                $scriptIssues = @(Get-ImportedAzureScriptIssues -RepositoryPath $resolvedLocalPath)
+                if ($scriptIssues.Count -gt 0)
                 {
-                    $scriptPath = Join-Path -Path $resolvedLocalPath -ChildPath $scriptAndParameter.Path
-                    if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf))
+                    $refreshDatum = $null
+                    $refreshProjectSettings = $null
+                    $refreshPat = $null
+                    $refreshAuthorizationHeader = $null
+                    try
                     {
-                        throw "Required imported script '$($scriptAndParameter.Path)' was not found in the Azure DevOps clone. The clone likely contains an older GitHub import with the legacy 'lab\' layout. Publish the current Azure scripts to GitHub, refresh the Azure DevOps repository from that version, then remove this clone or set LocalPath to an empty directory before retrying."
+                        $refreshDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $repositoryRoot -ChildPath 'source\Datum.yml')
+                        $refreshProjectSettings = $refreshDatum.Global.ProjectSettings
+                        $refreshPat = [string](Get-RequiredConfigurationValue `
+                                -Configuration $refreshProjectSettings `
+                                -Name 'PersonalAccessToken' `
+                                -Path 'source/Global/ProjectSettings.yml: PersonalAccessToken')
+                        $refreshAuthorizationHeader = "AUTHORIZATION: Basic $([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$refreshPat")))"
+                        Update-OutdatedAzureDevOpsClone `
+                            -RepositoryPath $resolvedLocalPath `
+                            -AuthorizationHeader $refreshAuthorizationHeader
+                    }
+                    finally
+                    {
+                        $refreshPat = $null
+                        $refreshAuthorizationHeader = $null
+                        $refreshProjectSettings = $null
+                        $refreshDatum = $null
                     }
 
-                    $tokens = $null
-                    $parseErrors = $null
-                    $scriptAst = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors)
-                    if ($parseErrors)
+                    $scriptIssues = @(Get-ImportedAzureScriptIssues -RepositoryPath $resolvedLocalPath)
+                    if ($scriptIssues.Count -gt 0)
                     {
-                        $parseDetails = ($parseErrors | ForEach-Object {
-                                "line $($_.Extent.StartLineNumber): $($_.Message)"
-                            }) -join '; '
-                        throw "Imported script '$($scriptAndParameter.Path)' has PowerShell parse errors: $parseDetails"
-                    }
-
-                    $parameterNames = @($scriptAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
-                    if ($scriptAndParameter.Parameter -notin $parameterNames)
-                    {
-                        throw "Imported script '$($scriptAndParameter.Path)' is outdated. Import the current GitHub default branch before retrying."
+                        throw "The refreshed Azure DevOps clone still has incompatible Azure scripts: $($scriptIssues -join ' ')"
                     }
                 }
             }

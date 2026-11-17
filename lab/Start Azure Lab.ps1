@@ -80,11 +80,21 @@ function Update-BootstrapCheckpointSchema
     {
         1
         {
-            $Checkpoint['CompletedStages'] = @($Checkpoint['CompletedStages'] | Where-Object { $_ -ne 'prepare-machine' })
-            $Checkpoint['SchemaVersion'] = 2
+            $Checkpoint['CompletedStages'] = @($Checkpoint['CompletedStages'] | Where-Object {
+                    $_ -notin @('prepare-machine', 'verify-import', 'initialize-target-build')
+                })
+            $Checkpoint['SchemaVersion'] = 3
             return $true
         }
         2
+        {
+            $Checkpoint['CompletedStages'] = @($Checkpoint['CompletedStages'] | Where-Object {
+                    $_ -notin @('verify-import', 'initialize-target-build')
+                })
+            $Checkpoint['SchemaVersion'] = 3
+            return $true
+        }
+        3
         {
             return $false
         }
@@ -430,6 +440,48 @@ function Get-ImportedAzureScriptIssues
         if ($scriptAndParameter.Parameter -notin $parameterNames)
         {
             $issues.Add("Imported script '$($scriptAndParameter.Path)' is outdated and does not declare parameter '$($scriptAndParameter.Parameter)'.")
+        }
+    }
+
+    $requiredBuildFiles = @(
+        @{
+            Path        = 'build.yaml'
+            Pattern     = '(?ms)^\s+azureinit:\s*\r?\n\s+- test7\s*\r?\n\s+- LoadDatumConfigData\s*\r?\n\s+- ConfigDataPreparation\b'
+            Description = "Azure initialization workflow 'azureinit'"
+        }
+        @{
+            Path        = 'build.ps1'
+            Pattern     = '(?s)(?=.*Invoke-Build\s+@PSBoundParameters\s+-Task\s+\$Tasks\s+-File\s+\$MyInvocation\.MyCommand\.Path\s+-Result\s+\$buildResult)(?=.*\$buildResult\.Value\.Error)'
+            Description = 'Invoke-Build failure propagation'
+        }
+    )
+    foreach ($buildFile in $requiredBuildFiles)
+    {
+        $buildFilePath = Join-Path -Path $RepositoryPath -ChildPath $buildFile.Path
+        if ($Revision)
+        {
+            $gitPath = $buildFile.Path -replace '\\', '/'
+            $buildFileContent = & $script:GitCommand.Source -C $RepositoryPath show "${Revision}:$gitPath" 2>$null
+            if ($LASTEXITCODE -ne 0)
+            {
+                $issues.Add("Required file '$($buildFile.Path)' is missing from '$Revision'.")
+                continue
+            }
+            $buildFileContent = $buildFileContent -join [Environment]::NewLine
+        }
+        elseif (Test-Path -LiteralPath $buildFilePath -PathType Leaf)
+        {
+            $buildFileContent = Get-Content -LiteralPath $buildFilePath -Raw
+        }
+        else
+        {
+            $issues.Add("Required file '$($buildFile.Path)' is missing.")
+            continue
+        }
+
+        if ($buildFileContent -notmatch $buildFile.Pattern)
+        {
+            $issues.Add("Required file '$($buildFile.Path)' does not contain the $($buildFile.Description).")
         }
     }
 
@@ -1103,7 +1155,7 @@ else
     }
 
     $script:BootstrapCheckpoint = @{
-        SchemaVersion   = 2
+        SchemaVersion   = 3
         Fingerprint     = $identityHash
         CompletedStages = @()
         CurrentStage    = $null
@@ -1191,6 +1243,12 @@ try
         Invoke-BootstrapStage -Index 7 -Name 'initialize-target-build' `
             -Description 'Initialize the imported Azure build' `
             -Action {
+                $buildIssues = @(Get-ImportedAzureScriptIssues -RepositoryPath $resolvedLocalPath)
+                if ($buildIssues.Count -gt 0)
+                {
+                    throw "The imported Azure build is not ready to initialize: $($buildIssues -join ' ')"
+                }
+
                 $targetBuildScript = Join-Path -Path $resolvedLocalPath -ChildPath 'build.ps1'
                 Write-Host "Running file: '$targetBuildScript' -Tasks azureinit in a clean PowerShell process."
                 & $pwshCommand.Source -NoLogo -NoProfile -File $targetBuildScript -Tasks azureinit
@@ -1198,6 +1256,22 @@ try
                 {
                     throw "The imported Azure build initialization task failed with exit code $LASTEXITCODE."
                 }
+
+                $targetRequiredModulesFile = Join-Path -Path $resolvedLocalPath -ChildPath 'RequiredModules.psd1'
+                $targetRequiredModulesManifest = Import-PowerShellDataFile -LiteralPath $targetRequiredModulesFile
+                $azComputeRequirement = $targetRequiredModulesManifest['Az.Compute']
+                $azComputeVersion = if ($azComputeRequirement -is [System.Collections.IDictionary]) {
+                    [string]$azComputeRequirement.Version
+                }
+                else {
+                    [string]$azComputeRequirement
+                }
+                if ([string]::IsNullOrWhiteSpace($azComputeVersion))
+                {
+                    throw "The imported repository does not pin an Az.Compute version in '$targetRequiredModulesFile'."
+                }
+
+                Import-Module -Name Az.Compute -RequiredVersion $azComputeVersion -ErrorAction Stop
                 Write-Host 'Completed imported Azure build initialization.' -ForegroundColor Green
             }
 

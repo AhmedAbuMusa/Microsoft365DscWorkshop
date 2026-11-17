@@ -543,9 +543,20 @@ begin
 
         Write-Host -Object "[build] Starting build with InvokeBuild." -ForegroundColor Green
 
-        Invoke-Build @PSBoundParameters -Task $Tasks -File $MyInvocation.MyCommand.Path
+        $buildResult = @{}
+        try
+        {
+            Invoke-Build @PSBoundParameters -Task $Tasks -File $MyInvocation.MyCommand.Path -Result $buildResult
+        }
+        finally
+        {
+            Pop-Location -StackName 'BuildModule'
+        }
 
-        Pop-Location -StackName 'BuildModule'
+        if ($buildResult.Value.Error)
+        {
+            throw "Build workflow '$($Tasks -join ', ')' failed: $($buildResult.Value.Error)"
+        }
 
         return
     }

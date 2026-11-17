@@ -210,8 +210,10 @@ Describe 'Azure DevOps clone refresh approval' {
     It 'Detects when the imported checkout is missing the current Azure scripts' {
         $issues = @(Get-ImportedAzureScriptIssues -RepositoryPath $TestDrive)
 
-        $issues.Count | Should -Be 3
+        $issues.Count | Should -Be 5
         $issues[0] | Should -Match 'lab\\Azure\\00 Prep.ps1'
+        $issues[3] | Should -Match 'build.yaml'
+        $issues[4] | Should -Match 'build.ps1'
     }
 
     It 'Accepts a checkout containing all required scripts and parameters' {
@@ -227,6 +229,14 @@ Describe 'Azure DevOps clone refresh approval' {
             "param([string]`$$($scriptDefinition.Parameter))" |
                 Set-Content -LiteralPath $scriptPath
         }
+
+        "  azureinit:`r`n    - test7`r`n    - LoadDatumConfigData`r`n    - ConfigDataPreparation" |
+            Set-Content -LiteralPath (Join-Path -Path $TestDrive -ChildPath 'build.yaml')
+        @'
+        $buildResult = @{}
+        Invoke-Build @PSBoundParameters -Task $Tasks -File $MyInvocation.MyCommand.Path -Result $buildResult
+        if ($buildResult.Value.Error) { throw $buildResult.Value.Error }
+'@ | Set-Content -LiteralPath (Join-Path -Path $TestDrive -ChildPath 'build.ps1')
 
         Get-ImportedAzureScriptIssues -RepositoryPath $TestDrive | Should -BeNullOrEmpty
     }
@@ -283,6 +293,13 @@ Describe 'Azure DevOps clone refresh approval' {
             "param([string]`$$($scriptDefinition.Parameter))" |
                 Set-Content -LiteralPath $scriptPath
         }
+        "  azureinit:`r`n    - test7`r`n    - LoadDatumConfigData`r`n    - ConfigDataPreparation" |
+            Set-Content -LiteralPath (Join-Path -Path $seedPath -ChildPath 'build.yaml')
+        @'
+$buildResult = @{}
+Invoke-Build @PSBoundParameters -Task $Tasks -File $MyInvocation.MyCommand.Path -Result $buildResult
+if ($buildResult.Value.Error) { throw $buildResult.Value.Error }
+'@ | Set-Content -LiteralPath (Join-Path -Path $seedPath -ChildPath 'build.ps1')
         Set-Content -LiteralPath (Join-Path -Path $seedPath -ChildPath 'README.md') -Value 'remote-v2'
         foreach ($relativePath in @('source\Global\ProjectSettings.yml', 'source\Global\Azure.yml'))
         {

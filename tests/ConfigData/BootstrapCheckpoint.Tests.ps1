@@ -30,7 +30,7 @@ Describe 'Azure lab bootstrap checkpoint' {
         $script:BootstrapPhaseCount = 12
         $script:BootstrapCheckpointPath = Join-Path -Path $TestDrive -ChildPath 'bootstrap-checkpoint.json'
         $script:BootstrapCheckpoint = @{
-            SchemaVersion   = 2
+            SchemaVersion   = 3
             Fingerprint     = 'test'
             CompletedStages = @()
             CurrentStage    = $null
@@ -44,10 +44,41 @@ Describe 'Azure lab bootstrap checkpoint' {
 
         Update-BootstrapCheckpointSchema -Checkpoint $checkpoint | Should -BeTrue
 
-        $checkpoint.SchemaVersion | Should -Be 2
-        $checkpoint.CompletedStages | Should -Be @('import-repository', 'verify-import')
+        $checkpoint.SchemaVersion | Should -Be 3
+        $checkpoint.CompletedStages | Should -Be @('import-repository')
         $checkpoint.CurrentStage | Should -Be 'restore-target-dependencies'
         Update-BootstrapCheckpointSchema -Checkpoint $checkpoint | Should -BeFalse
+    }
+
+    It 'Invalidates import verification and build initialization from schema 2 without losing later completed work' {
+        $checkpoint = @{
+            SchemaVersion   = 2
+            Fingerprint     = 'test'
+            CompletedStages = @(
+                'import-repository'
+                'verify-import'
+                'prepare-machine'
+                'restore-target-dependencies'
+                'initialize-target-build'
+                'register-applications'
+                'test-connections'
+                'configure-devops'
+            )
+            CurrentStage    = 'create-vms'
+        }
+
+        Update-BootstrapCheckpointSchema -Checkpoint $checkpoint | Should -BeTrue
+
+        $checkpoint.SchemaVersion | Should -Be 3
+        $checkpoint.CompletedStages | Should -Be @(
+            'import-repository'
+            'prepare-machine'
+            'restore-target-dependencies'
+            'register-applications'
+            'test-connections'
+            'configure-devops'
+        )
+        $checkpoint.CurrentStage | Should -Be 'create-vms'
     }
 
     It 'Skips a stage after its completion was persisted' {

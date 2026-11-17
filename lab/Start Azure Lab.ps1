@@ -214,6 +214,118 @@ function Restore-GitAuthorizationHeader
     $script:GitEnvironmentBackup = $null
 }
 
+function Test-SourceDependencyRestoreComplete
+{
+    [CmdletBinding()]
+    param
+    (
+        [Parameter(Mandatory)]
+        [string]$RepositoryRoot,
+
+        [Parameter(Mandatory)]
+        [string]$RequiredModulesPath,
+
+        [switch]$ForceRestore
+    )
+
+    if ($ForceRestore)
+    {
+        Write-Verbose 'Dependency restoration was explicitly requested.'
+        return $false
+    }
+
+    $requiredModulesManifestPath = Join-Path -Path $RepositoryRoot -ChildPath 'RequiredModules.psd1'
+    $resolverDefaultsPath = Join-Path -Path $RepositoryRoot -ChildPath 'Resolve-Dependency.psd1'
+    if (-not (Test-Path -LiteralPath $requiredModulesManifestPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $resolverDefaultsPath -PathType Leaf))
+    {
+        Write-Verbose 'Dependency manifests are missing; dependency restore is required.'
+        return $false
+    }
+
+    $requiredModules = Import-PowerShellDataFile -Path $requiredModulesManifestPath
+    $resolverDefaults = Import-PowerShellDataFile -Path $resolverDefaultsPath
+    $availableModules = @(
+        Get-Module -ListAvailable |
+            Where-Object { $_.ModuleBase.StartsWith($RequiredModulesPath, [StringComparison]::OrdinalIgnoreCase) }
+    )
+    $requirements = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($requiredModule in $requiredModules.GetEnumerator() | Where-Object Key -ne 'PSDependOptions')
+    {
+        $version = if ($requiredModule.Value -is [System.Collections.IDictionary])
+        {
+            [string]$requiredModule.Value.Version
+        }
+        else
+        {
+            [string]$requiredModule.Value
+        }
+
+        $requirements.Add(@{
+                Name    = $requiredModule.Key
+                Version = $version
+            })
+    }
+
+    $requirements.Add(@{ Name = 'PSDepend'; Version = 'latest' })
+    if ($resolverDefaults.WithYAML)
+    {
+        $requirements.Add(@{ Name = 'PowerShell-Yaml'; Version = 'latest' })
+    }
+    if ($resolverDefaults.UsePSResourceGet)
+    {
+        $requirements.Add(@{
+                Name    = 'Microsoft.PowerShell.PSResourceGet'
+                Version = [string]$resolverDefaults.PSResourceGetVersion
+            })
+    }
+    if ($resolverDefaults.UsePowerShellGetCompatibilityModule)
+    {
+        $requirements.Add(@{
+                Name    = 'PowerShellGet'
+                Version = [string]$resolverDefaults.UsePowerShellGetCompatibilityModuleVersion
+            })
+    }
+
+    foreach ($requirement in $requirements)
+    {
+        $moduleMatches = @($availableModules | Where-Object Name -eq $requirement.Name)
+        if ($moduleMatches.Count -eq 0)
+        {
+            Write-Verbose "Required module '$($requirement.Name)' is not installed in '$RequiredModulesPath'."
+            return $false
+        }
+        if ([string]::IsNullOrWhiteSpace($requirement.Version) -or $requirement.Version -eq 'latest')
+        {
+            continue
+        }
+
+        $matchingVersion = $false
+        foreach ($module in $moduleMatches)
+        {
+            $installedVersion = [string]$module.Version
+            $prerelease = [string]$module.PrivateData.PSData.Prerelease
+            if ($prerelease)
+            {
+                $installedVersion = '{0}-{1}' -f $installedVersion, $prerelease
+            }
+            if ($installedVersion -eq $requirement.Version)
+            {
+                $matchingVersion = $true
+                break
+            }
+        }
+        if (-not $matchingVersion)
+        {
+            Write-Verbose "Required module '$($requirement.Name)' version '$($requirement.Version)' is not installed in '$RequiredModulesPath'."
+            return $false
+        }
+    }
+
+    return $true
+}
+
 function Get-ImportedAzureScriptIssues
 {
     [CmdletBinding()]
@@ -739,42 +851,55 @@ if (-not $pwshCommand)
 
 Remove-StaleMicrosoft365DscVersions -RepositoryRoot $repositoryRoot
 $sourceRequiredModules = Join-Path -Path $repositoryRoot -ChildPath 'output\RequiredModules'
-$yamlModuleRoot = Join-Path -Path $sourceRequiredModules -ChildPath 'powershell-yaml'
-$yamlModuleManifest = Get-ChildItem -LiteralPath $yamlModuleRoot -Filter 'powershell-yaml.psd1' -File -Recurse -ErrorAction SilentlyContinue |
-    Select-Object -First 1
-$dependencyRestoreArguments = @('-UsePSResourceGet')
-if (-not $yamlModuleManifest)
-{
-    $dependencyRestoreArguments += '-WithYAML'
-}
-else
-{
-    $dependencyRestoreArguments += '-WithYAML:$false'
-    Write-Host "Using existing PowerShell-Yaml module at '$($yamlModuleManifest.FullName)'; skipping its refresh because another PowerShell session may have it loaded." -ForegroundColor Yellow
-}
-
-$sourceDependencyScript = Join-Path -Path $repositoryRoot -ChildPath 'Resolve-Dependency.ps1'
-Write-BootstrapPhase -Index 1 -Description 'Restore dependencies for the source checkout'
-Write-Host "Running file: '$sourceDependencyScript' $($dependencyRestoreArguments -join ' ')."
-try
-{
-    & $pwshCommand.Source -NoLogo -NoProfile -File $sourceDependencyScript @dependencyRestoreArguments
-    if ($LASTEXITCODE -ne 0)
-    {
-        throw "Source dependency restore failed with exit code $LASTEXITCODE."
-    }
-}
-catch
-{
-    Write-Host "Bootstrap failed during phase $($script:BootstrapPhase)/$($script:BootstrapPhaseCount): $($_.Exception.Message)" -ForegroundColor Red
-    throw
-}
-Write-Host 'Completed source checkout dependency restore.' -ForegroundColor Green
-
 if ($env:PSModulePath -notlike "*$sourceRequiredModules*")
 {
     $env:PSModulePath = "$sourceRequiredModules;$env:PSModulePath"
 }
+
+$dependenciesAvailable = Test-SourceDependencyRestoreComplete `
+    -RepositoryRoot $repositoryRoot `
+    -RequiredModulesPath $sourceRequiredModules `
+    -ForceRestore:$Restart
+
+if ($dependenciesAvailable)
+{
+    Write-Host 'Skipping phase 01/12: all required dependency versions are already installed.' -ForegroundColor DarkGray
+}
+else
+{
+    $yamlModuleRoot = Join-Path -Path $sourceRequiredModules -ChildPath 'powershell-yaml'
+    $yamlModuleManifest = Get-ChildItem -LiteralPath $yamlModuleRoot -Filter 'powershell-yaml.psd1' -File -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    $dependencyRestoreArguments = @('-UsePSResourceGet')
+    if (-not $yamlModuleManifest)
+    {
+        $dependencyRestoreArguments += '-WithYAML'
+    }
+    else
+    {
+        $dependencyRestoreArguments += '-WithYAML:$false'
+        Write-Host "Using existing PowerShell-Yaml module at '$($yamlModuleManifest.FullName)'; skipping its refresh because another PowerShell session may have it loaded." -ForegroundColor Yellow
+    }
+
+    $sourceDependencyScript = Join-Path -Path $repositoryRoot -ChildPath 'Resolve-Dependency.ps1'
+    Write-BootstrapPhase -Index 1 -Description 'Restore dependencies for the source checkout'
+    Write-Host "Running file: '$sourceDependencyScript' $($dependencyRestoreArguments -join ' ')."
+    try
+    {
+        & $pwshCommand.Source -NoLogo -NoProfile -File $sourceDependencyScript @dependencyRestoreArguments
+        if ($LASTEXITCODE -ne 0)
+        {
+            throw "Source dependency restore failed with exit code $LASTEXITCODE."
+        }
+    }
+    catch
+    {
+        Write-Host "Bootstrap failed during phase $($script:BootstrapPhase)/$($script:BootstrapPhaseCount): $($_.Exception.Message)" -ForegroundColor Red
+        throw
+    }
+    Write-Host 'Completed source checkout dependency restore.' -ForegroundColor Green
+}
+
 Import-Module -Name Datum -ErrorAction Stop
 Import-Module -Name Datum.ProtectedData -ErrorAction Stop
 

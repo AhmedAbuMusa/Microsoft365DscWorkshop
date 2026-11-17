@@ -15,6 +15,7 @@ BeforeAll {
             $astNode.Name -in @(
                 'Set-GitAuthorizationHeader',
                 'Restore-GitAuthorizationHeader',
+                'Test-SourceDependencyRestoreComplete',
                 'Get-ImportedAzureScriptIssues',
                 'Confirm-AzureDevOpsCloneRefresh',
                 'Update-OutdatedAzureDevOpsClone'
@@ -83,6 +84,74 @@ Describe 'Azure bootstrap dependency restore' {
         $bootstrapContent | Should -Match ([regex]::Escape('$dependencyRestoreArguments += ''-WithYAML:$false'''))
         $bootstrapContent | Should -Match ([regex]::Escape('-File $sourceDependencyScript @dependencyRestoreArguments'))
         $bootstrapContent | Should -Not -Match ([regex]::Escape('-File $sourceBuildScript -UsePSResourceGet -ResolveDependency'))
+    }
+
+    It 'Skips dependency restore only when every required package version is present' {
+        $repositoryRoot = (Resolve-Path (Join-Path -Path $PSScriptRoot -ChildPath '..\..')).Path
+        $requiredModules = Import-PowerShellDataFile (Join-Path -Path $repositoryRoot -ChildPath 'RequiredModules.psd1')
+        $resolverDefaults = Import-PowerShellDataFile (Join-Path -Path $repositoryRoot -ChildPath 'Resolve-Dependency.psd1')
+        $requirements = foreach ($entry in $requiredModules.GetEnumerator() | Where-Object Key -ne 'PSDependOptions')
+        {
+            $version = if ($entry.Value -is [System.Collections.IDictionary]) { [string]$entry.Value.Version } else { [string]$entry.Value }
+            @{ Name = $entry.Key; Version = $version }
+        }
+        $requirements += @{ Name = 'PSDepend'; Version = 'latest' }
+        if ($resolverDefaults.WithYAML) { $requirements += @{ Name = 'PowerShell-Yaml'; Version = 'latest' } }
+        if ($resolverDefaults.UsePSResourceGet) { $requirements += @{ Name = 'Microsoft.PowerShell.PSResourceGet'; Version = [string]$resolverDefaults.PSResourceGetVersion } }
+        if ($resolverDefaults.UsePowerShellGetCompatibilityModule) { $requirements += @{ Name = 'PowerShellGet'; Version = [string]$resolverDefaults.UsePowerShellGetCompatibilityModuleVersion } }
+
+        $requiredModulesPath = Join-Path -Path $TestDrive -ChildPath 'RequiredModules'
+        $dependencyModuleFixtures = @(
+            foreach ($requirement in $requirements)
+            {
+                $version = $requirement.Version
+                $prerelease = $null
+                if ($version -match '^(.+)-([^-]+)$')
+                {
+                    $version = $Matches[1]
+                    $prerelease = $Matches[2]
+                }
+                if ($version -eq 'latest') { $version = '1.0.0' }
+
+                [pscustomobject]@{
+                    Name        = $requirement.Name
+                    ModuleBase  = $requiredModulesPath
+                    Version     = [version]$version
+                    PrivateData = @{ PSData = @{ Prerelease = $prerelease } }
+                }
+            }
+        )
+        $previousFixtures = Get-Variable -Name 'AzureBootstrapDependencyModuleFixtures' -Scope Global -ErrorAction SilentlyContinue
+        $global:AzureBootstrapDependencyModuleFixtures = $dependencyModuleFixtures
+        Mock Get-Module { $global:AzureBootstrapDependencyModuleFixtures }
+        try
+        {
+            Test-SourceDependencyRestoreComplete `
+                -RepositoryRoot $repositoryRoot `
+                -RequiredModulesPath $requiredModulesPath `
+                -Verbose |
+                Should -BeTrue
+
+            Test-SourceDependencyRestoreComplete `
+                -RepositoryRoot $repositoryRoot `
+                -RequiredModulesPath $requiredModulesPath `
+                -ForceRestore |
+                Should -BeFalse
+
+            $global:AzureBootstrapDependencyModuleFixtures = @($dependencyModuleFixtures | Where-Object Name -ne 'Az.Security')
+            Test-SourceDependencyRestoreComplete `
+                -RepositoryRoot $repositoryRoot `
+                -RequiredModulesPath $requiredModulesPath |
+                Should -BeFalse
+        }
+        finally
+        {
+            Remove-Variable -Name 'AzureBootstrapDependencyModuleFixtures' -Scope Global -ErrorAction SilentlyContinue
+            if ($previousFixtures)
+            {
+                Set-Variable -Name 'AzureBootstrapDependencyModuleFixtures' -Scope Global -Value $previousFixtures.Value
+            }
+        }
     }
 }
 

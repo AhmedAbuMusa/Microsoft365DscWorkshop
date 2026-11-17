@@ -137,6 +137,15 @@ Describe 'Azure bootstrap dependency restore' {
         $bootstrapContent | Should -Not -Match ([regex]::Escape('-Tasks init'))
     }
 
+    It 'Keeps checkpoint restart separate from forced dependency restoration' {
+        $bootstrapPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\lab\Start Azure Lab.ps1'
+        $bootstrapContent = Get-Content -LiteralPath $bootstrapPath -Raw
+
+        $bootstrapContent | Should -Match '\[switch\]\$ForceDependencyRestore'
+        $bootstrapContent | Should -Match ([regex]::Escape('-ForceRestore:$ForceDependencyRestore'))
+        $bootstrapContent | Should -Not -Match ([regex]::Escape('-ForceRestore:$Restart'))
+    }
+
     It 'Skips dependency restore only when every required package version is present' {
         $repositoryRoot = (Resolve-Path (Join-Path -Path $PSScriptRoot -ChildPath '..\..')).Path
         $requiredModules = Import-PowerShellDataFile (Join-Path -Path $repositoryRoot -ChildPath 'RequiredModules.psd1')

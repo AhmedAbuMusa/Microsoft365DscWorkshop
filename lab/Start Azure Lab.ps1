@@ -11,13 +11,17 @@
     Run from a fresh elevated PowerShell 7.6.10 or later session. Set all configuration
     values in the two YAML files before starting. If a run fails, rerun this script to
     resume from the failed stage; use -Restart to discard its saved progress and start over.
+    Use -ForceDependencyRestore only when dependency packages must also be refreshed.
 #>
 
 [CmdletBinding()]
 param
 (
     [Parameter()]
-    [switch]$Restart
+    [switch]$Restart,
+
+    [Parameter()]
+    [switch]$ForceDependencyRestore
 )
 
 $ErrorActionPreference = 'Stop'
@@ -954,7 +958,7 @@ if ($env:PSModulePath -notlike "*$sourceRequiredModules*")
 $dependenciesAvailable = Test-SourceDependencyRestoreComplete `
     -RepositoryRoot $repositoryRoot `
     -RequiredModulesPath $sourceRequiredModules `
-    -ForceRestore:$Restart
+    -ForceRestore:$ForceDependencyRestore
 
 if ($dependenciesAvailable)
 {
@@ -973,7 +977,7 @@ else
     else
     {
         $dependencyRestoreArguments += '-WithYAML:$false'
-        Write-Host "Using existing PowerShell-Yaml module at '$($yamlModuleManifest.FullName)'; skipping its refresh because another PowerShell session may have it loaded." -ForegroundColor Yellow
+        Write-Host "Using existing PowerShell-Yaml module at '$($yamlModuleManifest.FullName)'; it is excluded as a direct restore target, but another package may still request it as a transitive dependency." -ForegroundColor Yellow
     }
 
     $sourceDependencyScript = Join-Path -Path $repositoryRoot -ChildPath 'Resolve-Dependency.ps1'

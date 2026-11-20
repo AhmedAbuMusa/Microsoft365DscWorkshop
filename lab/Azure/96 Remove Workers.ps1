@@ -23,9 +23,18 @@ $env:PSModulePath = (@($defaultModulePaths) + $currentModulePaths | Select-Objec
 
 $requiredModulesPath = (Resolve-Path -Path $PSScriptRoot\..\..\output\RequiredModules).Path
 $requiredModuleVersions = Import-PowerShellDataFile -Path (Join-Path -Path $PSScriptRoot -ChildPath '..\..\RequiredModules.psd1')
-if ($env:PSModulePath -notlike "*$requiredModulesPath*")
+$existingModulePaths = $env:PSModulePath -split [System.IO.Path]::PathSeparator |
+    Where-Object { $_ -and $_ -ne $requiredModulesPath }
+$env:PSModulePath = (@($requiredModulesPath) + $existingModulePaths) -join [System.IO.Path]::PathSeparator
+
+$loadedAzureAndGraphModules = @(
+    Get-Module |
+        Where-Object { $_.Name -like 'Az.*' -or $_.Name -like 'Microsoft.Graph.*' }
+)
+if ($loadedAzureAndGraphModules.Count -gt 0)
 {
-    $env:PSModulePath = $env:PSModulePath + ";$requiredModulesPath"
+    $loadedModuleNames = $loadedAzureAndGraphModules | ForEach-Object { "$($_.Name) $($_.Version)" }
+    throw "This script requires a fresh PowerShell session. Close and reopen PowerShell, then rerun it. Already-loaded Azure or Graph modules: $($loadedModuleNames -join ', ')."
 }
 
 try
@@ -33,15 +42,86 @@ try
     Import-Module -Name Az.Accounts -RequiredVersion $requiredModuleVersions['Az.Accounts'] -ErrorAction Stop
     Import-Module -Name Az.Compute -RequiredVersion $requiredModuleVersions['Az.Compute'] -ErrorAction Stop
     Import-Module -Name Az.Resources -RequiredVersion $requiredModuleVersions['Az.Resources'] -ErrorAction Stop
+    Import-Module -Name Microsoft.Graph.Applications -RequiredVersion $requiredModuleVersions['Microsoft.Graph.Applications'] -ErrorAction Stop
+    Import-Module -Name Microsoft.Graph.Identity.DirectoryManagement -RequiredVersion $requiredModuleVersions['Microsoft.Graph.Identity.DirectoryManagement'] -ErrorAction Stop
+    Import-Module -Name Microsoft.Graph.Identity.Governance -RequiredVersion $requiredModuleVersions['Microsoft.Graph.Identity.Governance'] -ErrorAction Stop
 }
 catch
 {
-    throw "Failed to load the pinned Azure PowerShell modules. If an Az assembly is already loaded, close and reopen the PowerShell terminal before rerunning. $($_.Exception.Message)"
+    throw "Failed to load the pinned Azure or Microsoft Graph PowerShell modules. If an Azure or Graph assembly is already loaded, close and reopen the PowerShell terminal before rerunning. $($_.Exception.Message)"
 }
 
 Import-Module -Name Microsoft.Graph.Identity.Governance -RequiredVersion '2.41.1' -ErrorAction Stop
 Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
+
+function Remove-M365DscAgentPoolAgents
+{
+    [CmdletBinding()]
+    param
+    (
+        [Parameter(Mandatory)]
+        [string]$OrganizationName,
+
+        [Parameter(Mandatory)]
+        [string]$AgentPoolName,
+
+        [Parameter(Mandatory)]
+        [string]$PersonalAccessToken,
+
+        [Parameter(Mandatory)]
+        [string]$ProjectName,
+
+        [Parameter(Mandatory)]
+        [string]$EnvironmentName
+    )
+
+    $vmName = Get-M365DscAgentVmName -ProjectName $ProjectName -EnvironmentName $EnvironmentName
+    # Match the Bicep template's 15-character Windows computer-name limit.
+    $computerName = $vmName.Substring(0, [Math]::Min($vmName.Length, 15))
+    $agentNamePattern = '^{0}-\d+$' -f [regex]::Escape($computerName)
+    $encodedOrganizationName = [Uri]::EscapeDataString($OrganizationName)
+    $encodedPoolName = [Uri]::EscapeDataString($AgentPoolName)
+    $authorization = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$PersonalAccessToken"))
+    $headers = @{ Authorization = "Basic $authorization" }
+    $apiBaseUri = "https://dev.azure.com/$encodedOrganizationName/_apis/distributedtask"
+    $poolUri = "$apiBaseUri/pools?poolName=$encodedPoolName&api-version=7.1"
+    $pools = @((Invoke-RestMethod -Uri $poolUri -Headers $headers -Method Get -ErrorAction Stop).value |
+        Where-Object name -EQ $AgentPoolName)
+
+    if ($pools.Count -eq 0)
+    {
+        Write-Warning "Azure DevOps agent pool '$AgentPoolName' was not found; no agent records were removed."
+        return
+    }
+    if ($pools.Count -ne 1)
+    {
+        throw "Expected one Azure DevOps agent pool named '$AgentPoolName', found $($pools.Count)."
+    }
+
+    $agentsUri = "$apiBaseUri/pools/$($pools[0].id)/agents?api-version=7.1"
+    $agents = @((Invoke-RestMethod -Uri $agentsUri -Headers $headers -Method Get -ErrorAction Stop).value |
+        Where-Object { $_.name -match $agentNamePattern })
+
+    if ($agents.Count -eq 0)
+    {
+        Write-Host "No Azure DevOps agent records were found for environment '$EnvironmentName'."
+        return
+    }
+
+    foreach ($agent in $agents)
+    {
+        if ($agent.status -eq 'online')
+        {
+            Write-Warning "Azure DevOps agent '$($agent.name)' is still online and was not removed."
+            continue
+        }
+
+        $agentUri = "$apiBaseUri/pools/$($pools[0].id)/agents/$($agent.id)?api-version=7.1"
+        Invoke-RestMethod -Uri $agentUri -Headers $headers -Method Delete -ErrorAction Stop | Out-Null
+        Write-Host "Removed offline Azure DevOps agent '$($agent.name)' from pool '$AgentPoolName'."
+    }
+}
 
 foreach ($envName in $datum.Global.Azure.Environments.Keys)
 {
@@ -73,6 +153,13 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
     Test-M365DscConnection -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -SkipExchangeOnline:$skipExchangeOnline -ErrorAction Stop
 
     $identityName = Get-M365DscAgentIdentityName -ProjectName $datum.Global.ProjectSettings.ProjectName -EnvironmentName $envName
+    $agentPoolCleanupParameters = @{
+        OrganizationName    = [string]$datum.Global.ProjectSettings.OrganizationName
+        AgentPoolName       = [string]$datum.Global.ProjectSettings.AgentPoolName
+        PersonalAccessToken = [string]$datum.Global.ProjectSettings.PersonalAccessToken
+        ProjectName         = [string]$datum.Global.ProjectSettings.ProjectName
+        EnvironmentName     = [string]$envName
+    }
     $identity = Get-M365DscIdentity -Name $identityName
     if ($null -ne $identity)
     {
@@ -108,6 +195,7 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
     if ($null -eq $vm)
     {
         Write-Host "VM '$vmName' was not found; no Azure VM resources were removed."
+        Remove-M365DscAgentPoolAgents @agentPoolCleanupParameters
         continue
     }
 
@@ -125,6 +213,7 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
     {
         Write-Host "Removing AutomatedLab-managed resource group '$($vm.ResourceGroupName)' for environment '$envName'."
         Remove-AzResourceGroup -Name $vm.ResourceGroupName -Force -ErrorAction Stop | Out-Null
+        Remove-M365DscAgentPoolAgents @agentPoolCleanupParameters
         continue
     }
 
@@ -140,6 +229,7 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
         {
             Write-Host "Removing Bicep-managed resource group '$($vm.ResourceGroupName)' for environment '$envName'."
             Remove-AzResourceGroup -Name $vm.ResourceGroupName -Force -ErrorAction Stop | Out-Null
+            Remove-M365DscAgentPoolAgents @agentPoolCleanupParameters
             continue
         }
 
@@ -196,6 +286,7 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
         Remove-AzSnapshot -ResourceGroupName $vm.ResourceGroupName -SnapshotName $snapshot.Name -Force -ErrorAction Stop | Out-Null
     }
     Write-Host "Removed VM '$vmName' and its attached disks and network interfaces."
+    Remove-M365DscAgentPoolAgents @agentPoolCleanupParameters
 }
 
 Write-Host 'Finished worker cleanup.'

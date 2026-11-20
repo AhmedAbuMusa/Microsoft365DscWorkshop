@@ -75,6 +75,39 @@ Describe 'Azure repository import step' {
     }
 }
 
+Describe 'Azure worker shutdown module loading' {
+    It 'Loads the repository-pinned Az modules before connecting to Azure' {
+        $scriptPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\lab\Azure\89 Stop Workers.ps1'
+        $scriptContent = Get-Content -LiteralPath $scriptPath -Raw
+
+        $scriptContent | Should -Match 'Import-Module -Name Az\.Accounts -RequiredVersion \$requiredModuleVersions'
+        $scriptContent | Should -Match 'Import-Module -Name Az\.Compute -RequiredVersion \$requiredModuleVersions'
+        $scriptContent.IndexOf('Import-Module -Name Az.Compute') |
+            Should -BeLessThan $scriptContent.IndexOf('Import-Module -Name $PSScriptRoot\AzHelpers.psm1')
+        $scriptContent.IndexOf('Import-Module -Name $PSScriptRoot\AzHelpers.psm1') |
+            Should -BeLessThan $scriptContent.IndexOf('Connect-M365Dsc @param')
+        $scriptContent | Should -Match 'Already-loaded Az modules'
+    }
+}
+
+Describe 'Worker removal module loading' {
+    It 'Loads the pinned Microsoft Graph application modules before connecting for <ScriptPath>' -ForEach @(
+        @{ ScriptPath = '..\..\lab\AutomatedLab\96 Remove Workers.ps1' }
+        @{ ScriptPath = '..\..\lab\Azure\96 Remove Workers.ps1' }
+    ) {
+        $scriptPath = Join-Path -Path $PSScriptRoot -ChildPath $ScriptPath
+        $scriptContent = Get-Content -LiteralPath $scriptPath -Raw
+
+        $scriptContent | Should -Match 'Import-Module -Name Microsoft\.Graph\.Applications -RequiredVersion \$requiredModuleVersions'
+        $scriptContent | Should -Match 'Import-Module -Name Microsoft\.Graph\.Identity\.DirectoryManagement -RequiredVersion \$requiredModuleVersions'
+        $scriptContent.IndexOf('Import-Module -Name Microsoft.Graph.Applications') |
+            Should -BeLessThan $scriptContent.IndexOf('Import-Module -Name $PSScriptRoot\AzHelpers.psm1')
+        $scriptContent.IndexOf('Import-Module -Name $PSScriptRoot\AzHelpers.psm1') |
+            Should -BeLessThan $scriptContent.IndexOf('Connect-M365Dsc @param')
+        $scriptContent | Should -Match 'Already-loaded Azure or Graph modules'
+    }
+}
+
 Describe 'Azure bootstrap session isolation' {
     It 'Stops before setup when Az.Accounts is already loaded' {
         Mock Get-Module { [pscustomobject]@{ Name = 'Az.Accounts' } }

@@ -511,6 +511,7 @@ steps:
     env:
       DeltaReportInputDirectory: $(Pipeline.Workspace)/exportPipeline
       DeltaReportSourceTenant: ${{ parameters.sourceTenant }}
+      DeltaReportAnonymizeTenantIdentifiers: ${{ parameters.anonymizeTenantIdentifiers }}
 
   - task: PublishPipelineArtifact@1
     displayName: Publish Delta Report

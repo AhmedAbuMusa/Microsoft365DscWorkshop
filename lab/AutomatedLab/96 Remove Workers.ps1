@@ -23,9 +23,18 @@ $env:PSModulePath = (@($defaultModulePaths) + $currentModulePaths | Select-Objec
 
 $requiredModulesPath = (Resolve-Path -Path $PSScriptRoot\..\..\output\RequiredModules).Path
 $requiredModuleVersions = Import-PowerShellDataFile -Path (Join-Path -Path $PSScriptRoot -ChildPath '..\..\RequiredModules.psd1')
-if ($env:PSModulePath -notlike "*$requiredModulesPath*")
+$existingModulePaths = $env:PSModulePath -split [System.IO.Path]::PathSeparator |
+    Where-Object { $_ -and $_ -ne $requiredModulesPath }
+$env:PSModulePath = (@($requiredModulesPath) + $existingModulePaths) -join [System.IO.Path]::PathSeparator
+
+$loadedAzureAndGraphModules = @(
+    Get-Module |
+        Where-Object { $_.Name -like 'Az.*' -or $_.Name -like 'Microsoft.Graph.*' }
+)
+if ($loadedAzureAndGraphModules.Count -gt 0)
 {
-    $env:PSModulePath = $env:PSModulePath + ";$requiredModulesPath"
+    $loadedModuleNames = $loadedAzureAndGraphModules | ForEach-Object { "$($_.Name) $($_.Version)" }
+    throw "This script requires a fresh PowerShell session. Close and reopen PowerShell, then rerun it. Already-loaded Azure or Graph modules: $($loadedModuleNames -join ', ')."
 }
 
 try
@@ -33,13 +42,15 @@ try
     Import-Module -Name Az.Accounts -RequiredVersion $requiredModuleVersions['Az.Accounts'] -ErrorAction Stop
     Import-Module -Name Az.Compute -RequiredVersion $requiredModuleVersions['Az.Compute'] -ErrorAction Stop
     Import-Module -Name Az.Resources -RequiredVersion $requiredModuleVersions['Az.Resources'] -ErrorAction Stop
+    Import-Module -Name Microsoft.Graph.Applications -RequiredVersion $requiredModuleVersions['Microsoft.Graph.Applications'] -ErrorAction Stop
+    Import-Module -Name Microsoft.Graph.Identity.DirectoryManagement -RequiredVersion $requiredModuleVersions['Microsoft.Graph.Identity.DirectoryManagement'] -ErrorAction Stop
+    Import-Module -Name Microsoft.Graph.Identity.Governance -RequiredVersion $requiredModuleVersions['Microsoft.Graph.Identity.Governance'] -ErrorAction Stop
 }
 catch
 {
-    throw "Failed to load the pinned Azure PowerShell modules. If an Az assembly is already loaded, close and reopen the PowerShell terminal before rerunning. $($_.Exception.Message)"
+    throw "Failed to load the pinned Azure or Microsoft Graph PowerShell modules. If an Azure or Graph assembly is already loaded, close and reopen the PowerShell terminal before rerunning. $($_.Exception.Message)"
 }
 
-Import-Module -Name Microsoft.Graph.Identity.Governance -RequiredVersion '2.41.1' -ErrorAction Stop
 Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
 

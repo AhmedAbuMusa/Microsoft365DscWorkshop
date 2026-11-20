@@ -162,4 +162,4 @@ Confirm that the agents appear in the configured Azure DevOps agent pool and tha
 
 The project setup creates the `M365DSC build`, `M365DSC deltaReport`, `M365DSC export`, `M365DSC push`, `M365DSC reapply`, and `M365DSC test` pipelines. For pipeline permissions, first-run approvals, and pipeline behavior, follow [Running the Pipeline](GettingStarted.md#15-running-the-pipeline).
 
-To start, stop, or remove the Azure agents later, use the Azure-specific scripts under [lab/Azure](../lab/Azure/). Removing agents and their resources can incur data loss; review the cleanup behavior before running a removal script.
+To start, stop, or remove the Azure agents later, use the Azure-specific scripts under [lab/Azure](../lab/Azure/). `96 Remove Workers.ps1` also unregisters offline Azure DevOps agents whose names match the selected environment's generated VM computer name; it leaves online agents and unrelated pool members untouched. Removing agents and their resources can incur data loss; review the cleanup behavior before running a removal script.

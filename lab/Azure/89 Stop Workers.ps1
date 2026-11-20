@@ -5,9 +5,27 @@ param (
 )
 
 $requiredModulesPath = (Resolve-Path -Path $PSScriptRoot\..\..\output\RequiredModules).Path
-if ($env:PSModulePath -notlike "*$requiredModulesPath*")
+$requiredModuleVersions = Import-PowerShellDataFile -Path (Join-Path -Path $PSScriptRoot -ChildPath '..\..\RequiredModules.psd1')
+$existingModulePaths = $env:PSModulePath -split [System.IO.Path]::PathSeparator |
+    Where-Object { $_ -and $_ -ne $requiredModulesPath }
+$env:PSModulePath = (@($requiredModulesPath) + $existingModulePaths) -join [System.IO.Path]::PathSeparator
+
+$loadedAzModules = @(Get-Module -Name 'Az.*')
+if ($loadedAzModules.Count -gt 0)
 {
-    $env:PSModulePath = $env:PSModulePath + ";$requiredModulesPath"
+    $loadedModuleNames = $loadedAzModules | ForEach-Object { "$($_.Name) $($_.Version)" }
+    throw "This script requires a fresh PowerShell session. Close and reopen PowerShell, then rerun it. Already-loaded Az modules: $($loadedModuleNames -join ', ')."
+}
+
+try
+{
+    Import-Module -Name Az.Accounts -RequiredVersion $requiredModuleVersions['Az.Accounts'] -ErrorAction Stop
+    Import-Module -Name Az.Compute -RequiredVersion $requiredModuleVersions['Az.Compute'] -ErrorAction Stop
+    Import-Module -Name Az.Resources -RequiredVersion $requiredModuleVersions['Az.Resources'] -ErrorAction Stop
+}
+catch
+{
+    throw "Failed to load the pinned Azure PowerShell modules. If an Az assembly is already loaded, close and reopen the PowerShell terminal before rerunning. $($_.Exception.Message)"
 }
 
 if ($EnvironmentName)

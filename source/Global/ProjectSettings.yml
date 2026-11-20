@@ -1,1 +1,15 @@
-
+OrganizationName: <OrganizationName>
+PersonalAccessToken: <PersonalAccessToken>
+ProjectName: <ProjectName>
+RepositoryName: DSC
+GitHubRepositoryUrl: https://github.com/ahmedabumusa/Microsoft365DscWorkshop.git
+LocalPath: C:\Code\DB Systel GmbH\Ahmed\DevOps\DSC-Azure
+GitUserName: Ahmed Mahmoud
+GitUserEmail: ahmedabumusa@outlook.com
+AgentPoolName: <AgentPoolName>
+NumbertOfBuildAgents: 4
+BuildAgents:
+  UserName: worker
+  Password: <Password>
+  AzureLocation: West Europe
+  AzureRoleSize: Standard_D4ds_v6

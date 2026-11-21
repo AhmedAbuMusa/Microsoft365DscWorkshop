@@ -135,7 +135,18 @@ function Get-M365DscKeyVaultSecretName
         [string]$IdentityName,
 
         [Parameter(Mandatory = $true)]
-        [ValidateSet('secret', 'pfx', 'pfx-password')]
+        [ValidateSet(
+            'secret',
+            'pfx',
+            'pfx-password',
+            'application-id',
+            'certificate-thumbprint',
+            'tenant-id',
+            'tenant-name',
+            'subscription-id',
+            'personal-access-token',
+            'build-agent-password'
+        )]
         [string]$CredentialType
     )
 
@@ -147,18 +158,6 @@ function Get-M365DscKeyVaultSecretName
     }
 
     return $secretName
-}
-
-function Confirm-M365DscOverwrite
-{
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$Prompt
-    )
-
-    $response = Read-Host -Prompt "$Prompt [y/N]"
-    return $response -match '^(?i)y(es)?$'
 }
 
 function Get-M365DscDeletedKeyVault
@@ -194,72 +193,6 @@ function Get-M365DscDeletedKeyVault
     }
 
     return $null
-}
-
-function Wait-M365DscDeletedKeyVault
-{
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$VaultName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Location,
-
-        [Parameter(Mandatory = $true)]
-        [string]$SubscriptionId
-    )
-
-    for ($attempt = 1; $attempt -le 12; $attempt++)
-    {
-        $deletedVault = Get-M365DscDeletedKeyVault `
-            -VaultName $VaultName `
-            -Location $Location `
-            -SubscriptionId $SubscriptionId
-        if ($deletedVault)
-        {
-            return $deletedVault
-        }
-
-        if ($attempt -lt 12)
-        {
-            Start-Sleep -Seconds 5
-        }
-    }
-
-    throw "Key Vault '$VaultName' was deleted but did not appear in the soft-deleted vault list."
-}
-
-function Remove-M365DscDeletedKeyVault
-{
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [psobject]$DeletedVault,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Location,
-
-        [Parameter(Mandatory = $true)]
-        [string]$SubscriptionId
-    )
-
-    if ($DeletedVault.EnablePurgeProtection -eq $true)
-    {
-        throw "Key Vault '$($DeletedVault.VaultName)' has purge protection enabled and cannot be purged until its retention period expires."
-    }
-
-    Write-Host "Purging soft-deleted Key Vault '$($DeletedVault.VaultName)'."
-    Remove-AzKeyVault -InputObject $DeletedVault -InRemovedState -Force -ErrorAction Stop | Out-Null
-
-    $remainingVault = Get-M365DscDeletedKeyVault `
-        -VaultName $DeletedVault.VaultName `
-        -Location $Location `
-        -SubscriptionId $SubscriptionId
-    if ($remainingVault)
-    {
-        throw "Soft-deleted Key Vault '$($DeletedVault.VaultName)' is still present after the purge request."
-    }
 }
 
 function Initialize-M365DscKeyVault
@@ -315,14 +248,27 @@ function Initialize-M365DscKeyVault
         }
     }
 
-    $resourceGroup = Get-AzResourceGroup -ErrorAction Stop |
-        Where-Object Name -EQ $resourceGroupName
-    $vault = Get-AzKeyVault -ErrorAction Stop |
-        Where-Object VaultName -EQ $vaultName
-    if (@($vault).Count -gt 1)
+    $resourceGroups = @(Get-AzResourceGroup -ErrorAction Stop |
+        Where-Object Name -EQ $resourceGroupName)
+    if ($resourceGroups.Count -gt 1)
+    {
+        throw "More than one resource group named '$resourceGroupName' was found in subscription '$SubscriptionId'."
+    }
+
+    $resourceGroup = $resourceGroups | Select-Object -First 1
+    if (-not $resourceGroup)
+    {
+        Write-Host "Creating credential resource group '$resourceGroupName' in '$Location'."
+        $resourceGroup = New-AzResourceGroup -Name $resourceGroupName -Location $Location -ErrorAction Stop
+    }
+
+    $vaults = @(Get-AzKeyVault -ErrorAction Stop |
+        Where-Object VaultName -EQ $vaultName)
+    if ($vaults.Count -gt 1)
     {
         throw "More than one Key Vault named '$vaultName' was found in subscription '$SubscriptionId'."
     }
+    $vault = $vaults | Select-Object -First 1
     if ($vault -and -not [string]::Equals($vault.ResourceGroupName, $resourceGroupName, [StringComparison]::OrdinalIgnoreCase))
     {
         throw "Key Vault '$vaultName' already exists in resource group '$($vault.ResourceGroupName)' instead of '$resourceGroupName'."
@@ -332,121 +278,21 @@ function Initialize-M365DscKeyVault
         -VaultName $vaultName `
         -Location $Location `
         -SubscriptionId $SubscriptionId
-
-    $overwriteResourceGroup = $false
-    if ($resourceGroup)
+    if ($vault -and $deletedVault)
     {
-        $overwriteResourceGroup = Confirm-M365DscOverwrite `
-            -Prompt "Resource group '$resourceGroupName' already exists. Overwriting it permanently deletes every resource it contains. Delete and recreate it?"
+        throw "Both active and soft-deleted Key Vaults named '$vaultName' were found; resolve the conflict before continuing."
     }
-    else
+    if (-not $vault -and $deletedVault)
     {
-        Write-Host "Creating credential resource group '$resourceGroupName' in '$Location'."
-        $resourceGroup = New-AzResourceGroup -Name $resourceGroupName -Location $Location -ErrorAction Stop
-    }
-
-    $vaultInResourceGroup = $vault -and
-        [string]::Equals($vault.ResourceGroupName, $resourceGroupName, [StringComparison]::OrdinalIgnoreCase)
-    $deletedVaultInResourceGroup = $deletedVault -and
-        [string]::Equals($deletedVault.ResourceGroupName, $resourceGroupName, [StringComparison]::OrdinalIgnoreCase)
-
-    if ($overwriteResourceGroup)
-    {
-        if ($vaultInResourceGroup -and $vault.EnablePurgeProtection -eq $true)
+        Write-Host "Recovering and reusing soft-deleted Key Vault '$vaultName'."
+        Undo-AzKeyVaultRemoval -InputObject $deletedVault -ErrorAction Stop | Out-Null
+        $vaults = @(Get-AzKeyVault -ErrorAction Stop |
+            Where-Object VaultName -EQ $vaultName)
+        if ($vaults.Count -ne 1)
         {
-            throw "Key Vault '$vaultName' has purge protection enabled. The resource group cannot be overwritten until its retention period expires."
+            throw "Could not uniquely resolve Key Vault '$vaultName' after recovery."
         }
-        if ($deletedVaultInResourceGroup -and $deletedVault.EnablePurgeProtection -eq $true)
-        {
-            throw "Key Vault '$vaultName' has purge protection enabled. The resource group cannot be overwritten until its retention period expires."
-        }
-
-        Write-Host "Deleting credential resource group '$resourceGroupName'."
-        Remove-AzResourceGroup -Name $resourceGroupName -Force -ErrorAction Stop | Out-Null
-
-        if ($vaultInResourceGroup)
-        {
-            $deletedVault = Wait-M365DscDeletedKeyVault `
-                -VaultName $vaultName `
-                -Location $Location `
-                -SubscriptionId $SubscriptionId
-            Remove-M365DscDeletedKeyVault `
-                -DeletedVault $deletedVault `
-                -Location $Location `
-                -SubscriptionId $SubscriptionId
-            $vault = $null
-            $deletedVault = $null
-        }
-        elseif ($deletedVaultInResourceGroup)
-        {
-            Remove-M365DscDeletedKeyVault `
-                -DeletedVault $deletedVault `
-                -Location $Location `
-                -SubscriptionId $SubscriptionId
-            $deletedVault = $null
-        }
-
-        Write-Host "Creating credential resource group '$resourceGroupName' in '$Location'."
-        $resourceGroup = New-AzResourceGroup -Name $resourceGroupName -Location $Location -ErrorAction Stop
-    }
-    elseif (-not $resourceGroup)
-    {
-        Write-Host "Creating credential resource group '$resourceGroupName' in '$Location'."
-        $resourceGroup = New-AzResourceGroup -Name $resourceGroupName -Location $Location -ErrorAction Stop
-    }
-
-    if ($vault)
-    {
-        if (Confirm-M365DscOverwrite `
-                -Prompt "Key Vault '$vaultName' already exists. Delete, purge, and recreate it with an empty secret store?")
-        {
-            if ($vault.EnablePurgeProtection -eq $true)
-            {
-                throw "Key Vault '$vaultName' has purge protection enabled and cannot be purged until its retention period expires."
-            }
-
-            Write-Host "Deleting Key Vault '$vaultName'."
-            Remove-AzKeyVault `
-                -VaultName $vault.VaultName `
-                -ResourceGroupName $vault.ResourceGroupName `
-                -Force `
-                -ErrorAction Stop | Out-Null
-            $deletedVault = Wait-M365DscDeletedKeyVault `
-                -VaultName $vaultName `
-                -Location $Location `
-                -SubscriptionId $SubscriptionId
-            Remove-M365DscDeletedKeyVault `
-                -DeletedVault $deletedVault `
-                -Location $Location `
-                -SubscriptionId $SubscriptionId
-            $vault = $null
-        }
-        else
-        {
-            Write-Host "Using existing Key Vault '$vaultName' without changing its authorization model."
-        }
-    }
-    elseif ($deletedVault)
-    {
-        if (Confirm-M365DscOverwrite `
-                -Prompt "Key Vault '$vaultName' is soft-deleted. Type Y to purge and recreate it; the default N recovers and reuses it")
-        {
-            Remove-M365DscDeletedKeyVault `
-                -DeletedVault $deletedVault `
-                -Location $Location `
-                -SubscriptionId $SubscriptionId
-        }
-        else
-        {
-            Write-Host "Recovering and reusing soft-deleted Key Vault '$vaultName'."
-            Undo-AzKeyVaultRemoval -InputObject $deletedVault -ErrorAction Stop | Out-Null
-            $vault = Get-AzKeyVault -ErrorAction Stop |
-                Where-Object VaultName -EQ $vaultName
-            if (@($vault).Count -ne 1)
-            {
-                throw "Could not uniquely resolve Key Vault '$vaultName' after recovery."
-            }
-        }
+        $vault = $vaults[0]
     }
 
     if (-not $vault)
@@ -456,6 +302,7 @@ function Initialize-M365DscKeyVault
             -VaultName $vaultName `
             -ResourceGroupName $resourceGroupName `
             -Location $Location `
+            -EnablePurgeProtection `
             -DisableRbacAuthorization:$false `
             -ErrorAction Stop
     }
@@ -467,6 +314,14 @@ function Initialize-M365DscKeyVault
     if ($vault.EnableRbacAuthorization -ne $true)
     {
         throw "Key Vault '$vaultName' must use Azure RBAC authorization. Review the existing vault before changing its permission model."
+    }
+    if ($vault.EnablePurgeProtection -ne $true)
+    {
+        $vault = Update-AzKeyVault `
+            -VaultName $vault.VaultName `
+            -ResourceGroupName $vault.ResourceGroupName `
+            -EnablePurgeProtection `
+            -ErrorAction Stop
     }
 
     return $vault
@@ -615,6 +470,95 @@ function Get-M365DscKeyVaultSecret
     return $secret.SecretValue
 }
 
+function Get-M365DscProjectSettingsFromKeyVault
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object]$Datum,
+
+        [Parameter()]
+        [ValidateSet('personal-access-token', 'build-agent-password')]
+        [string[]]$CredentialType = @('personal-access-token', 'build-agent-password')
+    )
+
+    $settings = $Datum.Global.ProjectSettings
+    $environmentName = [string]$settings.CredentialVaultEnvironment
+    if ([string]::IsNullOrWhiteSpace($environmentName))
+    {
+        throw "Set 'CredentialVaultEnvironment' in 'source/Global/ProjectSettings.yml' to an environment from 'source/Global/Azure.yml'."
+    }
+
+    $environment = $Datum.Global.Azure.Environments[$environmentName]
+    if ($null -eq $environment)
+    {
+        throw "Credential vault environment '$environmentName' is not configured in 'source/Global/Azure.yml'."
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$environment.AzTenantName))
+    {
+        throw "Tenant domain for credential vault environment '$environmentName' is not configured."
+    }
+
+    $contextParameters = @{
+        TenantName = [string]$environment.AzTenantName
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$environment.AzSubscriptionId))
+    {
+        $contextParameters.SubscriptionId = [string]$environment.AzSubscriptionId
+    }
+    $context = Connect-M365DscEnvironmentContext @contextParameters
+    $vaultName = Get-M365DscKeyVaultName `
+        -ProjectName $settings.ProjectName `
+        -EnvironmentName $environmentName `
+        -TenantId $context.Tenant.Id `
+        -SubscriptionId $context.Subscription.Id
+
+    $credentials = @(
+        @{
+            PropertyName  = 'PersonalAccessToken'
+            CredentialType = 'personal-access-token'
+        }
+        @{
+            PropertyName  = 'BuildAgents.Password'
+            CredentialType = 'build-agent-password'
+        }
+    ) | Where-Object CredentialType -In $CredentialType
+    foreach ($credential in $credentials)
+    {
+        $secretName = Get-M365DscKeyVaultSecretName `
+            -IdentityName 'ProjectSettings' `
+            -CredentialType $credential.CredentialType
+        if (-not (Test-M365DscKeyVaultSecret -VaultName $vaultName -Name $secretName))
+        {
+            throw "Key Vault '$vaultName' is missing project setting secret '$secretName'. Run the project credential bootstrap first."
+        }
+
+        $secureValue = Get-M365DscKeyVaultSecret -VaultName $vaultName -Name $secretName
+        try
+        {
+            $plainValue = ConvertTo-M365DscPlainText -Value $secureValue
+            if ([string]::IsNullOrWhiteSpace($plainValue))
+            {
+                throw "Key Vault secret '$secretName' is empty."
+            }
+            if ($credential.PropertyName -eq 'PersonalAccessToken')
+            {
+                $settings.PersonalAccessToken = $plainValue
+            }
+            else
+            {
+                $settings.BuildAgents.Password = $plainValue
+            }
+        }
+        finally
+        {
+            $secureValue.Dispose()
+        }
+    }
+
+    return $Datum
+}
+
 function Set-M365DscKeyVaultSecret
 {
     [CmdletBinding()]
@@ -646,6 +590,365 @@ function Set-M365DscKeyVaultSecret
         -SecretValue $SecretValue `
         -ContentType $ContentType `
         -ErrorAction Stop | Out-Null
+}
+
+function ConvertTo-M365DscPlainText
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [securestring]$Value
+    )
+
+    return [System.Net.NetworkCredential]::new('', $Value).Password
+}
+
+function ConvertTo-M365DscSecureString
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    $secureValue = [securestring]::new()
+    foreach ($character in $Value.ToCharArray())
+    {
+        $secureValue.AppendChar($character)
+    }
+    $secureValue.MakeReadOnly()
+
+    return $secureValue
+}
+
+function Connect-M365DscEnvironmentContext
+{
+    [CmdletBinding(DefaultParameterSetName = 'Interactive')]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$TenantName,
+
+        [Parameter(ParameterSetName = 'Interactive')]
+        [string]$SubscriptionId,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'ManagedIdentity')]
+        [switch]$ManagedIdentity
+    )
+
+    if ($ManagedIdentity)
+    {
+        $managedIdentityClientId = [string]$env:AZURE_CLIENT_ID
+        if ([string]::IsNullOrWhiteSpace($managedIdentityClientId))
+        {
+            throw 'Managed-identity Key Vault access requires AZURE_CLIENT_ID to be configured on the build agent. Run the agent setup script again.'
+        }
+
+        Connect-AzAccount -Identity -AccountId $managedIdentityClientId -ErrorAction Stop | Out-Null
+    }
+    else
+    {
+        Connect-AzAccount -Tenant $TenantName -ErrorAction Stop | Out-Null
+    }
+
+    $context = Get-AzContext -ErrorAction Stop
+    if (-not $context.Tenant.Id)
+    {
+        throw 'Azure sign-in completed without an active tenant context.'
+    }
+
+    $subscriptions = @(
+        Get-AzSubscription -TenantId $context.Tenant.Id -ErrorAction Stop |
+            Where-Object { $_.State -eq 'Enabled' }
+    )
+    if ($SubscriptionId)
+    {
+        $selectedSubscription = @(
+            $subscriptions | Where-Object { $_.Id -eq $SubscriptionId }
+        )
+        if ($selectedSubscription.Count -ne 1)
+        {
+            throw "Subscription '$SubscriptionId' is not uniquely available in tenant '$($context.Tenant.Id)'."
+        }
+    }
+    elseif ($subscriptions.Count -eq 1)
+    {
+        $selectedSubscription = $subscriptions
+    }
+    elseif ($subscriptions.Count -gt 1 -and -not $ManagedIdentity)
+    {
+        Write-Host 'Select the Azure subscription for this environment:'
+        for ($index = 0; $index -lt $subscriptions.Count; $index++)
+        {
+            Write-Host ("[{0}] {1} ({2})" -f ($index + 1), $subscriptions[$index].Name, $subscriptions[$index].Id)
+        }
+
+        $selection = Read-Host -Prompt 'Subscription number'
+        $selectionNumber = 0
+        if (-not [int]::TryParse($selection, [ref]$selectionNumber) -or
+            $selectionNumber -lt 1 -or
+            $selectionNumber -gt $subscriptions.Count)
+        {
+            throw "The subscription selection '$selection' is invalid."
+        }
+        $selectedSubscription = @($subscriptions[$selectionNumber - 1])
+    }
+    elseif ($subscriptions.Count -gt 1)
+    {
+        $contextSubscription = @(
+            $subscriptions | Where-Object { $_.Id -eq $context.Subscription.Id }
+        )
+        if ($contextSubscription.Count -ne 1)
+        {
+            throw "The managed identity has access to multiple subscriptions in tenant '$($context.Tenant.Id)'; configure an explicit subscription selection for this agent."
+        }
+        $selectedSubscription = $contextSubscription
+    }
+    else
+    {
+        throw "No enabled Azure subscriptions are available in tenant '$($context.Tenant.Id)'."
+    }
+
+    Set-AzContext `
+        -TenantId $context.Tenant.Id `
+        -SubscriptionId $selectedSubscription[0].Id `
+        -ErrorAction Stop | Out-Null
+
+    return Get-AzContext -ErrorAction Stop
+}
+
+function Set-M365DscEnvironmentMetadata
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VaultName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TenantId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TenantName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SubscriptionId,
+
+        [Parameter(Mandatory = $true)]
+        [object[]]$Identities
+    )
+
+    $metadata = [ordered]@{
+        '__environment|tenant-id'      = $TenantId
+        '__environment|tenant-name'    = $TenantName
+        '__environment|subscription-id' = $SubscriptionId
+    }
+    foreach ($identity in $Identities)
+    {
+        if (-not $identity.Name)
+        {
+            throw 'Cannot store Key Vault identity metadata without an identity name.'
+        }
+
+        if ($identity.ApplicationId)
+        {
+            $metadata["$($identity.Name)|application-id"] = [string]$identity.ApplicationId
+        }
+        if ($identity.ApplicationSecret)
+        {
+            $metadata["$($identity.Name)|secret"] = [string]$identity.ApplicationSecret
+        }
+        if ($identity.CertificateThumbprint)
+        {
+            $metadata["$($identity.Name)|certificate-thumbprint"] = [string]$identity.CertificateThumbprint
+        }
+    }
+
+    foreach ($entry in $metadata.GetEnumerator())
+    {
+        $parts = $entry.Key -split '\|', 2
+        $secretName = Get-M365DscKeyVaultSecretName -IdentityName $parts[0] -CredentialType $parts[1]
+        Set-M365DscKeyVaultSecret `
+            -VaultName $VaultName `
+            -Name $secretName `
+            -SecretValue (ConvertTo-M365DscSecureString -Value $entry.Value) `
+            -ContentType 'text/plain' `
+            -Overwrite
+    }
+}
+
+function Get-M365DscEnvironmentFromKeyVault
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$EnvironmentName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TenantName,
+
+        [Parameter()]
+        [bool]$HasExchangeOnline = $false,
+
+        [Parameter()]
+        [bool]$HasSharePointOnline = $false,
+
+        [Parameter()]
+        [switch]$ManagedIdentity,
+
+        [Parameter()]
+        [switch]$IncludeCredentials,
+
+        [Parameter()]
+        [string[]]$CredentialIdentityName
+    )
+
+    $contextParameters = @{
+        TenantName = $TenantName
+    }
+    if ($ManagedIdentity)
+    {
+        $contextParameters.ManagedIdentity = $true
+    }
+    $context = Connect-M365DscEnvironmentContext @contextParameters
+    $tenantId = [string]$context.Tenant.Id
+    $subscriptionId = [string]$context.Subscription.Id
+    $vaultName = Get-M365DscKeyVaultName `
+        -ProjectName $ProjectName `
+        -EnvironmentName $EnvironmentName `
+        -TenantId $tenantId `
+        -SubscriptionId $subscriptionId
+
+    $metadata = [ordered]@{
+        TenantId       = $tenantId
+        TenantName     = $TenantName
+        SubscriptionId = $subscriptionId
+    }
+    foreach ($metadataField in @('tenant-id', 'tenant-name', 'subscription-id'))
+    {
+        $secretName = Get-M365DscKeyVaultSecretName -IdentityName '__environment' -CredentialType $metadataField
+        if (-not (Test-M365DscKeyVaultSecret -VaultName $vaultName -Name $secretName))
+        {
+            throw "Key Vault '$vaultName' is missing required environment metadata '$secretName'. Run the tenant bootstrap first."
+        }
+
+        $storedValue = ConvertTo-M365DscPlainText -Value (Get-M365DscKeyVaultSecret -VaultName $vaultName -Name $secretName)
+        $fieldName = switch ($metadataField)
+        {
+            'tenant-id' { 'TenantId' }
+            'tenant-name' { 'TenantName' }
+            'subscription-id' { 'SubscriptionId' }
+        }
+        if (-not [string]::Equals($storedValue, [string]$metadata[$fieldName], [StringComparison]::OrdinalIgnoreCase))
+        {
+            throw "The signed-in Azure context does not match '$fieldName' stored in Key Vault '$vaultName'."
+        }
+    }
+
+    $identities = foreach ($identityName in 'M365DscSetupApplication', 'M365DscLcmApplication', 'M365DscExportApplication')
+    {
+        $applicationIdSecretName = Get-M365DscKeyVaultSecretName -IdentityName $identityName -CredentialType 'application-id'
+        if (-not (Test-M365DscKeyVaultSecret -VaultName $vaultName -Name $applicationIdSecretName))
+        {
+            throw "Key Vault '$vaultName' is missing application metadata '$applicationIdSecretName'. Run the tenant bootstrap first."
+        }
+
+        $identity = [ordered]@{
+            Name          = $identityName
+            ApplicationId = ConvertTo-M365DscPlainText -Value (Get-M365DscKeyVaultSecret -VaultName $vaultName -Name $applicationIdSecretName)
+        }
+        $thumbprintSecretName = Get-M365DscKeyVaultSecretName -IdentityName $identityName -CredentialType 'certificate-thumbprint'
+        if (Test-M365DscKeyVaultSecret -VaultName $vaultName -Name $thumbprintSecretName)
+        {
+            $identity.CertificateThumbprint = ConvertTo-M365DscPlainText -Value (Get-M365DscKeyVaultSecret -VaultName $vaultName -Name $thumbprintSecretName)
+        }
+
+        if ($IncludeCredentials -and
+            (-not $CredentialIdentityName -or $identityName -in $CredentialIdentityName))
+        {
+            $applicationSecretName = Get-M365DscKeyVaultSecretName -IdentityName $identityName -CredentialType 'secret'
+            if (Test-M365DscKeyVaultSecret -VaultName $vaultName -Name $applicationSecretName)
+            {
+                $identity.ApplicationSecret = ConvertTo-M365DscPlainText -Value (Get-M365DscKeyVaultSecret -VaultName $vaultName -Name $applicationSecretName)
+            }
+        }
+
+        [pscustomobject]$identity
+    }
+
+    return [pscustomobject][ordered]@{
+        AzTenantId          = $tenantId
+        AzTenantName        = $TenantName
+        AzSubscriptionId    = $subscriptionId
+        HasExchangeOnline   = $HasExchangeOnline
+        HasSharePointOnline = $HasSharePointOnline
+        KeyVaultName        = $vaultName
+        Identities          = @($identities)
+    }
+}
+
+function Update-M365DscDatumFromKeyVault
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [object]$Datum,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName,
+
+        [Parameter()]
+        [string[]]$EnvironmentName,
+
+        [Parameter()]
+        [switch]$ManagedIdentity,
+
+        [Parameter()]
+        [switch]$IncludeCredentials,
+
+        [Parameter()]
+        [string[]]$CredentialIdentityName
+    )
+
+    $environmentNames = @($Datum.Global.Azure.Environments.Keys)
+    if ($EnvironmentName)
+    {
+        $unknownEnvironments = @($EnvironmentName | Where-Object { $_ -notin $environmentNames })
+        if ($unknownEnvironments)
+        {
+            throw "Unknown environment(s): $($unknownEnvironments -join ', ')."
+        }
+        $environmentNames = @($environmentNames | Where-Object { $_ -in $EnvironmentName })
+    }
+
+    foreach ($environmentName in $environmentNames)
+    {
+        $manifest = $Datum.Global.Azure.Environments[$environmentName]
+        $environmentParameters = @{
+            ProjectName         = $ProjectName
+            EnvironmentName     = [string]$environmentName
+            TenantName          = [string]$manifest.AzTenantName
+            HasExchangeOnline   = [bool]$manifest.HasExchangeOnline
+            HasSharePointOnline = [bool]$manifest.HasSharePointOnline
+        }
+        if ($ManagedIdentity)
+        {
+            $environmentParameters.ManagedIdentity = $true
+        }
+        if ($IncludeCredentials)
+        {
+            $environmentParameters.IncludeCredentials = $true
+        }
+        if ($CredentialIdentityName)
+        {
+            $environmentParameters.CredentialIdentityName = $CredentialIdentityName
+        }
+
+        $Datum.Global.Azure.Environments[$environmentName] = Get-M365DscEnvironmentFromKeyVault @environmentParameters
+    }
+
+    return $Datum
 }
 
 function Get-ServicePrincipalAppPermissions
@@ -1134,7 +1437,15 @@ function New-M365DscIdentity
 
     if (-not $OnlyServicePrincipals)
     {
-        if (-not ($appRegistration = Get-MgApplication -Filter "displayName eq '$Name'" -ErrorAction SilentlyContinue))
+        $matchingApplications = @(
+            Get-MgApplication -Filter "displayName eq '$Name'" -ErrorAction Stop
+        )
+        if ($matchingApplications.Count -gt 1)
+        {
+            throw "More than one Entra application is named '$Name'; refusing to choose one."
+        }
+
+        if ($matchingApplications.Count -eq 0)
         {
             Write-Verbose "Did not find application '$Name' in environment."
             Write-Verbose "Creating application '$Name'."
@@ -1145,6 +1456,7 @@ function New-M365DscIdentity
         }
         else
         {
+            $appRegistration = $matchingApplications[0]
             Write-Verbose "Application '$Name' already exists in environment."
         }
 
@@ -1184,7 +1496,16 @@ function New-M365DscIdentity
         }
     }
 
-    if (-not ($appPrincipal = Get-MgServicePrincipal -Filter "DisplayName eq '$Name'" -ErrorAction SilentlyContinue))
+    $appPrincipals = @(
+        Get-MgServicePrincipal -Filter "DisplayName eq '$Name'" -ErrorAction Stop
+    )
+    if ($appPrincipals.Count -gt 1)
+    {
+        throw "More than one Entra service principal is named '$Name'; refusing to choose one."
+    }
+
+    $appPrincipal = $appPrincipals | Select-Object -First 1
+    if (-not $appPrincipal)
     {
         Write-Verbose "Creating service principal for application '$Name'."
         $appPrincipal = New-MgServicePrincipal -AppId $appRegistration.AppId
@@ -1289,7 +1610,9 @@ function Get-M365DscIdentity
 
     try
     {
-        $appRegistration = Get-MgApplication -Filter "displayName eq '$Name'" -ErrorAction Stop
+        $appRegistrations = @(
+            Get-MgApplication -Filter "displayName eq '$Name'" -ErrorAction Stop
+        )
     }
     catch
     {
@@ -1308,10 +1631,23 @@ function Get-M365DscIdentity
         throw
     }
 
+    if ($appRegistrations.Count -gt 1)
+    {
+        throw "More than one Entra application is named '$Name'; refusing to choose one."
+    }
+
+    $appRegistration = $appRegistrations | Select-Object -First 1
     if ($appRegistration)
     {
         Write-Verbose "Found application '$Name' with Id '$($appRegistration.Id)' and AppId '$($appRegistration.AppId)'."
-        $appPrincipal = Get-MgServicePrincipal -Filter "DisplayName eq '$Name'" -ErrorAction SilentlyContinue
+        $appPrincipals = @(
+            Get-MgServicePrincipal -Filter "DisplayName eq '$Name'" -ErrorAction Stop
+        )
+        if ($appPrincipals.Count -gt 1)
+        {
+            throw "More than one Entra service principal is named '$Name'; refusing to choose one."
+        }
+        $appPrincipal = $appPrincipals | Select-Object -First 1
         $exchangeServicePrincipal = if (Test-M365DscExchangeOnlineConnection)
         {
             Get-ServicePrincipal -Identity $Name -ErrorAction SilentlyContinue

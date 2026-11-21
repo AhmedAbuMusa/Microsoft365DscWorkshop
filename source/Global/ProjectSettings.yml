@@ -1,0 +1,16 @@
+OrganizationName: LibreDynamics
+PersonalAccessToken: <StoredInKeyVault>
+CredentialVaultEnvironment: Dev
+ProjectName: DSC
+RepositoryName: DSC
+GitHubRepositoryUrl: https://github.com/ahmedabumusa/Microsoft365DscWorkshop.git
+LocalPath: C:\DSC\Microsoft365DscWorkshop
+GitUserName: Microsoft365DSC Workshop
+GitUserEmail: workshop@example.invalid
+AgentPoolName: DSC
+NumbertOfBuildAgents: 5
+BuildAgents:
+  UserName: worker
+  Password: <StoredInKeyVault>
+  AzureLocation: West US 2
+  AzureRoleSize: Standard_D4s_v7

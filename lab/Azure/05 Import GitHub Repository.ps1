@@ -39,6 +39,7 @@ if ((Test-Path -LiteralPath $requiredModulesPath -PathType Container) -and
 
 Import-Module -Name Datum -ErrorAction Stop
 Import-Module -Name Datum.ProtectedData -ErrorAction Stop
+Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force -ErrorAction Stop
 
 $script:GitCommand = Get-Command -Name git -ErrorAction SilentlyContinue
 if (-not $script:GitCommand)
@@ -67,60 +68,6 @@ function Get-RequiredConfigurationValue
     }
 
     $value
-}
-
-function ConvertTo-ProtectedDatumValue
-{
-    param
-    (
-        [Parameter(Mandatory)]
-        [string]$Value,
-
-        [Parameter(Mandatory)]
-        [securestring]$ProtectionPassword
-    )
-
-    $Value | Protect-Datum -Password $ProtectionPassword -MaxLineLength 9999
-}
-
-function Set-ProjectSettingsProtectedValues
-{
-    param
-    (
-        [Parameter(Mandatory)]
-        [object]$ProjectSettings,
-
-        [Parameter(Mandatory)]
-        [string]$ConfigurationPath,
-
-        [Parameter(Mandatory)]
-        [securestring]$ProtectionPassword
-    )
-
-    $rawConfiguration = Get-Content -LiteralPath $ConfigurationPath -Raw
-    $patIsProtected = $rawConfiguration -match '(?m)^PersonalAccessToken:\s*[''"]?\[ENC='
-    $passwordIsProtected = $rawConfiguration -match '(?m)^\s+Password:\s*[''"]?\[ENC='
-    if ($patIsProtected -and $passwordIsProtected)
-    {
-        return
-    }
-
-    if (-not $patIsProtected)
-    {
-        $ProjectSettings.PersonalAccessToken = ConvertTo-ProtectedDatumValue `
-            -Value ([string]$ProjectSettings.PersonalAccessToken) `
-            -ProtectionPassword $ProtectionPassword
-    }
-    if (-not $passwordIsProtected)
-    {
-        $ProjectSettings.BuildAgents.Password = ConvertTo-ProtectedDatumValue `
-            -Value ([string]$ProjectSettings.BuildAgents.Password) `
-            -ProtectionPassword $ProtectionPassword
-    }
-
-    $ProjectSettings |
-        ConvertTo-Yaml |
-        Set-Content -LiteralPath $ConfigurationPath -Encoding utf8
 }
 
 function Invoke-AzureDevOpsRestMethod
@@ -434,6 +381,7 @@ if (-not (Test-Path -LiteralPath $sourceSettingsPath -PathType Leaf) -or
 }
 
 $datum = New-DatumStructure -DefinitionFile (Join-Path -Path $repositoryRoot -ChildPath 'source\Datum.yml')
+$datum = Get-M365DscProjectSettingsFromKeyVault -Datum $datum -CredentialType personal-access-token
 $projectSettings = $datum.Global.ProjectSettings
 $script:OrganizationName = [string](Get-RequiredConfigurationValue -Configuration $projectSettings -Name 'OrganizationName' -Path 'source/Global/ProjectSettings.yml: OrganizationName')
 $script:ProjectName = [string](Get-RequiredConfigurationValue -Configuration $projectSettings -Name 'ProjectName' -Path 'source/Global/ProjectSettings.yml: ProjectName')
@@ -442,7 +390,7 @@ $script:GitHubRepositoryUrl = [string](Get-RequiredConfigurationValue -Configura
 $localPathValue = [string](Get-RequiredConfigurationValue -Configuration $projectSettings -Name 'LocalPath' -Path 'source/Global/ProjectSettings.yml: LocalPath')
 $gitUserName = [string](Get-RequiredConfigurationValue -Configuration $projectSettings -Name 'GitUserName' -Path 'source/Global/ProjectSettings.yml: GitUserName')
 $gitUserEmail = [string](Get-RequiredConfigurationValue -Configuration $projectSettings -Name 'GitUserEmail' -Path 'source/Global/ProjectSettings.yml: GitUserEmail')
-$plainPat = [string](Get-RequiredConfigurationValue -Configuration $projectSettings -Name 'PersonalAccessToken' -Path 'source/Global/ProjectSettings.yml: PersonalAccessToken')
+$plainPat = [string]$projectSettings.PersonalAccessToken
 
 if ($script:OrganizationName -notmatch '^[A-Za-z0-9._-]+$')
 {
@@ -469,24 +417,6 @@ if ($resolvedLocalPath.Equals($repositoryRoot, [StringComparison]::OrdinalIgnore
     throw 'LocalPath must be outside the source checkout.'
 }
 
-$protectionPassword = [string]$datum.__Definition.DatumHandlers.'Datum.ProtectedData::ProtectedDatum'.CommandOptions.PlainTextPassword
-if ([string]::IsNullOrWhiteSpace($protectionPassword))
-{
-    throw "Datum ProtectedData has no PlainTextPassword configured in 'source/Datum.yml'."
-}
-$secureProtectionPassword = ConvertTo-SecureString -String $protectionPassword -AsPlainText -Force
-try
-{
-    Set-ProjectSettingsProtectedValues `
-        -ProjectSettings $projectSettings `
-        -ConfigurationPath $sourceSettingsPath `
-        -ProtectionPassword $secureProtectionPassword
-}
-finally
-{
-    $secureProtectionPassword.Dispose()
-}
-
 $encodedProjectName = [Uri]::EscapeDataString($script:ProjectName)
 $encodedRepositoryName = [Uri]::EscapeDataString($script:RepositoryName)
 $cloneUrl = "https://$script:OrganizationName@dev.azure.com/$script:OrganizationName/$encodedProjectName/_git/$encodedRepositoryName"
@@ -508,8 +438,6 @@ if (Test-Path -LiteralPath $resolvedLocalPath)
 $script:AuthorizationHeader = 'Basic ' + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$plainPat"))
 $script:GitAuthorizationHeader = "AUTHORIZATION: $($script:AuthorizationHeader)"
 $plainPat = $null
-$protectionPassword = $null
-$secureProtectionPassword = $null
 $datum = $null
 $projectSettings = $null
 

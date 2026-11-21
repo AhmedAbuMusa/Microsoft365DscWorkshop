@@ -24,6 +24,12 @@ if ($EnvironmentName)
     Write-Host "Filtering environments to: $($EnvironmentName -join ', ')" -ForegroundColor Magenta
     $environments = $environments | Where-Object { $EnvironmentName -contains $_ }
 }
+Update-M365DscDatumFromKeyVault `
+    -Datum $datum `
+    -ProjectName $datum.Global.ProjectSettings.ProjectName `
+    -EnvironmentName $environments `
+    -IncludeCredentials `
+    -CredentialIdentityName $SetupApplicationName | Out-Null
 Write-Host "Setting up environments: $($environments -join ', ')" -ForegroundColor Magenta
 
 foreach ($envName in $environments)
@@ -45,7 +51,7 @@ foreach ($envName in $environments)
     }
     if ($setupIdentity.ApplicationSecret)
     {
-        $param.ServicePrincipalSecret = $setupIdentity.ApplicationSecret | ConvertTo-SecureString -AsPlainText -Force
+        $param.ServicePrincipalSecret = ConvertTo-M365DscSecureString -Value $setupIdentity.ApplicationSecret
     }
     else
     {

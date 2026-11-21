@@ -75,6 +75,37 @@ Describe 'Azure repository import step' {
     }
 }
 
+Describe 'Project settings credential bootstrap' {
+    It 'Prepares the Key Vault before importing the Azure DevOps repository' {
+        $bootstrapPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\lab\Start Azure Lab.ps1'
+        $bootstrapContent = Get-Content -LiteralPath $bootstrapPath -Raw
+        $credentialStage = $bootstrapContent.IndexOf("Name 'bootstrap-project-settings'", [StringComparison]::Ordinal)
+        $importStage = $bootstrapContent.IndexOf("Name 'import-repository'", [StringComparison]::Ordinal)
+
+        $credentialStage | Should -BeGreaterThan -1
+        $credentialStage | Should -BeLessThan $importStage
+    }
+
+    It 'Opens the configured organization and stores validated credentials without writing them to YAML' {
+        $scriptPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\lab\Azure\04 Setup Project Settings Key Vault.ps1'
+        $content = Get-Content -LiteralPath $scriptPath -Raw
+        $tokens = $null
+        $parseErrors = $null
+        [System.Management.Automation.Language.Parser]::ParseFile(
+            $scriptPath,
+            [ref]$tokens,
+            [ref]$parseErrors
+        ) | Out-Null
+
+        $parseErrors | Should -BeNullOrEmpty
+        $content | Should -Match 'Start-Process -FilePath \$tokenPage'
+        $content | Should -Match 'Read-Host .* -AsSecureString'
+        $content | Should -Match 'Test-AzureDevOpsPersonalAccessToken'
+        $content | Should -Match 'Set-M365DscKeyVaultSecret'
+        $content | Should -Not -Match '(?im)^\s*(Set-Content|Out-File)\b'
+    }
+}
+
 Describe 'Azure worker shutdown module loading' {
     It 'Loads the repository-pinned Az modules before connecting to Azure' {
         $scriptPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\lab\Azure\89 Stop Workers.ps1'
@@ -272,10 +303,10 @@ Describe 'Azure DevOps clone refresh approval' {
     It 'Detects when the imported checkout is missing the current Azure scripts' {
         $issues = @(Get-ImportedAzureScriptIssues -RepositoryPath $TestDrive)
 
-        $issues.Count | Should -Be 5
+        $issues.Count | Should -Be 6
         $issues[0] | Should -Match 'lab\\Azure\\00 Prep.ps1'
-        $issues[3] | Should -Match 'build.yaml'
-        $issues[4] | Should -Match 'build.ps1'
+        $issues[4] | Should -Match 'build.yaml'
+        $issues[5] | Should -Match 'build.ps1'
     }
 
     It 'Accepts a checkout containing all required scripts and parameters' {
@@ -291,6 +322,10 @@ Describe 'Azure DevOps clone refresh approval' {
             "param([string]`$$($scriptDefinition.Parameter))" |
                 Set-Content -LiteralPath $scriptPath
         }
+        $helperPath = Join-Path -Path $TestDrive -ChildPath 'lab\Azure\AzHelpers.psm1'
+        $null = New-Item -ItemType Directory -Path (Split-Path -Path $helperPath -Parent) -Force
+        'function Get-M365DscProjectSettingsFromKeyVault { param([object]$Datum) }' |
+            Set-Content -LiteralPath $helperPath
 
         "  azureinit:`r`n    - test7`r`n    - LoadDatumConfigData`r`n    - ConfigDataPreparation" |
             Set-Content -LiteralPath (Join-Path -Path $TestDrive -ChildPath 'build.yaml')
@@ -355,6 +390,10 @@ Describe 'Azure DevOps clone refresh approval' {
             "param([string]`$$($scriptDefinition.Parameter))" |
                 Set-Content -LiteralPath $scriptPath
         }
+        $helperPath = Join-Path -Path $seedPath -ChildPath 'lab\Azure\AzHelpers.psm1'
+        $null = New-Item -ItemType Directory -Path (Split-Path -Path $helperPath -Parent) -Force
+        'function Get-M365DscProjectSettingsFromKeyVault { param([object]$Datum) }' |
+            Set-Content -LiteralPath $helperPath
         "  azureinit:`r`n    - test7`r`n    - LoadDatumConfigData`r`n    - ConfigDataPreparation" |
             Set-Content -LiteralPath (Join-Path -Path $seedPath -ChildPath 'build.yaml')
         @'

@@ -9,17 +9,18 @@ The VM agents run the workshop pipelines and apply the DSC configuration to thei
 - An Azure DevOps organization and a project where you can create pipelines, environments, and an agent pool.
 - An Azure subscription and tenant for each environment you want to configure. You need sufficient permissions to create app registrations and grant tenant permissions, and to create the Azure resources and role assignments used by the agents.
 - A Windows machine with PowerShell 7.6.10 or later and Git. The preparation and bootstrap scripts run from a fresh elevated PowerShell session.
-- An Azure DevOps PAT with permissions to create projects and repositories, push code, and manage pipelines, environments, and agent pools.
+- Permission to create a PAT for the Azure DevOps organization with the scopes needed to create projects and repositories, push code, and manage pipelines, environments, and agent pools. The bootstrap opens the PAT page for the configured organization and validates the token before saving it.
 - The Bicep CLI when creating new VMs. The automated bootstrapper checks PATH and common per-user install locations before using `winget`, then verifies the CLI version.
 
 ## Automated bootstrap
 
-`lab/Start Azure Lab.ps1` is parameterless. It reads the project, repository, clone, Git author, PAT, and build-agent settings from `source/Global/ProjectSettings.yml`, and reads tenant environments from `source/Global/Azure.yml`. The bootstrapper imports the public GitHub repository into Azure DevOps, clones it locally, restores dependencies with PSResourceGet, and runs the Azure preparation, app registration, connection test, project configuration, VM creation, and agent setup scripts in order. Start it from a fresh elevated PowerShell 7 session; it stops before doing setup if Az.Accounts or its assembly is already loaded.
+`lab/Start Azure Lab.ps1` is parameterless. It reads non-secret project settings from `source/Global/ProjectSettings.yml`, and reads tenant environments from `source/Global/Azure.yml`. Before contacting Azure DevOps, it signs in to the configured `CredentialVaultEnvironment`, creates or reuses that environment's Key Vault, and opens the PAT management page for `OrganizationName`. Enter the PAT at the secure prompt; the bootstrap validates it against that organization and stores it in Key Vault. The build-agent password is also collected securely and stored in the same vault. Neither credential is written to YAML. The bootstrap then imports the public GitHub repository into Azure DevOps, clones it locally, restores dependencies with PSResourceGet, and runs the Azure preparation, app registration, connection test, project configuration, VM creation, and agent setup scripts in order. Start it from a fresh elevated PowerShell 7 session; it stops before doing setup if Az.Accounts or its assembly is already loaded.
 
-The import-and-clone stage can also be run separately with `lab/Azure/05 Import GitHub Repository.ps1`. It reads the same local project settings, imports the GitHub repository into Azure DevOps, and creates the configured local checkout without continuing to tenant or VM setup. Restore the source checkout dependencies first:
+The credential bootstrap can also be run separately with `lab/Azure/04 Setup Project Settings Key Vault.ps1`. Run it before the import-and-clone step so the PAT and build-agent password are already in Key Vault. The import-and-clone stage can then be run with `lab/Azure/05 Import GitHub Repository.ps1`; it loads the PAT from Key Vault, imports the GitHub repository into Azure DevOps, and creates the configured local checkout without continuing to tenant or VM setup. Restore the source checkout dependencies first:
 
 ```powershell
 pwsh -NoLogo -NoProfile -File .\Resolve-Dependency.ps1 -UsePSResourceGet -WithYAML
+& '.\lab\Azure\04 Setup Project Settings Key Vault.ps1'
 & '.\lab\Azure\05 Import GitHub Repository.ps1'
 ```
 
@@ -31,7 +32,7 @@ Preparation errors are terminating: the bootstrapper will not mark the machine-p
 
 The imported Azure build initialization runs the dedicated `azureinit` workflow in a separate no-profile PowerShell process. It loads configuration and Azure build settings without reusing loaded YAML/Datum modules or running the shared `init` workflow, which also performs AutomatedLab-specific initialization. Before tenant or DevOps changes, the bootstrap validates that the imported checkout contains the Azure workflow and build-failure reporting, then imports its pinned Az.Compute module. A failed build or module import leaves initialization incomplete and prevents later stages from running.
 
-After a failure, rerun `lab/Start Azure Lab.ps1` to resume automatically: successfully completed stages are skipped and the interrupted stage is retried. Dependency restore is skipped when every required package version is already present; otherwise it runs before the workflow resumes. Local configuration validation still runs on each start. Checkpoint data is stored under the current user's local application data and is bound to the checkout path and non-secret project/tenant settings; it does not contain credentials. Use `-Restart` to discard saved progress and start over; it does not force package refresh. Use `-ForceDependencyRestore` only when installed dependency packages need to be refreshed. Restarting from scratch may repeat previously completed tenant or DevOps operations. A stage interrupted mid-operation is retried from its beginning, so its underlying operation may have partially completed before the failure.
+After a failure, rerun `lab/Start Azure Lab.ps1` to resume automatically: successfully completed stages are skipped and the interrupted stage is retried. Dependency restore is skipped when every required package version is already present; otherwise it runs before the workflow resumes. Local configuration validation still runs on each start. Checkpoint data is stored under the current user's local application data and is bound to the checkout path and public project/environment settings; it does not contain tenant IDs, subscription IDs, or credentials. Use `-Restart` to discard saved progress and start over; it does not force package refresh. Use `-ForceDependencyRestore` only when installed dependency packages need to be refreshed. Restarting from scratch may repeat previously completed tenant or DevOps operations. A stage interrupted mid-operation is retried from its beginning, so its underlying operation may have partially completed before the failure.
 
 When resuming from an older checkpoint, stages that could have reported preparation or build failures as successes are revalidated and retried. Other completed stages, including tenant and DevOps setup, are preserved.
 
@@ -39,11 +40,11 @@ If the local Azure DevOps checkout is missing the required Azure scripts or has 
 
 Before running it:
 
-- Review `OrganizationName`, `ProjectName`, `RepositoryName`, `GitHubRepositoryUrl`, `LocalPath`, `GitUserName`, and `GitUserEmail` in `ProjectSettings.yml`. This checkout has defaults for the repository name, sibling clone path, Git identity, and a generated Datum-protected lab password. Set `PersonalAccessToken`, `AgentPoolName`, and the remaining `BuildAgents` values (`UserName`, `AzureLocation`, and `AzureRoleSize`) as needed.
-- Configure the tenant IDs, tenant names, subscription IDs, service flags, and identities for each environment in `Azure.yml`.
+- Review the non-secret settings in `ProjectSettings.yml`, including `OrganizationName`, `ProjectName`, `RepositoryName`, `GitHubRepositoryUrl`, `LocalPath`, and `CredentialVaultEnvironment`. Set `CredentialVaultEnvironment` to an environment from `Azure.yml`; that environment's Key Vault holds the project PAT and build-agent password. Keep the PAT and password placeholders as-is. Update the agent pool and VM sizing settings as needed.
+- Configure the tenant domain and service flags for each environment in `Azure.yml`. Tenant/subscription IDs and application credentials are discovered during sign-in and stored in Key Vault.
 - Publish the updated bootstrap and Azure scripts on the GitHub repository's default branch before running the bootstrapper. The GitHub-to-Azure-DevOps import is a snapshot: an already completed import is reused, not refreshed. If the Azure DevOps repository was imported before the latest scripts were published, update that repository from the current GitHub version (or configure a fresh project/repository) before running the bootstrapper. Keep tenant and project-specific settings local; the bootstrapper copies the two YAML configuration files from your checkout into a newly cloned Azure DevOps repository.
 
-The script protects an unprotected PAT or VM password in `ProjectSettings.yml` before copying it. Do not publish plaintext credentials. If the Azure DevOps repository itself does not contain the current Azure scripts, update its GitHub import before approving a local checkout refresh. Run elevated PowerShell 7 from the workshop checkout:
+The project PAT and build-agent password are stored in Azure Key Vault, not protected or written back to `ProjectSettings.yml`. If the Azure DevOps repository itself does not contain the current Azure scripts, update its GitHub import before approving a local checkout refresh. Run elevated PowerShell 7 from the workshop checkout:
 
 ```powershell
 & '.\lab\Start Azure Lab.ps1'
@@ -51,7 +52,7 @@ The script protects an unprotected PAT or VM password in `ProjectSettings.yml` b
 
 Tenant administrator sign-in and consent remain interactive during app registration. The bootstrapper does not queue the DSC push pipeline; review and run tenant-changing pipelines explicitly.
 
-The PAT is read from the protected Datum value in `ProjectSettings.yml` and Git authentication is scoped to the required clone/push operations; credentials are not embedded in the clone URL. The VM password is protected in the file and passed to the VM script as a `SecureString`. App credentials generated by the setup scripts are protected in `Azure.yml`. The scripts may push the protected configuration and pipeline updates to the Azure DevOps repository.
+The PAT is validated for the configured Azure DevOps organization and stored in Key Vault; Git authentication is scoped to the required clone/push operations, and credentials are not embedded in clone URLs. The build-agent password is retrieved from Key Vault only when needed. Tenant IDs, subscriptions, application credentials, the PAT, and the worker password are not written to the public YAML manifests.
 
 ## Manual setup
 
@@ -100,9 +101,9 @@ After the build succeeds, open a fresh PowerShell session at the repository root
 
 ### 4. Configure the tenant and environment
 
-Edit [Azure.yml](../source/Global/Azure.yml). For each environment you intend to use, set `AzTenantId`, `AzTenantName`, and `AzSubscriptionId`. Start with one environment, such as `Dev`, and remove the unused environments and their corresponding folders under `source/BuildAgents`.
+Edit [Azure.yml](../source/Global/Azure.yml). For each environment you intend to use, set `AzTenantName` and the service flags. During setup, sign in to the tenant and select the subscription to associate with that environment. Start with one environment, such as `Dev`, and remove unused environments and their corresponding folders under `source/BuildAgents`.
 
-The setup scripts populate the application IDs, secrets, and certificate thumbprints. Do not copy real credentials into an example or commit unprotected secrets. See [the existing guide's tenant configuration section](GettingStarted.md#14-set-your-azure-tenant-details) for the example structure and notes about `HasExchangeOnline` and `HasSharePointOnline`.
+The bootstrap stores tenant and subscription IDs, application IDs, secrets, and certificate material in Key Vault. Do not add these values to the tracked manifest. See [the tenant configuration section](GettingStarted.md#14-set-your-azure-tenant-details) for the manifest shape and service-flag notes.
 
 ### 5. Set up application registrations and test access
 
@@ -112,7 +113,7 @@ Create the required applications and the environment credential Key Vault using 
 & '.\lab\Azure\10 Setup App Registrations.ps1'
 ```
 
-Review the local changes to `source/Global/Azure.yml`; the script does not commit or push them. Then test the configured connections:
+The script does not write credentials or tenant identifiers to `source/Global/Azure.yml`. Then test the configured connections:
 
 ```powershell
 & '.\lab\Azure\11 Test Connection.ps1'
@@ -122,7 +123,13 @@ For credential rotation, cleanup behavior, and tenant-service requirements, see 
 
 ### 6. Configure the Azure DevOps project
 
-Run the project setup script and provide the Azure DevOps organization, a PAT with the permissions needed to manage the project, and the project and agent-pool names:
+Run the project credential bootstrap first if you have not already stored the PAT and build-agent password in Key Vault. It opens the configured Azure DevOps organization to create a PAT and validates it before storage:
+
+```powershell
+& '.\lab\Azure\04 Setup Project Settings Key Vault.ps1'
+```
+
+Then configure the Azure DevOps project:
 
 ```powershell
 & '.\lab\Azure\20 Configure AzDo Project.ps1'
@@ -146,7 +153,7 @@ Review the agent settings in [ProjectSettings.yml](../source/Global/ProjectSetti
 & '.\lab\Azure\30 Create Agent VMs.ps1'
 ```
 
-It creates one VM per configured environment, using the editable [Bicep template](../lab/templates/buildAgent.bicep). The script assigns a user-assigned managed identity and creates the supporting Azure resources. It adopts an existing VM with the expected name instead of creating a duplicate. The default configuration uses a NAT Gateway and public IP for outbound access; these incur recurring charges. A password entered at the secure prompt is used only in memory and is not written to `ProjectSettings.yml`.
+It creates one VM per configured environment, using the editable [Bicep template](../lab/templates/buildAgent.bicep). The script assigns a user-assigned managed identity and creates the supporting Azure resources. It adopts an existing VM with the expected name instead of creating a duplicate. The default configuration uses a NAT Gateway and public IP for outbound access; these incur recurring charges. The build-agent password is retrieved from Key Vault and is not written to `ProjectSettings.yml`.
 
 ### 8. Configure and verify the agents
 

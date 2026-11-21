@@ -34,8 +34,10 @@ if (Test-Path -LiteralPath $requiredModulesPath)
 }
 
 Import-Module -Name Az.Accounts -ErrorAction Stop
+Import-Module -Name Az.KeyVault -ErrorAction Stop
 Import-Module -Name Az.Resources -ErrorAction Stop
 Import-Module -Name powershell-yaml -ErrorAction Stop
+Import-Module -Name (Join-Path -Path $PSScriptRoot -ChildPath '..\AzHelpers.psm1') -Force -ErrorAction Stop
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $azureConfigPath = Join-Path -Path $repoRoot -ChildPath 'source\Global\Azure.yml'
@@ -44,14 +46,19 @@ if (-not (Test-Path -LiteralPath $azureConfigPath))
     throw "Azure environment configuration was not found at '$azureConfigPath'."
 }
 
-$azureConfig = Get-Content -LiteralPath $azureConfigPath -Raw | ConvertFrom-Yaml -ErrorAction Stop
-if (-not $azureConfig.Environments)
+$datum = New-DatumStructure -DefinitionFile (Join-Path -Path $repoRoot -ChildPath 'source\Datum.yml')
+$environmentNames = @($datum.Global.Azure.Environments.Keys)
+if (-not $environmentNames)
 {
     throw "No Environments section was found in '$azureConfigPath'."
 }
+Update-M365DscDatumFromKeyVault `
+    -Datum $datum `
+    -ProjectName $datum.Global.ProjectSettings.ProjectName `
+    -EnvironmentName $environmentNames | Out-Null
 
 $environmentConfigs = @(
-    foreach ($environmentEntry in $azureConfig.Environments.GetEnumerator())
+    foreach ($environmentEntry in $datum.Global.Azure.Environments.GetEnumerator())
     {
         $environmentName = [string]$environmentEntry.Key
         $tenantId = [string]$environmentEntry.Value.AzTenantId

@@ -26,14 +26,14 @@ param
 
 $ErrorActionPreference = 'Stop'
 $script:BootstrapPhase = 0
-$script:BootstrapPhaseCount = 12
+$script:BootstrapPhaseCount = 13
 
 function Write-BootstrapPhase
 {
     param
     (
         [Parameter(Mandatory)]
-        [ValidateRange(1, 12)]
+        [ValidateRange(1, 13)]
         [int]$Index,
 
         [Parameter(Mandatory)]
@@ -142,7 +142,7 @@ function Invoke-BootstrapStage
     param
     (
         [Parameter(Mandatory)]
-        [ValidateRange(3, 12)]
+        [ValidateRange(3, 13)]
         [int]$Index,
 
         [Parameter(Mandatory)]
@@ -183,45 +183,12 @@ function Invoke-BootstrapStage
     }
 }
 
-function ConvertFrom-SecureStringPlainText
-{
-    param
-    (
-        [Parameter(Mandatory)]
-        [securestring]$SecureString
-    )
-
-    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
-    try
-    {
-        [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
-    }
-    finally
-    {
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
-    }
-}
-
-function ConvertTo-ProtectedDatumValue
-{
-    param
-    (
-        [Parameter(Mandatory)]
-        [string]$Value,
-
-        [Parameter(Mandatory)]
-        [securestring]$ProtectionPassword
-    )
-
-    $Value | Protect-Datum -Password $ProtectionPassword -MaxLineLength 9999
-}
-
-function ConvertTo-SecureStringFromConfiguration
+function ConvertTo-SecureStringFromKeyVault
 {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
         'PSAvoidUsingConvertToSecureStringWithPlainText',
         '',
-        Justification = 'The VM password is read from the protected Datum configuration and is passed as a SecureString to the VM script.'
+        Justification = 'The build-agent password is retrieved from Key Vault and passed as a SecureString to the VM script.'
     )]
     param
     (
@@ -425,6 +392,10 @@ function Get-ImportedAzureScriptIssues
         @{ Path = 'lab\Azure\00 Prep.ps1'; Parameter = 'ProjectName' }
         @{ Path = 'lab\Azure\30 Create Agent VMs.ps1'; Parameter = 'BuildAgentPassword' }
         @{ Path = 'lab\Azure\31 Agent Setup.ps1'; Parameter = 'EnvironmentName' }
+        @{
+            Path           = 'lab\Azure\AzHelpers.psm1'
+            RequiredPattern = '(?m)^\s*function\s+Get-M365DscProjectSettingsFromKeyVault\b'
+        }
     )
     $issues = [System.Collections.Generic.List[string]]::new()
 
@@ -468,10 +439,17 @@ function Get-ImportedAzureScriptIssues
             continue
         }
 
-        $parameterNames = @($scriptAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
-        if ($scriptAndParameter.Parameter -notin $parameterNames)
+        if ($scriptAndParameter.Parameter)
         {
-            $issues.Add("Imported script '$($scriptAndParameter.Path)' is outdated and does not declare parameter '$($scriptAndParameter.Parameter)'.")
+            $parameterNames = @($scriptAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+            if ($scriptAndParameter.Parameter -notin $parameterNames)
+            {
+                $issues.Add("Imported script '$($scriptAndParameter.Path)' is outdated and does not declare parameter '$($scriptAndParameter.Parameter)'.")
+            }
+        }
+        if ($scriptAndParameter.RequiredPattern -and $scriptContent -notmatch $scriptAndParameter.RequiredPattern)
+        {
+            $issues.Add("Imported script '$($scriptAndParameter.Path)' is outdated and does not implement the required project-credentials Key Vault support.")
         }
     }
 
@@ -760,11 +738,11 @@ function Get-EnvironmentNames
     foreach ($environmentName in $environments)
     {
         $environment = $Datum.Global.Azure.Environments[$environmentName]
-        foreach ($field in @('AzTenantId', 'AzTenantName', 'AzSubscriptionId'))
+        foreach ($field in @('AzTenantName'))
         {
             if ([string]::IsNullOrWhiteSpace([string]$environment.$field) -or [string]$environment.$field -match '^<.+>$')
             {
-                throw "Set 'Environments.$environmentName.$field' in 'source/Global/Azure.yml'."
+                throw "Set 'Environments.$environmentName.$field' in 'source/Global/Azure.yml'; tenant and subscription IDs are discovered at sign-in and stored in Key Vault."
             }
         }
 
@@ -776,14 +754,6 @@ function Get-EnvironmentNames
             }
         }
 
-        foreach ($field in @('AzTenantId', 'AzSubscriptionId'))
-        {
-            $parsedGuid = [Guid]::Empty
-            if (-not [Guid]::TryParse([string]$environment.$field, [ref]$parsedGuid) -or $parsedGuid -eq [Guid]::Empty)
-            {
-                throw "'Environments.$environmentName.$field' in 'source/Global/Azure.yml' must be a non-empty GUID."
-            }
-        }
     }
 
     return $environments
@@ -844,46 +814,6 @@ function Remove-StaleMicrosoft365DscVersions
     Get-ChildItem -LiteralPath $modulePath -Directory |
         Where-Object Name -NE $pinnedVersion |
         Remove-Item -Recurse -Force -ErrorAction Stop
-}
-
-function Set-ProjectSettingsProtectedValues
-{
-    param
-    (
-        [Parameter(Mandatory)]
-        [object]$ProjectSettings,
-
-        [Parameter(Mandatory)]
-        [string]$ConfigurationPath,
-
-        [Parameter(Mandatory)]
-        [securestring]$ProtectionPassword
-    )
-
-    $rawConfiguration = Get-Content -LiteralPath $ConfigurationPath -Raw
-    $patIsProtected = $rawConfiguration -match '(?m)^PersonalAccessToken:\s*[''"]?\[ENC='
-    $passwordIsProtected = $rawConfiguration -match '(?m)^\s+Password:\s*[''"]?\[ENC='
-    if ($patIsProtected -and $passwordIsProtected)
-    {
-        return
-    }
-
-    if (-not $patIsProtected)
-    {
-        $ProjectSettings.PersonalAccessToken = ConvertTo-ProtectedDatumValue `
-            -Value ([string]$ProjectSettings.PersonalAccessToken) `
-            -ProtectionPassword $ProtectionPassword
-    }
-    if (-not $passwordIsProtected)
-    {
-        $ProjectSettings.BuildAgents.Password = ConvertTo-ProtectedDatumValue `
-            -Value ([string]$ProjectSettings.BuildAgents.Password) `
-            -ProtectionPassword $ProtectionPassword
-    }
-
-    $ProjectSettings |
-        ConvertTo-Yaml |
-        Set-Content -LiteralPath $ConfigurationPath -Encoding utf8
 }
 
 function Initialize-TargetDependencies
@@ -1030,7 +960,7 @@ else
 Import-Module -Name Datum -ErrorAction Stop
 Import-Module -Name Datum.ProtectedData -ErrorAction Stop
 
-Write-BootstrapPhase -Index 2 -Description 'Read and validate configuration; protect local credentials'
+Write-BootstrapPhase -Index 2 -Description 'Read and validate project and tenant configuration'
 $sourceDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $repositoryRoot -ChildPath 'source\Datum.yml')
 $sourceProjectSettings = $sourceDatum.Global.ProjectSettings
 $script:OrganizationName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'OrganizationName' -Path 'source/Global/ProjectSettings.yml: OrganizationName')
@@ -1038,7 +968,6 @@ $script:ProjectName = [string](Get-RequiredConfigurationValue -Configuration $so
 $script:RepositoryName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'RepositoryName' -Path 'source/Global/ProjectSettings.yml: RepositoryName')
 $localPathValue = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'LocalPath' -Path 'source/Global/ProjectSettings.yml: LocalPath')
 $null = Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'AgentPoolName' -Path 'source/Global/ProjectSettings.yml: AgentPoolName'
-$plainBuildAgentPassword = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'Password' -Path 'source/Global/ProjectSettings.yml: BuildAgents.Password')
 $buildAgentUserName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'UserName' -Path 'source/Global/ProjectSettings.yml: BuildAgents.UserName')
 $null = Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'AzureLocation' -Path 'source/Global/ProjectSettings.yml: BuildAgents.AzureLocation'
 $buildAgentVmSize = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'AzureRoleSize' -Path 'source/Global/ProjectSettings.yml: BuildAgents.AzureRoleSize')
@@ -1056,16 +985,6 @@ if ($buildAgentUserName -notmatch '^[A-Za-z0-9._-]+$' -or $buildAgentVmSize -not
 {
     throw 'BuildAgents.UserName or BuildAgents.AzureRoleSize in ProjectSettings.yml contains unsupported characters.'
 }
-$passwordForValidation = ConvertTo-SecureStringFromConfiguration -Value $plainBuildAgentPassword
-try
-{
-    Assert-BuildAgentPassword -Password $passwordForValidation
-}
-finally
-{
-    $passwordForValidation.Dispose()
-}
-
 $resolvedLocalPath = [IO.Path]::GetFullPath($localPathValue)
 $repositoryPrefix = $repositoryRoot.TrimEnd('\') + '\'
 if ($resolvedLocalPath.Equals($repositoryRoot, [StringComparison]::OrdinalIgnoreCase) -or
@@ -1075,34 +994,19 @@ if ($resolvedLocalPath.Equals($repositoryRoot, [StringComparison]::OrdinalIgnore
 }
 
 $script:EnvironmentNames = @(Get-EnvironmentNames -Datum $sourceDatum)
-$protectionPassword = [string]$sourceDatum.__Definition.DatumHandlers.'Datum.ProtectedData::ProtectedDatum'.CommandOptions.PlainTextPassword
-if ([string]::IsNullOrWhiteSpace($protectionPassword))
+$credentialVaultEnvironment = [string]$sourceProjectSettings.CredentialVaultEnvironment
+if ([string]::IsNullOrWhiteSpace($credentialVaultEnvironment) -or
+    $credentialVaultEnvironment -notin $script:EnvironmentNames)
 {
-    throw "Datum ProtectedData has no PlainTextPassword configured in 'source/Datum.yml'."
+    throw "Set 'CredentialVaultEnvironment' in 'source/Global/ProjectSettings.yml' to an environment defined in 'source/Global/Azure.yml'."
 }
-$secureProtectionPassword = ConvertTo-SecureStringFromConfiguration -Value $protectionPassword
-
-try
-{
-    Set-ProjectSettingsProtectedValues `
-        -ProjectSettings $sourceProjectSettings `
-        -ConfigurationPath $sourceSettingsPath `
-        -ProtectionPassword $secureProtectionPassword
-}
-finally
-{
-    $secureProtectionPassword.Dispose()
-}
-
-$plainBuildAgentPassword = $null
-$protectionPassword = $null
-$secureProtectionPassword = $null
 
 $resumeIdentity = [ordered]@{
     RepositoryRoot       = $repositoryRoot
     OrganizationName     = $script:OrganizationName
     ProjectName          = $script:ProjectName
     RepositoryName       = $script:RepositoryName
+    CredentialVaultEnvironment = $credentialVaultEnvironment
     GitHubRepositoryUrl  = [string]$sourceProjectSettings.GitHubRepositoryUrl
     LocalPath            = $resolvedLocalPath
     AgentPoolName        = [string]$sourceProjectSettings.AgentPoolName
@@ -1118,8 +1022,7 @@ $resumeIdentity = [ordered]@{
             $environment = $sourceDatum.Global.Azure.Environments[$environmentName]
             [ordered]@{
                 Name                = $environmentName
-                TenantId            = [string]$environment.AzTenantId
-                SubscriptionId      = [string]$environment.AzSubscriptionId
+                TenantName          = [string]$environment.AzTenantName
                 HasExchangeOnline   = [string]$environment.HasExchangeOnline
                 HasSharePointOnline = [string]$environment.HasSharePointOnline
             }
@@ -1132,6 +1035,7 @@ $identityHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
 $checkpointDirectory = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Microsoft365DscWorkshop\AzureLabBootstrap'
 $script:BootstrapCheckpointPath = Join-Path -Path $checkpointDirectory -ChildPath "$identityHash.json"
 $allowedStages = @(
+    'bootstrap-project-settings'
     'import-repository'
     'verify-import'
     'prepare-machine'
@@ -1199,11 +1103,28 @@ $sourceProjectSettings = $null
 
 try
 {
-    Invoke-BootstrapStage -Index 3 -Name 'import-repository' `
+    Invoke-BootstrapStage -Index 3 -Name 'bootstrap-project-settings' `
+        -Description 'Create or reuse the credential Key Vault and securely collect project credentials' `
+        -Action {
+            $projectSettingsKeyVaultScript = Join-Path -Path $repositoryRoot -ChildPath 'lab\Azure\04 Setup Project Settings Key Vault.ps1'
+            Write-Host "Running file in a clean PowerShell process: '$projectSettingsKeyVaultScript'." -ForegroundColor Yellow
+            & $pwshCommand.Source -NoLogo -NoProfile -File $projectSettingsKeyVaultScript
+            if ($LASTEXITCODE -ne 0)
+            {
+                throw "Project-settings Key Vault setup failed with exit code $LASTEXITCODE."
+            }
+        }
+
+    Invoke-BootstrapStage -Index 4 -Name 'import-repository' `
         -Description 'Import GitHub repository and prepare the Azure DevOps checkout' `
         -Action {
             $repositoryImportScript = Join-Path -Path $repositoryRoot -ChildPath 'lab\Azure\05 Import GitHub Repository.ps1'
-            Invoke-LabScript -Path $repositoryImportScript
+            Write-Host "Running file in a clean PowerShell process: '$repositoryImportScript'." -ForegroundColor Yellow
+            & $pwshCommand.Source -NoLogo -NoProfile -File $repositoryImportScript
+            if ($LASTEXITCODE -ne 0)
+            {
+                throw "Azure DevOps repository import failed with exit code $LASTEXITCODE."
+            }
         }
 
     # Keep mutable project settings current on resume without overwriting generated Azure app credentials.
@@ -1213,7 +1134,7 @@ try
     Push-Location -LiteralPath $resolvedLocalPath
     try
     {
-        Invoke-BootstrapStage -Index 4 -Name 'verify-import' `
+        Invoke-BootstrapStage -Index 5 -Name 'verify-import' `
             -Description 'Verify the imported Azure script versions' `
             -Action {
                 $scriptIssues = @(Get-ImportedAzureScriptIssues -RepositoryPath $resolvedLocalPath)
@@ -1227,10 +1148,9 @@ try
                     {
                         $refreshDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $repositoryRoot -ChildPath 'source\Datum.yml')
                         $refreshProjectSettings = $refreshDatum.Global.ProjectSettings
-                        $refreshPat = [string](Get-RequiredConfigurationValue `
-                                -Configuration $refreshProjectSettings `
-                                -Name 'PersonalAccessToken' `
-                                -Path 'source/Global/ProjectSettings.yml: PersonalAccessToken')
+                        Import-Module -Name (Join-Path -Path $repositoryRoot -ChildPath 'lab\Azure\AzHelpers.psm1') -Force -ErrorAction Stop
+                        $refreshProjectSettings = Get-M365DscProjectSettingsFromKeyVault -Datum $refreshDatum
+                        $refreshPat = [string]$refreshProjectSettings.Global.ProjectSettings.PersonalAccessToken
                         $refreshAuthorizationHeader = "AUTHORIZATION: Basic $([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$refreshPat")))"
                         Update-OutdatedAzureDevOpsClone `
                             -RepositoryPath $resolvedLocalPath `
@@ -1238,6 +1158,10 @@ try
                     }
                     finally
                     {
+                        if ($refreshDatum)
+                        {
+                            $refreshDatum.Global.ProjectSettings.PersonalAccessToken = $null
+                        }
                         $refreshPat = $null
                         $refreshAuthorizationHeader = $null
                         $refreshProjectSettings = $null
@@ -1252,14 +1176,19 @@ try
                 }
             }
 
-        Invoke-BootstrapStage -Index 5 -Name 'prepare-machine' `
+        Invoke-BootstrapStage -Index 6 -Name 'prepare-machine' `
             -Description 'Prepare the Azure lab machine' `
             -Action {
-                Invoke-LabScript -Path (Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\00 Prep.ps1') `
-                    -Arguments @{ ProjectName = $script:ProjectName }
+                $preparationScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\00 Prep.ps1'
+                Write-Host "Running file in a clean PowerShell process: '$preparationScript'." -ForegroundColor Yellow
+                & $pwshCommand.Source -NoLogo -NoProfile -File $preparationScript -ProjectName $script:ProjectName
+                if ($LASTEXITCODE -ne 0)
+                {
+                    throw "Azure lab machine preparation failed with exit code $LASTEXITCODE."
+                }
             }
 
-        Invoke-BootstrapStage -Index 6 -Name 'restore-target-dependencies' `
+        Invoke-BootstrapStage -Index 7 -Name 'restore-target-dependencies' `
             -Description 'Restore dependencies for the imported checkout' `
             -Action {
                 Initialize-TargetDependencies -SourceRoot $repositoryRoot -TargetRoot $resolvedLocalPath
@@ -1272,7 +1201,7 @@ try
             $env:PSModulePath = "$targetRequiredModules;$env:PSModulePath"
         }
 
-        Invoke-BootstrapStage -Index 7 -Name 'initialize-target-build' `
+        Invoke-BootstrapStage -Index 8 -Name 'initialize-target-build' `
             -Description 'Initialize the imported Azure build' `
             -Action {
                 $buildIssues = @(Get-ImportedAzureScriptIssues -RepositoryPath $resolvedLocalPath)
@@ -1307,8 +1236,9 @@ try
                 Write-Host 'Completed imported Azure build initialization.' -ForegroundColor Green
             }
 
-        $targetProjectSettingsPath = Join-Path -Path $resolvedLocalPath -ChildPath 'source\Global\ProjectSettings.yml'
         $targetDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $resolvedLocalPath -ChildPath 'source\Datum.yml')
+        Import-Module -Name (Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\AzHelpers.psm1') -Force -ErrorAction Stop
+        $targetDatum = Get-M365DscProjectSettingsFromKeyVault -Datum $targetDatum
         $targetProjectSettings = $targetDatum.Global.ProjectSettings
         if ([string]$targetProjectSettings.OrganizationName -ne $script:OrganizationName -or
             [string]$targetProjectSettings.ProjectName -ne $script:ProjectName -or
@@ -1317,53 +1247,40 @@ try
             throw 'The imported ProjectSettings.yml does not match the Azure DevOps organization, project, or repository used for this setup.'
         }
         $script:targetEnvironmentNames = @(Get-EnvironmentNames -Datum $targetDatum)
-        $targetPat = [string](Get-RequiredConfigurationValue -Configuration $targetProjectSettings -Name 'PersonalAccessToken' -Path 'ProjectSettings.yml: PersonalAccessToken')
-        $targetBuildPassword = [string](Get-RequiredConfigurationValue -Configuration $targetProjectSettings.BuildAgents -Name 'Password' -Path 'ProjectSettings.yml: BuildAgents.Password')
-        $script:secureBuildAgentPassword = ConvertTo-SecureStringFromConfiguration -Value $targetBuildPassword
+        $targetPat = [string]$targetProjectSettings.PersonalAccessToken
+        $targetBuildPassword = [string]$targetProjectSettings.BuildAgents.Password
+        $script:secureBuildAgentPassword = ConvertTo-SecureStringFromKeyVault -Value $targetBuildPassword
         Assert-BuildAgentPassword -Password $script:secureBuildAgentPassword
-        $targetProtectionPassword = [string]$targetDatum.__Definition.DatumHandlers.'Datum.ProtectedData::ProtectedDatum'.CommandOptions.PlainTextPassword
-        $secureTargetProtectionPassword = ConvertTo-SecureStringFromConfiguration -Value $targetProtectionPassword
-        try
-        {
-            Set-ProjectSettingsProtectedValues `
-                -ProjectSettings $targetProjectSettings `
-                -ConfigurationPath $targetProjectSettingsPath `
-                -ProtectionPassword $secureTargetProtectionPassword
-        }
-        finally
-        {
-            $secureTargetProtectionPassword.Dispose()
-        }
-        $secureTargetProtectionPassword = $null
-        $targetProtectionPassword = $null
+        $script:GitAuthorizationHeader = "AUTHORIZATION: Basic $([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$targetPat")))"
+        $targetProjectSettings.PersonalAccessToken = $null
+        $targetProjectSettings.BuildAgents.Password = $null
+        $targetPat = $null
         $targetBuildPassword = $null
         $targetDatum = $null
         $targetProjectSettings = $null
-        $script:GitAuthorizationHeader = "AUTHORIZATION: Basic $([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$targetPat")))"
-        $targetPat = $null
 
-        Invoke-BootstrapStage -Index 8 -Name 'register-applications' `
+        Invoke-BootstrapStage -Index 9 -Name 'register-applications' `
             -Description 'Register tenant applications and store credentials' `
             -Action {
                 $appRegistrationScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\10 Setup App Registrations.ps1'
                 Invoke-LabScript -Path $appRegistrationScript -Arguments @{}
             }
 
-        Invoke-BootstrapStage -Index 9 -Name 'test-connections' `
+        Invoke-BootstrapStage -Index 10 -Name 'test-connections' `
             -Description 'Test tenant application connections' `
             -Action {
                 $connectionTestScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\11 Test Connection.ps1'
                 Invoke-LabScript -Path $connectionTestScript -Arguments @{ EnvironmentName = $script:targetEnvironmentNames }
             }
 
-        Invoke-BootstrapStage -Index 10 -Name 'configure-devops' `
+        Invoke-BootstrapStage -Index 11 -Name 'configure-devops' `
             -Description 'Configure Azure DevOps environments, agent pool, and pipelines' `
             -Action {
                 $projectSetupScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\20 Configure AzDo Project.ps1'
                 Invoke-LabScriptWithGitAuthorization -Path $projectSetupScript -Arguments @{}
             }
 
-        Invoke-BootstrapStage -Index 11 -Name 'create-vms' `
+        Invoke-BootstrapStage -Index 12 -Name 'create-vms' `
             -Description 'Install Bicep if needed and create Azure agent VMs' `
             -Action {
                 Add-BicepInstallDirectoriesToPath
@@ -1415,7 +1332,7 @@ try
                 $script:secureBuildAgentPassword = $null
             }
 
-        Invoke-BootstrapStage -Index 12 -Name 'configure-agents' `
+        Invoke-BootstrapStage -Index 13 -Name 'configure-agents' `
             -Description 'Configure Azure DevOps agents on the new VMs' `
             -Action {
                 $agentSetupScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\31 Agent Setup.ps1'

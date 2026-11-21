@@ -54,6 +54,14 @@ catch
 Import-Module -Name Microsoft.Graph.Identity.Governance -RequiredVersion '2.41.1' -ErrorAction Stop
 Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
+$selectedEnvironmentNames = @($datum.Global.Azure.Environments.Keys | Where-Object {
+        -not $EnvironmentName -or $_ -in $EnvironmentName
+    })
+Update-M365DscDatumFromKeyVault `
+    -Datum $datum `
+    -ProjectName $datum.Global.ProjectSettings.ProjectName `
+    -EnvironmentName $selectedEnvironmentNames | Out-Null
+$datum = Get-M365DscProjectSettingsFromKeyVault -Datum $datum -CredentialType personal-access-token
 
 function Remove-M365DscAgentPoolAgents
 {
@@ -133,15 +141,12 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
         continue
     }
 
-    $setupIdentity = $environment.Identities | Where-Object Name -EQ M365DscSetupApplication
     Write-Host "Testing connection to environment '$envName'" -ForegroundColor Magenta
 
     $param = @{
-        TenantId               = $environment.AzTenantId
-        TenantName             = $environment.AzTenantName
-        SubscriptionId         = $environment.AzSubscriptionId
-        ServicePrincipalId     = $setupIdentity.ApplicationId
-        ServicePrincipalSecret = $setupIdentity.ApplicationSecret | ConvertTo-SecureString -AsPlainText -Force
+        TenantId       = $environment.AzTenantId
+        TenantName     = $environment.AzTenantName
+        SubscriptionId = $environment.AzSubscriptionId
     }
 
     # 'HasExchangeOnline' is maintained by the user and controls whether Exchange Online is expected.
@@ -173,15 +178,12 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
     }
 
     $environment = $datum.Global.Azure.Environments.$envName
-    $setupIdentity = $environment.Identities | Where-Object Name -EQ M365DscSetupApplication
     Write-Host "Connecting to environment '$envName'" -ForegroundColor Magenta
 
     $param = @{
-        TenantId               = $environment.AzTenantId
-        TenantName             = $environment.AzTenantName
-        SubscriptionId         = $environment.AzSubscriptionId
-        ServicePrincipalId     = $setupIdentity.ApplicationId
-        ServicePrincipalSecret = $setupIdentity.ApplicationSecret | ConvertTo-SecureString -AsPlainText -Force
+        TenantId       = $environment.AzTenantId
+        TenantName     = $environment.AzTenantName
+        SubscriptionId = $environment.AzSubscriptionId
     }
     # 'HasExchangeOnline' is maintained by the user and controls whether Exchange Online is expected.
     $param.SkipExchangeOnline = $environment.HasExchangeOnline -eq $false

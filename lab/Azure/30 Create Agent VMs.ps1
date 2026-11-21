@@ -30,24 +30,9 @@ if ($BuildAgentPassword)
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
     }
 }
-elseif ($datum.Global.ProjectSettings.BuildAgents.Password -eq '<Password>' -or
-    [string]::IsNullOrWhiteSpace([string]$datum.Global.ProjectSettings.BuildAgents.Password))
+else
 {
-    $securePassword = Read-Host -Prompt 'Enter the password for the build agents' -AsSecureString
-    if ($securePassword.Length -eq 0)
-    {
-        throw 'A non-empty build-agent password is required.'
-    }
-
-    $passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-    try
-    {
-        $datum.Global.ProjectSettings.BuildAgents.Password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer)
-    }
-    finally
-    {
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
-    }
+    $datum = Get-M365DscProjectSettingsFromKeyVault -Datum $datum -CredentialType build-agent-password
 }
 
 if ($EnvironmentName)
@@ -55,21 +40,22 @@ if ($EnvironmentName)
     Write-Host "Filtering environments to: $($EnvironmentName -join ', ')" -ForegroundColor Magenta
     $environments = $environments | Where-Object { $EnvironmentName -contains $_ }
 }
+Update-M365DscDatumFromKeyVault `
+    -Datum $datum `
+    -ProjectName $datum.Global.ProjectSettings.ProjectName `
+    -EnvironmentName $environments | Out-Null
 Write-Host "Setting up environments: $($environments -join ', ')" -ForegroundColor Magenta
 
 $vmResourceGroupNames = @{}
 foreach ($envName in $environments)
 {
     $environment = $datum.Global.Azure.Environments.$envName
-    $setupIdentity = $environment.Identities | Where-Object Name -EQ M365DscSetupApplication
     Write-Host "Testing connection to environment '$envName'" -ForegroundColor Magenta
 
     $param = @{
-        TenantId               = $environment.AzTenantId
-        TenantName             = $environment.AzTenantName
-        SubscriptionId         = $environment.AzSubscriptionId
-        ServicePrincipalId     = $setupIdentity.ApplicationId
-        ServicePrincipalSecret = $setupIdentity.ApplicationSecret | ConvertTo-SecureString -AsPlainText -Force
+        TenantId       = $environment.AzTenantId
+        TenantName     = $environment.AzTenantName
+        SubscriptionId = $environment.AzSubscriptionId
     }
 
     # 'HasExchangeOnline' is maintained by the user and controls whether Exchange Online is expected.
@@ -86,15 +72,12 @@ foreach ($envName in $environments)
     $environment = $datum.Global.Azure.Environments.$envName
     Write-Host "Working in environment '$envName'" -ForegroundColor Magenta
 
-    $setupIdentity = $environment.Identities | Where-Object Name -EQ M365DscSetupApplication
     Write-Host "Connecting to environment '$envName'" -ForegroundColor Magenta
 
     $param = @{
-        TenantId               = $environment.AzTenantId
-        TenantName             = $environment.AzTenantName
-        SubscriptionId         = $environment.AzSubscriptionId
-        ServicePrincipalId     = $setupIdentity.ApplicationId
-        ServicePrincipalSecret = $setupIdentity.ApplicationSecret | ConvertTo-SecureString -AsPlainText -Force
+        TenantId       = $environment.AzTenantId
+        TenantName     = $environment.AzTenantName
+        SubscriptionId = $environment.AzSubscriptionId
     }
     # 'HasExchangeOnline' is maintained by the user and controls whether Exchange Online is expected.
     $param.SkipExchangeOnline = $environment.HasExchangeOnline -eq $false
@@ -264,15 +247,12 @@ foreach ($envName in $environments)
     }
 
     $environment = $datum.Global.Azure.Environments."$envName"
-    $setupIdentity = $environment.Identities | Where-Object Name -EQ M365DscSetupApplication
 
     Write-Host "Connecting to environment '$envName'" -ForegroundColor Magenta
     $param = @{
-        TenantId               = $environment.AzTenantId
-        TenantName             = $environment.AzTenantName
-        SubscriptionId         = $environment.AzSubscriptionId
-        ServicePrincipalId     = $setupIdentity.ApplicationId
-        ServicePrincipalSecret = $setupIdentity.ApplicationSecret | ConvertTo-SecureString -AsPlainText -Force
+        TenantId       = $environment.AzTenantId
+        TenantName     = $environment.AzTenantName
+        SubscriptionId = $environment.AzSubscriptionId
     }
     # 'HasExchangeOnline' is maintained by the user and controls whether Exchange Online is expected.
     $param.SkipExchangeOnline = $environment.HasExchangeOnline -eq $false

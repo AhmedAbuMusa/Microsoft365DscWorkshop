@@ -1,3 +1,4 @@
 output
 lab/testResults.xml
-/source/Global/ProjectSettings.yml
+/ProjectSettings.private.yml
+/source/Global/Azure.private.yml

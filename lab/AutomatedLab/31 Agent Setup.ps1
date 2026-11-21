@@ -35,6 +35,12 @@ $certificatesToInstall = 'M365DscLcmApplication', 'M365DscExportApplication'
 $selectedEnvironments = @($datum.Global.Azure.Environments.Keys | Where-Object {
         -not $EnvironmentName -or $_ -in $EnvironmentName
     })
+Update-M365DscDatumFromKeyVault `
+    -Datum $datum `
+    -ProjectName $datum.Global.ProjectSettings.ProjectName `
+    -EnvironmentName $selectedEnvironments | Out-Null
+$datum = Get-M365DscProjectSettingsFromKeyVault -Datum $datum -CredentialType personal-access-token
+
 foreach ($envKey in $datum.Global.Azure.Environments.Keys)
 {
     if ($envKey -notin $selectedEnvironments)
@@ -43,23 +49,9 @@ foreach ($envKey in $datum.Global.Azure.Environments.Keys)
     }
 
     $environment = $datum.Global.Azure.Environments[$envKey]
-    $setupIdentity = $environment.Identities | Where-Object Name -EQ 'M365DscSetupApplication'
-    if (-not $setupIdentity -or [string]::IsNullOrWhiteSpace($setupIdentity.ApplicationSecret) -or
-        $setupIdentity.ApplicationSecret -match '^<.+>$')
-    {
-        throw "The setup application bootstrap secret is missing for environment '$envKey'. Run '10 Setup App Registrations.ps1' first."
-    }
-
-    $setupCredential = [System.Management.Automation.PSCredential]::new(
-        $setupIdentity.ApplicationId,
-        ($setupIdentity.ApplicationSecret | ConvertTo-SecureString -AsPlainText -Force)
-    )
-    Connect-AzAccount `
-        -ServicePrincipal `
-        -Credential $setupCredential `
-        -Tenant $environment.AzTenantId `
-        -Subscription $environment.AzSubscriptionId `
-        -ErrorAction Stop | Out-Null
+    Connect-M365DscEnvironmentContext `
+        -TenantName $environment.AzTenantName `
+        -SubscriptionId $environment.AzSubscriptionId | Out-Null
 
     $vaultName = Get-M365DscKeyVaultName `
         -ProjectName $datum.Global.ProjectSettings.ProjectName `
@@ -209,16 +201,13 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
     }
 
     $environment = $datum.Global.Azure.Environments.$envName
-    $setupIdentity = $environment.Identities | Where-Object Name -EQ M365DscSetupApplication
     Write-Host "Working in environment '$envName'" -ForegroundColor Magenta
 
     Write-Host "Connecting to environment '$envName'" -ForegroundColor Magenta
     $param = @{
-        TenantId               = $environment.AzTenantId
-        TenantName             = $environment.AzTenantName
-        SubscriptionId         = $environment.AzSubscriptionId
-        ServicePrincipalId     = $setupIdentity.ApplicationId
-        ServicePrincipalSecret = $setupIdentity.ApplicationSecret | ConvertTo-SecureString -AsPlainText -Force
+        TenantId       = $environment.AzTenantId
+        TenantName     = $environment.AzTenantName
+        SubscriptionId = $environment.AzSubscriptionId
     }
     # 'HasExchangeOnline' is maintained by the user and controls whether Exchange Online is expected.
     $param.SkipExchangeOnline = $environment.HasExchangeOnline -eq $false
@@ -575,6 +564,7 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
             }
 
             Import-Module -Name Az.KeyVault -RequiredVersion $AzKeyVaultVersion -ErrorAction Stop
+            [Environment]::SetEnvironmentVariable('AZURE_CLIENT_ID', $ManagedIdentityClientId, 'Machine')
             Write-Output "Connecting to managed identity '$ManagedIdentityClientId' for Key Vault access."
             Connect-AzAccount -Identity -AccountId $ManagedIdentityClientId -ErrorAction Stop | Out-Null
             Write-Output 'Connected to the managed identity.'
@@ -612,11 +602,24 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
             {
                 [System.IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($pfxBase64))
                 Write-Output 'Importing the certificate into the LocalMachine certificate store.'
-                Import-PfxCertificate `
-                    -FilePath $certificatePath `
-                    -Password ($pfxPassword | ConvertTo-SecureString -AsPlainText -Force) `
-                    -CertStoreLocation Cert:\LocalMachine\My `
-                    -ErrorAction Stop | Out-Null
+                $securePfxPassword = [securestring]::new()
+                try
+                {
+                    foreach ($character in $pfxPassword.ToCharArray())
+                    {
+                        $securePfxPassword.AppendChar($character)
+                    }
+                    $securePfxPassword.MakeReadOnly()
+                    Import-PfxCertificate `
+                        -FilePath $certificatePath `
+                        -Password $securePfxPassword `
+                        -CertStoreLocation Cert:\LocalMachine\My `
+                        -ErrorAction Stop | Out-Null
+                }
+                finally
+                {
+                    $securePfxPassword.Dispose()
+                }
             }
             finally
             {

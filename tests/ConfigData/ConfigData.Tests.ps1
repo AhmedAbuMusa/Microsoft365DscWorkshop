@@ -101,8 +101,8 @@ BeforeDiscovery {
     [hashtable[]]$azureEnvironmentTests = foreach ($environmentName in $datum.Global.Azure.Environments.Keys)
     {
         @{
-            Name       = $environmentName
-            Identities = $datum.Global.Azure.Environments.$environmentName.Identities
+            Name        = $environmentName
+            Environment = $datum.Global.Azure.Environments.$environmentName
         }
     }
 }
@@ -235,13 +235,39 @@ Describe 'Node Definition Files' -Tag Integration {
     }
 }
 
-Describe 'Export Application' -Tag Integration {
+Describe 'Public tenant manifest' -Tag Integration {
 
-    It "The environment '<Name>' defines exactly one export application" -TestCases $azureEnvironmentTests {
-        $exportApps = @($Identities |
-                Where-Object { $_.Name -notmatch '^<.+>$' } |
-                Where-Object { $_.Name -eq 'M365DscExportApplication' -or $_.IsExportApplication -eq $true })
+    It "The '<Name>' manifest contains no tenant or application identifiers" -TestCases $azureEnvironmentTests {
+        $Environment.Keys | Should -Not -Contain 'AzTenantId'
+        $Environment.Keys | Should -Not -Contain 'AzSubscriptionId'
+        $Environment.Keys | Should -Not -Contain 'TenantId'
+        $Environment.Keys | Should -Not -Contain 'SubscriptionId'
+        $Environment.Keys | Should -Not -Contain 'ApplicationId'
+        $Environment.Keys | Should -Not -Contain 'ApplicationSecret'
+        $Environment.Keys | Should -Not -Contain 'CertificateThumbprint'
+        $Environment.Keys | Should -Not -Contain 'KeyVaultName'
+        $Environment.Keys | Should -Not -Contain 'Identities'
+        $Environment.AzTenantName | Should -Not -BeNullOrEmpty
+    }
+}
 
-        $exportApps.Count | Should -Be 1 -Because "'.build/Export/ExportTenantData.ps1' stops when an environment defines no or more than one export application"
+Describe 'Public project settings manifest' -Tag Integration {
+    BeforeAll {
+        $projectSettingsPath = Join-Path -Path $ProjectPath -ChildPath 'source\Global\ProjectSettings.yml'
+        $projectSettingsContent = Get-Content -LiteralPath $projectSettingsPath -Raw
+        $projectSettings = $projectSettingsContent | ConvertFrom-Yaml
+        $projectDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $ProjectPath -ChildPath 'source\Datum.yml')
+        $configuredEnvironmentNames = @($projectDatum.Global.Azure.Environments.Keys)
+    }
+
+    It 'Keeps PAT and build-agent password out of the public YAML' {
+        $projectSettings.PersonalAccessToken | Should -Be '<StoredInKeyVault>'
+        $projectSettings.BuildAgents.Password | Should -Be '<StoredInKeyVault>'
+        $projectSettingsContent | Should -Not -Match '(?i)\[ENC=|Somepass1|PersonalAccessToken:\s*[^<\s]'
+    }
+
+    It 'Selects a configured environment for project-settings Key Vault credentials' {
+        $projectSettings.CredentialVaultEnvironment |
+            Should -BeIn $configuredEnvironmentNames
     }
 }

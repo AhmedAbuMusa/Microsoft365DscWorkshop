@@ -3,6 +3,23 @@ task ExportTenantData {
     $configPath = "$ProjectPath\export\ExportConfiguration.yml"
     $exportConfig = Get-Content -Path $configPath -Raw | ConvertFrom-Yaml
 
+    Import-Module -Name (Join-Path -Path $ProjectPath -ChildPath 'lab\AutomatedLab\AzHelpers.psm1') -Force -ErrorAction Stop
+    $selectedEnvironmentNames = if ($env:BuildEnvironment)
+    {
+        @([string]$env:BuildEnvironment)
+    }
+    else
+    {
+        @($datum.Global.Azure.Environments.Keys)
+    }
+    $datum = Update-M365DscDatumFromKeyVault `
+        -Datum $datum `
+        -ProjectName $datum.Global.ProjectSettings.ProjectName `
+        -EnvironmentName $selectedEnvironmentNames `
+        -ManagedIdentity:([bool]$env:BuildEnvironment) `
+        -IncludeCredentials `
+        -CredentialIdentityName 'M365DscExportApplication'
+
     $environments = if ($env:BuildEnvironment)
     {
         $datum.Global.Azure.Environments.GetEnumerator().Where({ $_.Name -eq $env:BuildEnvironment })
@@ -72,7 +89,12 @@ task ExportTenantData {
             }
 
             Write-Host '------------------ Export Parameters ------------------' -ForegroundColor Yellow
-            $exportParams | Out-String | Write-Host -ForegroundColor DarkGray
+            $loggedExportParameters = $exportParams.Clone()
+            if ($loggedExportParameters.ContainsKey('ApplicationSecret'))
+            {
+                $loggedExportParameters.ApplicationSecret = '[REDACTED]'
+            }
+            $loggedExportParameters | Out-String | Write-Host -ForegroundColor DarkGray
             Write-Host '-------------------------------------------------------' -ForegroundColor Yellow
 
             Export-M365DSCConfiguration @exportParams

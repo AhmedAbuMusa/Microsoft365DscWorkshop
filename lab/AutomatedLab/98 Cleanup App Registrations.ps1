@@ -17,12 +17,17 @@ if ($EnvironmentName)
 {
     $environments = $environments | Where-Object { $EnvironmentName -contains $_ }
 }
+$selectedEnvironmentNames = @($environments)
+Update-M365DscDatumFromKeyVault `
+    -Datum $datum `
+    -ProjectName $datum.Global.ProjectSettings.ProjectName `
+    -EnvironmentName $selectedEnvironmentNames | Out-Null
 
 foreach ($envName in $environments)
 {
     $environment = $datum.Global.Azure.Environments.$envName
     Write-Host "Working in environment '$envName'" -ForegroundColor Magenta
-    Write-Host "Connecting to Azure subscription '$($environment.AzSubscriptionId)' in tenant '$($environment.AzTenantId)'"
+    Write-Host "Connecting to environment '$envName'."
 
     # 'HasExchangeOnline' is maintained by the user and controls whether Exchange Online is expected.
     $skipExchangeOnline = $environment.HasExchangeOnline -eq $false

@@ -114,6 +114,11 @@ task NewM365DscDeltaReport {
     $tenantIdentifierMap = $null
     if ($env:DeltaReportAnonymizeTenantIdentifiers -eq 'true')
     {
+        if (-not $env:BuildEnvironment)
+        {
+            Write-Error "Set 'BuildEnvironment' so the build agent can load tenant IDs from Key Vault using its managed identity before anonymizing the delta report." -ErrorAction Stop
+        }
+
         $azureConfigurationPath = Join-Path -Path $ProjectPath -ChildPath 'source\Global\Azure.yml'
         if (-not (Test-Path -LiteralPath $azureConfigurationPath -PathType Leaf))
         {
@@ -126,29 +131,36 @@ task NewM365DscDeltaReport {
             Write-Error "Azure configuration file '$azureConfigurationPath' does not define Environments; tenant identifiers cannot be anonymized." -ErrorAction Stop
         }
 
+        $requiredModuleVersions = Import-PowerShellDataFile -Path (Join-Path -Path $ProjectPath -ChildPath 'RequiredModules.psd1')
+        Import-Module -Name Az.Accounts -RequiredVersion $requiredModuleVersions['Az.Accounts'] -ErrorAction Stop
+        Import-Module -Name Az.KeyVault -RequiredVersion $requiredModuleVersions['Az.KeyVault'] -ErrorAction Stop
+        Import-Module -Name (Join-Path -Path $ProjectPath -ChildPath 'lab\AutomatedLab\AzHelpers.psm1') -Force -ErrorAction Stop
+        $datum = New-DatumStructure -DefinitionFile (Join-Path -Path $ProjectPath -ChildPath 'source\Datum.yml')
+        Update-M365DscDatumFromKeyVault `
+            -Datum $datum `
+            -ProjectName $datum.Global.ProjectSettings.ProjectName `
+            -EnvironmentName ([string]$env:BuildEnvironment) `
+            -ManagedIdentity | Out-Null
+
         $tenantIdentifierMap = [System.Collections.Hashtable]::new([System.StringComparer]::OrdinalIgnoreCase)
-        foreach ($environment in $azureConfiguration.Environments.GetEnumerator())
+        foreach ($environment in $datum.Global.Azure.Environments.GetEnumerator())
         {
             $tenantName = [string]$environment.Value.AzTenantName
             $tenantId = [string]$environment.Value.AzTenantId
-            if ([string]::IsNullOrWhiteSpace($tenantName) -or [string]::IsNullOrWhiteSpace($tenantId))
+            if ([string]::IsNullOrWhiteSpace($tenantName))
             {
-                if ($mergedConfigurations.ContainsKey($tenantName))
-                {
-                    Write-Error "Environment '$($environment.Name)' must define AzTenantName and AzTenantId to anonymize its exported delta report." -ErrorAction Stop
-                }
-
-                continue
+                Write-Error "Environment '$($environment.Name)' is missing its public tenant name; refusing to anonymize the delta report." -ErrorAction Stop
             }
 
-            foreach ($identifier in @($tenantName, $tenantId))
+            $tenantIdentifierMap[$tenantName] = [string]$environment.Name
+            if ($tenantId)
             {
-                if ($tenantIdentifierMap.Contains($identifier) -and $tenantIdentifierMap[$identifier] -ne $environment.Name)
+                if ($tenantIdentifierMap.Contains($tenantId) -and $tenantIdentifierMap[$tenantId] -ne $environment.Name)
                 {
-                    Write-Error "Tenant identifier '$identifier' maps to more than one environment in '$azureConfigurationPath'." -ErrorAction Stop
+                    Write-Error "Tenant identifier '$tenantId' maps to more than one environment." -ErrorAction Stop
                 }
 
-                $tenantIdentifierMap[$identifier] = [string]$environment.Name
+                $tenantIdentifierMap[$tenantId] = [string]$environment.Name
             }
         }
 
@@ -163,6 +175,10 @@ task NewM365DscDeltaReport {
                 }
 
                 Write-Error "Exported tenant '$tenantName' is not configured in '$azureConfigurationPath'; refusing to publish an incompletely anonymized report." -ErrorAction Stop
+            }
+            if ($tenantIdentifierMap[$tenantName] -ne $env:BuildEnvironment)
+            {
+                Write-Error "The build agent's managed identity can load Key Vault metadata only for '$($env:BuildEnvironment)'; refusing to publish a report containing tenant identifiers for '$tenantName'." -ErrorAction Stop
             }
         }
     }

@@ -18,6 +18,13 @@ if ($EnvironmentName)
 Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force
 $projectSettings = Get-Content $PSScriptRoot\..\..\source\Global\ProjectSettings.yml | ConvertFrom-Yaml -ErrorAction Stop
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
+$selectedEnvironmentNames = @($datum.Global.Azure.Environments.Keys | Where-Object {
+        -not $EnvironmentName -or $_ -in $EnvironmentName
+    })
+Update-M365DscDatumFromKeyVault `
+    -Datum $datum `
+    -ProjectName $projectSettings.ProjectName `
+    -EnvironmentName $selectedEnvironmentNames | Out-Null
 
 foreach ($envName in $datum.Global.Azure.Environments.Keys)
 {
@@ -28,15 +35,12 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
     }
 
     $environment = $datum.Global.Azure.Environments.$envName
-    $setupIdentity = $environment.Identities | Where-Object Name -EQ M365DscSetupApplication
     Write-Host "Connecting to environment '$envName'" -ForegroundColor Magenta
 
     $param = @{
-        TenantId               = $environment.AzTenantId
-        TenantName             = $environment.AzTenantName
-        SubscriptionId         = $environment.AzSubscriptionId
-        ServicePrincipalId     = $setupIdentity.ApplicationId
-        ServicePrincipalSecret = $setupIdentity.ApplicationSecret | ConvertTo-SecureString -AsPlainText -Force
+        TenantId       = $environment.AzTenantId
+        TenantName     = $environment.AzTenantName
+        SubscriptionId = $environment.AzSubscriptionId
     }
 
     # 'HasExchangeOnline' is maintained by the user and controls whether Exchange Online is expected.

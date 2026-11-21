@@ -79,41 +79,20 @@ if (-not (Get-Module -Name Pester -ListAvailable | Where-Object Version -EQ 5.7.
 Import-Module -Name Pester -RequiredVersion 5.7.1
 
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
+$datum = Get-M365DscProjectSettingsFromKeyVault -Datum $datum -CredentialType build-agent-password
 $environments = $datum.Global.Azure.Environments.Keys
-
-if ($datum.Global.ProjectSettings.BuildAgents.Password -eq '<Password>' -or $null -eq $datum.Global.BuildAgents.Password)
-{
-    $defaultPassword = 'Somepass1'
-    $password = Read-Host -Prompt 'Enter the password for the build agents or press <Enter> to use the default password (Somepass1)'
-
-    if ($password -eq '')
-    {
-        $datum.Global.ProjectSettings.BuildAgents.Password = $defaultPassword
-    }
-    else
-    {
-        $datum.Global.ProjectSettings.BuildAgents.Password = $password
-    }
-    if ($datum.Global.ProjectSettings.PersonalAccessToken -ne '<PersonalAccessToken>')
-    {
-        $pass = $datum.__Definition.DatumHandlers.'Datum.ProtectedData::ProtectedDatum'.CommandOptions.PlainTextPassword | ConvertTo-SecureString -AsPlainText -Force
-        $datum.Global.ProjectSettings.PersonalAccessToken = $datum.Global.ProjectSettings.PersonalAccessToken | Protect-Datum -Password $pass -MaxLineLength 9999
-    }
-    $datum.Global.ProjectSettings | ConvertTo-Yaml | Out-File $PSScriptRoot\..\..\source\Global\ProjectSettings.yml
-}
-
-if ((git status -s) -like '*source/Global/ProjectSettings.yml')
-{
-    git add $PSScriptRoot\..\..\source\Global\ProjectSettings.yml
-    git commit -m 'Updated Azure DevOps Build Agent Data' | Out-Null
-    git push | Out-Null
-}
 
 if ($EnvironmentName)
 {
     Write-Host "Filtering environments to: $($EnvironmentName -join ', ')" -ForegroundColor Magenta
     $environments = $environments | Where-Object { $EnvironmentName -contains $_ }
 }
+Update-M365DscDatumFromKeyVault `
+    -Datum $datum `
+    -ProjectName $datum.Global.ProjectSettings.ProjectName `
+    -EnvironmentName $environments `
+    -IncludeCredentials `
+    -CredentialIdentityName 'M365DscSetupApplication' | Out-Null
 Write-Host "Setting up environments: $($environments -join ', ')" -ForegroundColor Magenta
 
 foreach ($envName in $environments)
@@ -127,7 +106,7 @@ foreach ($envName in $environments)
         TenantName             = $environment.AzTenantName
         SubscriptionId         = $environment.AzSubscriptionId
         ServicePrincipalId     = $setupIdentity.ApplicationId
-        ServicePrincipalSecret = $setupIdentity.ApplicationSecret | ConvertTo-SecureString -AsPlainText -Force
+        ServicePrincipalSecret = ConvertTo-M365DscSecureString -Value $setupIdentity.ApplicationSecret
     }
 
     # 'HasExchangeOnline' is maintained by the user and controls whether Exchange Online is expected.
@@ -155,7 +134,7 @@ foreach ($envName in $environments)
         TenantName             = $environment.AzTenantName
         SubscriptionId         = $environment.AzSubscriptionId
         ServicePrincipalId     = $setupIdentity.ApplicationId
-        ServicePrincipalSecret = $setupIdentity.ApplicationSecret | ConvertTo-SecureString -AsPlainText -Force
+        ServicePrincipalSecret = ConvertTo-M365DscSecureString -Value $setupIdentity.ApplicationSecret
     }
     # 'HasExchangeOnline' is maintained by the user and controls whether Exchange Online is expected.
     $param.SkipExchangeOnline = $environment.HasExchangeOnline -eq $false
@@ -265,7 +244,7 @@ foreach ($lab in $labs)
         TenantName             = $environment.AzTenantName
         SubscriptionId         = $environment.AzSubscriptionId
         ServicePrincipalId     = $setupIdentity.ApplicationId
-        ServicePrincipalSecret = $setupIdentity.ApplicationSecret | ConvertTo-SecureString -AsPlainText -Force
+        ServicePrincipalSecret = ConvertTo-M365DscSecureString -Value $setupIdentity.ApplicationSecret
     }
     # 'HasExchangeOnline' is maintained by the user and controls whether Exchange Online is expected.
     $param.SkipExchangeOnline = $environment.HasExchangeOnline -eq $false

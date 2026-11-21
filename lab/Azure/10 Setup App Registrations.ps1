@@ -7,72 +7,79 @@ param (
     [switch]$RotateCredentials
 )
 
-$requiredModulesPath = (Resolve-Path -Path $PSScriptRoot\..\..\output\RequiredModules).Path
+$ErrorActionPreference = 'Stop'
+$requiredModulesPath = (Resolve-Path -Path $PSScriptRoot\..\..\output\RequiredModules -ErrorAction Stop).Path
 if ($env:PSModulePath -notlike "*$requiredModulesPath*")
 {
-    $env:PSModulePath = $env:PSModulePath + ";$requiredModulesPath"
+    $env:PSModulePath = $env:PSModulePath + [System.IO.Path]::PathSeparator + $requiredModulesPath
 }
 
-Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force
-$datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
-$environments = $datum.Global.Azure.Environments.Keys
+Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force -ErrorAction Stop
+$datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml -ErrorAction Stop
+$environments = @($datum.Global.Azure.Environments.Keys)
 if ($EnvironmentName)
 {
-    $environments = $environments | Where-Object { $EnvironmentName -contains $_ }
+    $unknownEnvironments = @($EnvironmentName | Where-Object { $_ -notin $environments })
+    if ($unknownEnvironments)
+    {
+        throw "Unknown environment(s): $($unknownEnvironments -join ', ')."
+    }
+    $environments = @($environments | Where-Object { $_ -in $EnvironmentName })
 }
 
-$protectedDataPassword = $datum.__Definition.DatumHandlers.'Datum.ProtectedData::ProtectedDatum'.CommandOptions.PlainTextPassword |
-    ConvertTo-SecureString -AsPlainText -Force
+if (-not $environments)
+{
+    throw "No environments are defined in 'source/Global/Azure.yml'."
+}
+
+$identityDefinitions = @(
+    @{
+        Name             = 'M365DscSetupApplication'
+        CredentialType   = 'secret'
+        AddGlobalAdmin   = $true
+    }
+    @{
+        Name           = 'M365DscLcmApplication'
+        CredentialType = 'certificate'
+    }
+    @{
+        Name           = 'M365DscExportApplication'
+        CredentialType = 'certificate'
+    }
+)
 
 foreach ($environmentName in $environments)
 {
-    $environment = $datum.Global.Azure.Environments."$environmentName"
-    $setupIdentity = $environment.Identities | Where-Object Name -EQ 'M365DscSetupApplication'
-    if (-not $setupIdentity)
+    $environment = $datum.Global.Azure.Environments[$environmentName]
+    if ([string]::IsNullOrWhiteSpace([string]$environment.AzTenantName))
     {
-        throw "The identity 'M365DscSetupApplication' is not configured for environment '$environmentName'."
+        $environment.AzTenantName = Read-Host -Prompt "Tenant domain for environment '$environmentName'"
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$environment.AzTenantName))
+    {
+        throw "A tenant domain is required for environment '$environmentName'."
     }
 
-    Write-Host "Working in environment '$environmentName'" -ForegroundColor Magenta
-    Write-Host "Connecting to Azure subscription '$($environment.AzSubscriptionId)' in tenant '$($environment.AzTenantId)'"
-
-    $param = @{
-        TenantId   = $environment.AzTenantId
-        TenantName = $environment.AzTenantName
-    }
-    if (-not [string]::IsNullOrEmpty($environment.AzSubscriptionId))
-    {
-        $param.SubscriptionId = $environment.AzSubscriptionId
-    }
-
-    $hasSetupSecret = -not [string]::IsNullOrWhiteSpace($setupIdentity.ApplicationSecret) -and
-        $setupIdentity.ApplicationSecret -notmatch '^<.+>$'
-    $useSetupApplication = $hasSetupSecret -and $environment.HasExchangeOnline -eq $false
-    if ($useSetupApplication)
-    {
-        $param.ServicePrincipalId = $setupIdentity.ApplicationId
-        $param.ServicePrincipalSecret = $setupIdentity.ApplicationSecret | ConvertTo-SecureString -AsPlainText -Force
-    }
-    elseif ($environment.HasExchangeOnline -eq $true)
-    {
-        Write-Host 'Using interactive sign-in because this environment requires Exchange Online setup.'
-    }
+    Write-Host "Signing in to tenant '$($environment.AzTenantName)' for environment '$environmentName'." -ForegroundColor Magenta
+    $context = Connect-M365DscEnvironmentContext -TenantName $environment.AzTenantName
+    $environment.AzTenantId = [string]$context.Tenant.Id
+    $environment.AzSubscriptionId = [string]$context.Subscription.Id
 
     $skipExchangeOnline = $environment.HasExchangeOnline -eq $false
-    if ($skipExchangeOnline)
-    {
-        Write-Host "The environment '$environmentName' is configured without Exchange Online. All Exchange Online preparation steps are skipped and no Exchange configuration is compiled for it." -ForegroundColor Yellow
+    $connectionParameters = @{
+        TenantId         = $environment.AzTenantId
+        TenantName       = $environment.AzTenantName
+        SubscriptionId   = $environment.AzSubscriptionId
+        SkipExchangeOnline = $skipExchangeOnline
     }
-    $param.SkipExchangeOnline = $skipExchangeOnline
-
-    Connect-M365Dsc @param -ErrorAction Stop
-
-    if (-not (Test-M365DscConnection -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -SkipExchangeOnline:$skipExchangeOnline))
+    Connect-M365Dsc @connectionParameters -ErrorAction Stop
+    if (-not (Test-M365DscConnection `
+                -TenantId $environment.AzTenantId `
+                -SubscriptionId $environment.AzSubscriptionId `
+                -SkipExchangeOnline:$skipExchangeOnline))
     {
-        Write-Error "Failed to connect to Azure subscription '$($environment.AzSubscriptionId)' in tenant '$($environment.AzTenantId)'" -ErrorAction Stop
+        throw "The interactive connection does not match environment '$environmentName'."
     }
-
-    Write-Host "Successfully connected to Azure subscription '$($environment.AzTenantName) ($($environment.AzSubscriptionId))'."
 
     $vault = Initialize-M365DscKeyVault `
         -ProjectName $datum.Global.ProjectSettings.ProjectName `
@@ -81,126 +88,27 @@ foreach ($environmentName in $environments)
         -SubscriptionId $environment.AzSubscriptionId `
         -Location $datum.Global.ProjectSettings.BuildAgents.AzureLocation `
         -ErrorAction Stop
-
     if ($null -eq $vault)
     {
         throw "Failed to initialize the credential Key Vault for environment '$environmentName'."
     }
 
-    foreach ($identity in $environment.Identities.GetEnumerator())
+    $operatorAccount = (Get-MgContext -ErrorAction Stop).Account
+    if ([string]::IsNullOrWhiteSpace([string]$operatorAccount))
     {
-        if ($identity.Name -match '^<.+>$')
-        {
-            Write-Host "Skipping the identity '$($identity.Name)' in environment '$environmentName'. It is still a placeholder. Fill it in or remove it from 'source/Global/Azure.yml'." -ForegroundColor Yellow
-            continue
-        }
-
-        $secretPlaceholder = $identity.ApplicationSecret -eq '<AutoGeneratedLater>'
-        $certificatePlaceholder = $identity.CertificateThumbprint -eq '<AutoGeneratedLater>'
-        $setupSecretMissing = $identity.Name -eq 'M365DscSetupApplication' -and
-            ([string]::IsNullOrWhiteSpace($identity.ApplicationSecret) -or $identity.ApplicationSecret -match '^<.+>$')
-        $hasSecretConfiguration = -not [string]::IsNullOrWhiteSpace($identity.ApplicationSecret)
-        $hasCertificateConfiguration = -not [string]::IsNullOrWhiteSpace($identity.CertificateThumbprint)
-        $generateSecret = -not $identity.IsManagedIdentity -and
-            ($secretPlaceholder -or $setupSecretMissing -or ($RotateCredentials -and $hasSecretConfiguration))
-        $generateCertificate = -not $identity.IsManagedIdentity -and
-            ($certificatePlaceholder -or ($RotateCredentials -and $hasCertificateConfiguration))
-
-        if ($identity.IsManagedIdentity)
-        {
-            Write-Host "Using the existing managed identity '$($identity.Name)' for environment '$environmentName'."
-            $azIdentity = New-M365DscIdentity -Name $identity.Name -OnlyServicePrincipals -PassThru
-        }
-        elseif ($generateSecret)
-        {
-            Write-Host "Registering the application '$($identity.Name)' with a generated secret."
-            $azIdentity = New-M365DscIdentity -Name $identity.Name -GenereateAppSecret -PassThru
-        }
-        elseif ($generateCertificate)
-        {
-            Write-Host "Registering the application '$($identity.Name)' with a generated certificate."
-            $azIdentity = New-M365DscIdentity -Name $identity.Name -GenereateCertificate -PassThru
-        }
-        else
-        {
-            Write-Host "Registering the application '$($identity.Name)' without rotating its credentials."
-            $azIdentity = New-M365DscIdentity -Name $identity.Name -PassThru
-        }
-
-        if ($generateSecret -and [string]::IsNullOrWhiteSpace($azIdentity.Secret))
-        {
-            throw "Failed to generate a secret for application '$($identity.Name)' in environment '$environmentName'."
-        }
-        if ($generateCertificate -and [string]::IsNullOrWhiteSpace($azIdentity.CertificateThumbprint))
-        {
-            throw "Failed to generate a certificate for application '$($identity.Name)' in environment '$environmentName'."
-        }
-
-        if ($identity.Name -eq 'M365DscSetupApplication')
-        {
-            Add-M365DscIdentityPermission -Identity $azIdentity -AccessType Update -AddToGlobalAdminRole
-        }
-        else
-        {
-            Add-M365DscIdentityPermission -Identity $azIdentity -AccessType Update
-        }
-
-        if ($identity.Name -eq 'M365DscSetupApplication')
-        {
-            Ensure-M365DscKeyVaultRoleAssignment `
-                -VaultResourceId $vault.ResourceId `
-                -PrincipalId $azIdentity.AppPrincipalId `
-                -RoleDefinitionName 'Key Vault Secrets Officer'
-        }
-
-        $identity.ApplicationId = $azIdentity.AppId
-        if ($generateSecret)
-        {
-            $identity.ApplicationSecret = $azIdentity.Secret
-        }
-        if ($generateCertificate)
-        {
-            $identity.CertificateThumbprint = $azIdentity.CertificateThumbprint
-        }
-
-        Write-Host "Registered the application '$($identity.Name)' for environment '$environmentName'."
-        Write-Host "  Application ID: $($azIdentity.AppId)"
-        if ($azIdentity.CertificateThumbprint)
-        {
-            Write-Host "  Certificate thumbprint: $($azIdentity.CertificateThumbprint)"
-        }
+        throw 'The interactive Microsoft Graph session did not identify the signed-in operator.'
     }
-
-    $setupSecretIsUsable = -not [string]::IsNullOrWhiteSpace($setupIdentity.ApplicationSecret) -and
-        $setupIdentity.ApplicationSecret -notmatch '^<.+>$'
-    if (-not $setupSecretIsUsable)
+    $operator = Get-MgUser -UserId $operatorAccount -ErrorAction Stop
+    if (-not $operator.Id)
     {
-        throw "The setup application for environment '$environmentName' must have an application secret so it can access the credential vault."
+        throw 'Could not resolve the signed-in operator to an Entra user object.'
     }
-
-    $setupPrincipal = Get-AzADServicePrincipal -ApplicationId $setupIdentity.ApplicationId -ErrorAction Stop
-    if (@($setupPrincipal).Count -ne 1)
-    {
-        throw "Could not uniquely resolve the setup application's service principal in environment '$environmentName'."
-    }
-
     Ensure-M365DscKeyVaultRoleAssignment `
         -VaultResourceId $vault.ResourceId `
-        -PrincipalId $setupPrincipal.Id `
+        -PrincipalId $operator.Id `
         -RoleDefinitionName 'Key Vault Secrets Officer'
 
-    Disconnect-M365Dsc
-    $keyVaultConnection = @{
-        TenantId               = $environment.AzTenantId
-        TenantName             = $environment.AzTenantName
-        SubscriptionId         = $environment.AzSubscriptionId
-        ServicePrincipalId     = $setupIdentity.ApplicationId
-        ServicePrincipalSecret = $setupIdentity.ApplicationSecret | ConvertTo-SecureString -AsPlainText -Force
-        SkipExchangeOnline     = $true
-    }
-    Connect-M365Dsc @keyVaultConnection -ErrorAction Stop
-
-    $maximumKeyVaultAccessAttempts = 60
+    $maximumKeyVaultAccessAttempts = 12
     for ($attempt = 1; $attempt -le $maximumKeyVaultAccessAttempts; $attempt++)
     {
         try
@@ -210,137 +118,163 @@ foreach ($environmentName in $environments)
         }
         catch
         {
-            if ($attempt -eq $maximumKeyVaultAccessAttempts)
+            $statusCode = 0
+            if ($_.Exception.Response -and $_.Exception.Response.StatusCode)
             {
-                throw "The setup application service principal '$($setupPrincipal.Id)' could not access Key Vault '$($vault.VaultName)' with the 'Key Vault Secrets Officer' role after waiting up to 10 minutes for permission propagation. $($_.Exception.Message)"
+                $statusCode = [int]$_.Exception.Response.StatusCode
             }
-
-            Start-Sleep -Seconds 10
+            if ($statusCode -notin @(401, 403) -or $attempt -eq $maximumKeyVaultAccessAttempts)
+            {
+                throw "The signed-in operator could not access Key Vault '$($vault.VaultName)' after role assignment. $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds 5
         }
     }
 
-    foreach ($identity in $environment.Identities.GetEnumerator())
+    foreach ($identityDefinition in $identityDefinitions)
     {
-        if ($identity.Name -match '^<.+>$' -or $identity.IsManagedIdentity)
+        $identityName = $identityDefinition.Name
+        Write-Host "Reconciling application '$identityName'." -ForegroundColor Magenta
+
+        $identity = New-M365DscIdentity -Name $identityName -PassThru
+
+        if (-not $identity -or -not $identity.AppId)
         {
-            continue
+            throw "Could not create or uniquely resolve application '$identityName' in environment '$environmentName'."
         }
 
-        if (-not [string]::IsNullOrWhiteSpace($identity.ApplicationSecret) -or
-            $identity.ApplicationSecret -eq '<StoredInKeyVault>' -or
-            $identity.ApplicationSecret -eq '<AutoGeneratedLater>')
+        if ($identityDefinition.AddGlobalAdmin)
         {
-            $secretName = Get-M365DscKeyVaultSecretName -IdentityName $identity.Name -CredentialType secret
+            Add-M365DscIdentityPermission -Identity $identity -AccessType Update -AddToGlobalAdminRole
+        }
+        else
+        {
+            Add-M365DscIdentityPermission -Identity $identity -AccessType Update
+        }
+
+        $applicationIdSecretName = Get-M365DscKeyVaultSecretName -IdentityName $identityName -CredentialType 'application-id'
+        Set-M365DscKeyVaultSecret `
+            -VaultName $vault.VaultName `
+            -Name $applicationIdSecretName `
+            -SecretValue (ConvertTo-M365DscSecureString -Value $identity.AppId) `
+            -ContentType 'text/plain' `
+            -Overwrite
+
+        if ($identityDefinition.CredentialType -eq 'secret')
+        {
+            $secretName = Get-M365DscKeyVaultSecretName -IdentityName $identityName -CredentialType secret
             $secretExists = Test-M365DscKeyVaultSecret -VaultName $vault.VaultName -Name $secretName
-            $secretValue = $identity.ApplicationSecret
-
-            if ($identity.Name -eq 'M365DscSetupApplication' -and $secretExists -and -not $RotateCredentials)
-            {
-                $storedSecret = Get-M365DscKeyVaultSecret -VaultName $vault.VaultName -Name $secretName
-                $secretValue = [System.Net.NetworkCredential]::new('', $storedSecret).Password
-            }
-
             if ($RotateCredentials -or -not $secretExists)
             {
-                if ($secretValue -eq '<StoredInKeyVault>' -or [string]::IsNullOrWhiteSpace($secretValue))
+                $identity = New-M365DscIdentity -Name $identityName -GenereateAppSecret -PassThru
+                if (-not $identity.Secret)
                 {
-                    $azIdentity = New-M365DscIdentity -Name $identity.Name -GenereateAppSecret -PassThru
-                    if ([string]::IsNullOrWhiteSpace($azIdentity.Secret))
-                    {
-                        throw "Failed to generate a replacement secret for application '$($identity.Name)'."
-                    }
-                    $secretValue = $azIdentity.Secret
-                    $identity.ApplicationId = $azIdentity.AppId
+                    throw "Failed to generate the application secret for '$identityName'."
                 }
-
-                if ($secretValue -eq '<AutoGeneratedLater>')
-                {
-                    throw "Application '$($identity.Name)' has no generated secret to store."
-                }
-
-                $secretSecureString = ConvertTo-SecureString -String $secretValue -AsPlainText -Force
                 Set-M365DscKeyVaultSecret `
                     -VaultName $vault.VaultName `
                     -Name $secretName `
-                    -SecretValue $secretSecureString `
+                    -SecretValue (ConvertTo-M365DscSecureString -Value $identity.Secret) `
                     -ContentType 'text/plain' `
                     -Overwrite:$RotateCredentials
-                Write-Host "Stored the application secret for '$($identity.Name)' in Key Vault."
             }
-
-            if ($identity.Name -eq 'M365DscSetupApplication')
+        }
+        else
+        {
+            $pfxName = Get-M365DscKeyVaultSecretName -IdentityName $identityName -CredentialType pfx
+            $pfxPasswordName = Get-M365DscKeyVaultSecretName -IdentityName $identityName -CredentialType pfx-password
+            $pfxExists = Test-M365DscKeyVaultSecret -VaultName $vault.VaultName -Name $pfxName
+            $pfxPasswordExists = Test-M365DscKeyVaultSecret -VaultName $vault.VaultName -Name $pfxPasswordName
+            if (-not $RotateCredentials -and $pfxExists -ne $pfxPasswordExists)
             {
-                $identity.ApplicationSecret = $secretValue | Protect-Datum -Password $protectedDataPassword -MaxLineLength 9999
+                throw "Key Vault contains only part of the certificate material for '$identityName'. Review the vault and rerun with -RotateCredentials to replace the certificate pair."
+            }
+            if ($RotateCredentials -or -not ($pfxExists -and $pfxPasswordExists))
+            {
+                $identity = New-M365DscIdentity -Name $identityName -GenereateCertificate -PassThru
+                if (-not $identity.CertificateThumbprint)
+                {
+                    throw "Failed to generate the certificate for '$identityName'."
+                }
+
+                $certificate = Get-Item -Path "Cert:\LocalMachine\My\$($identity.CertificateThumbprint)" -ErrorAction Stop
+                if (-not $certificate.HasPrivateKey)
+                {
+                    throw "Generated certificate '$($identity.CertificateThumbprint)' for '$identityName' has no private key."
+                }
+                $pfxPassword = [Guid]::NewGuid().ToString('N')
+                $pfxBase64 = [Convert]::ToBase64String($certificate.Export('Pfx', $pfxPassword))
+                Set-M365DscKeyVaultSecret `
+                    -VaultName $vault.VaultName `
+                    -Name $pfxName `
+                    -SecretValue (ConvertTo-M365DscSecureString -Value $pfxBase64) `
+                    -ContentType 'application/x-pkcs12' `
+                    -Overwrite:$RotateCredentials
+                Set-M365DscKeyVaultSecret `
+                    -VaultName $vault.VaultName `
+                    -Name $pfxPasswordName `
+                    -SecretValue (ConvertTo-M365DscSecureString -Value $pfxPassword) `
+                    -ContentType 'text/plain' `
+                    -Overwrite:$RotateCredentials
             }
             else
             {
-                $identity.ApplicationSecret = '<StoredInKeyVault>'
-            }
-        }
-
-        if ([string]::IsNullOrWhiteSpace($identity.CertificateThumbprint) -and
-            $identity.CertificateThumbprint -ne '<AutoGeneratedLater>')
-        {
-            continue
-        }
-
-        $pfxName = Get-M365DscKeyVaultSecretName -IdentityName $identity.Name -CredentialType pfx
-        $pfxPasswordName = Get-M365DscKeyVaultSecretName -IdentityName $identity.Name -CredentialType pfx-password
-        $pfxExists = Test-M365DscKeyVaultSecret -VaultName $vault.VaultName -Name $pfxName
-        $pfxPasswordExists = Test-M365DscKeyVaultSecret -VaultName $vault.VaultName -Name $pfxPasswordName
-        $shouldStoreCertificate = $RotateCredentials -or -not ($pfxExists -and $pfxPasswordExists)
-        $overwriteCertificate = $RotateCredentials -or $pfxExists -or $pfxPasswordExists
-
-        if ($shouldStoreCertificate)
-        {
-            $thumbprint = $identity.CertificateThumbprint
-            $certificate = if (-not [string]::IsNullOrWhiteSpace($thumbprint) -and $thumbprint -notlike '<*')
-            {
-                Get-Item -Path "Cert:\LocalMachine\My\$thumbprint" -ErrorAction SilentlyContinue
-            }
-
-            if ($null -eq $certificate -or -not $certificate.HasPrivateKey)
-            {
-                $azIdentity = New-M365DscIdentity -Name $identity.Name -GenereateCertificate -PassThru
-                if ([string]::IsNullOrWhiteSpace($azIdentity.CertificateThumbprint))
+                $pfxBase64 = ConvertTo-M365DscPlainText -Value (Get-M365DscKeyVaultSecret -VaultName $vault.VaultName -Name $pfxName)
+                $pfxPassword = ConvertTo-M365DscPlainText -Value (Get-M365DscKeyVaultSecret -VaultName $vault.VaultName -Name $pfxPasswordName)
+                $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                    [Convert]::FromBase64String($pfxBase64),
+                    $pfxPassword,
+                    [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+                )
+                if (-not $certificate.HasPrivateKey -or $certificate.NotAfter -le (Get-Date))
                 {
-                    throw "Failed to generate a replacement certificate for application '$($identity.Name)'."
+                    throw "The stored certificate for '$identityName' is expired or has no private key. Rerun with -RotateCredentials."
                 }
-
-                $identity.CertificateThumbprint = $azIdentity.CertificateThumbprint
-                $thumbprint = $azIdentity.CertificateThumbprint
-                $certificate = Get-Item -Path "Cert:\LocalMachine\My\$thumbprint" -ErrorAction Stop
+                $identity.CertificateThumbprint = $certificate.Thumbprint
             }
 
-            if (-not $certificate.HasPrivateKey)
-            {
-                throw "Certificate '$thumbprint' for application '$($identity.Name)' does not have a private key."
-            }
-
-            $pfxPassword = [Guid]::NewGuid().ToString('N')
-            $pfxBytes = $certificate.Export('Pfx', $pfxPassword)
-            $pfxBase64 = [Convert]::ToBase64String($pfxBytes)
+            $thumbprintSecretName = Get-M365DscKeyVaultSecretName -IdentityName $identityName -CredentialType 'certificate-thumbprint'
             Set-M365DscKeyVaultSecret `
                 -VaultName $vault.VaultName `
-                -Name $pfxName `
-                -SecretValue (ConvertTo-SecureString -String $pfxBase64 -AsPlainText -Force) `
-                -ContentType 'application/x-pkcs12' `
-                -Overwrite:$overwriteCertificate
-            Set-M365DscKeyVaultSecret `
-                -VaultName $vault.VaultName `
-                -Name $pfxPasswordName `
-                -SecretValue (ConvertTo-SecureString -String $pfxPassword -AsPlainText -Force) `
+                -Name $thumbprintSecretName `
+                -SecretValue (ConvertTo-M365DscSecureString -Value $identity.CertificateThumbprint) `
                 -ContentType 'text/plain' `
-                -Overwrite:$overwriteCertificate
-            Write-Host "Stored the private-key certificate for '$($identity.Name)' in Key Vault."
+                -Overwrite
         }
     }
 
+    $metadataIdentities = foreach ($identityDefinition in $identityDefinitions)
+    {
+        $identityName = $identityDefinition.Name
+        $applicationId = ConvertTo-M365DscPlainText -Value (
+            Get-M365DscKeyVaultSecret `
+                -VaultName $vault.VaultName `
+                -Name (Get-M365DscKeyVaultSecretName -IdentityName $identityName -CredentialType 'application-id')
+        )
+        $metadataIdentity = [ordered]@{
+            Name          = $identityName
+            ApplicationId = $applicationId
+        }
+        if ($identityDefinition.CredentialType -eq 'certificate')
+        {
+            $metadataIdentity.CertificateThumbprint = ConvertTo-M365DscPlainText -Value (
+                Get-M365DscKeyVaultSecret `
+                    -VaultName $vault.VaultName `
+                    -Name (Get-M365DscKeyVaultSecretName -IdentityName $identityName -CredentialType 'certificate-thumbprint')
+            )
+        }
+        [pscustomobject]$metadataIdentity
+    }
+
+    Set-M365DscEnvironmentMetadata `
+        -VaultName $vault.VaultName `
+        -TenantId $environment.AzTenantId `
+        -TenantName $environment.AzTenantName `
+        -SubscriptionId $environment.AzSubscriptionId `
+        -Identities $metadataIdentities
+
+    Write-Host "Key Vault '$($vault.VaultName)' is configured for environment '$environmentName'. Tenant IDs, subscription IDs, application IDs, and credentials were not written to Azure.yml." -ForegroundColor Green
     Disconnect-M365Dsc
-    Write-Host "Finished working in environment '$environmentName'."
 }
 
-Write-Host 'Finished working in all environments.'
-Write-Host "Updating '$PSScriptRoot\..\..\source\Global\Azure.yml' with application IDs, certificate thumbprints, and the protected setup bootstrap credential."
-$datum.Global.Azure | ConvertTo-Yaml | Out-File -FilePath $PSScriptRoot\..\..\source\Global\Azure.yml -Force
-Write-Host 'Review the configuration changes before committing. Credential values are not printed or automatically committed.'
+Write-Host 'Finished bootstrapping tenant application identities and Key Vault metadata.' -ForegroundColor Green

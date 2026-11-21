@@ -31,7 +31,7 @@
         Elevation is mandatory as the script installs modules with the scope 'AllUsers'.
 
     .LINK
-        https://github.com/dsccommunity/Microsoft365DscWorkshop
+        https://github.com/AhmedAbuMusa/Microsoft365DscWorkshop
 #>
 
 [CmdletBinding()]

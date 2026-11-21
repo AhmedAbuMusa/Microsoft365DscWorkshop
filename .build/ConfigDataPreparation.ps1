@@ -36,20 +36,56 @@ task ConfigDataPreparation {
         throw "Failed to load the pinned Azure PowerShell modules. $($_.Exception.Message)"
     }
 
+    Import-Module -Name (Join-Path -Path $BuildRoot -ChildPath 'lab\AutomatedLab\AzHelpers.psm1') -Force -ErrorAction Stop
+    if ($env:BuildEnvironment)
+    {
+        $datum = Update-M365DscDatumFromKeyVault `
+            -Datum $datum `
+            -ProjectName $datum.Global.ProjectSettings.ProjectName `
+            -EnvironmentName $env:BuildEnvironment `
+            -ManagedIdentity
+    }
+
     $global:azBuildParameters = @{}
 
     foreach ($env in $datum.Global.Azure.Environments.GetEnumerator())
     {
-        if (-not $env.Value.AzTenantId)
+        if ($env:BuildEnvironment -and $env.Name -eq $env:BuildEnvironment -and -not $env.Value.AzTenantId)
         {
-            Write-Error "AzTenantId is not defined for environment $($env.Name)" -ErrorAction Stop
+            throw "Key Vault did not provide tenant metadata for build environment '$($env.Name)'."
         }
 
         Write-Build DarkGray "`tAdding Azure environment '$($env.Name)' to build parameters."
+        $identities = @($env.Value.Identities | Where-Object { $_.CertificateThumbprint })
+        $tenantId = [string]$env.Value.AzTenantId
+        if (-not $tenantId)
+        {
+            $tenantHash = [System.Security.Cryptography.SHA256]::HashData(
+                [System.Text.Encoding]::UTF8.GetBytes("Microsoft365DscWorkshopBuildOnly|$($env.Name)|tenant")
+            )
+            $tenantId = [Guid]::new([byte[]]$tenantHash[0..15]).ToString()
+            $identities = foreach ($identityName in 'M365DscLcmApplication', 'M365DscExportApplication')
+            {
+                $identityHash = [System.Security.Cryptography.SHA256]::HashData(
+                    [System.Text.Encoding]::UTF8.GetBytes("Microsoft365DscWorkshopBuildOnly|$($env.Name)|$identityName")
+                )
+                $thumbprint = [System.Convert]::ToHexString(
+                    [System.Security.Cryptography.SHA1]::HashData(
+                        [System.Text.Encoding]::UTF8.GetBytes("Microsoft365DscWorkshopBuildOnly|$($env.Name)|$identityName")
+                    )
+                )
+                @{
+                    Name                 = $identityName
+                    ApplicationId        = [Guid]::new([byte[]]$identityHash[0..15]).ToString()
+                    CertificateThumbprint = $thumbprint
+                }
+            }
+        }
+
         $global:azBuildParameters."$($env.Name)" = @{
-            AzTenantId   = $env.Value.AzTenantId
+            AzTenantId   = $tenantId
             AzTenantName = $env.Value.AzTenantName
-            Identities   = $env.Value.Identities | Where-Object { $_.CertificateThumbprint }
+            Identities   = $identities
         }
 
     }

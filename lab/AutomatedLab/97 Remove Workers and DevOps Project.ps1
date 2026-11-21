@@ -14,7 +14,9 @@ $workerCleanupScript = Join-Path -Path $PSScriptRoot -ChildPath '96 Remove Worke
 & $workerCleanupScript @PSBoundParameters
 
 Import-Module -Name VSTeam -MinimumVersion 7.15.2 -ErrorAction Stop
+Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force -ErrorAction Stop
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
+$datum = Get-M365DscProjectSettingsFromKeyVault -Datum $datum -CredentialType personal-access-token
 
 Set-VSTeamAccount -Account "https://dev.azure.com/$($datum.Global.ProjectSettings.OrganizationName)/" -PersonalAccessToken $datum.Global.ProjectSettings.PersonalAccessToken -ErrorAction Stop
 Write-Host "Connected to Azure DevOps organization '$($datum.Global.ProjectSettings.OrganizationName)' with PAT."

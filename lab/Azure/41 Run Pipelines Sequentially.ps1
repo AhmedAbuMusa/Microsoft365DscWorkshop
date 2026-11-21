@@ -39,7 +39,9 @@ if ($env:PSModulePath -notlike "*$requiredModulesPath*")
 }
 
 Import-Module -Name VSTeam -RequiredVersion '7.15.2' -ErrorAction Stop
+Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force -ErrorAction Stop
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
+$datum = Get-M365DscProjectSettingsFromKeyVault -Datum $datum -CredentialType personal-access-token
 $organizationName = $datum.Global.ProjectSettings.OrganizationName
 $projectName = $datum.Global.ProjectSettings.ProjectName
 $personalAccessToken = $datum.Global.ProjectSettings.PersonalAccessToken
@@ -48,7 +50,7 @@ if (-not $organizationName -or $organizationName -eq '<OrganizationName>' -or
     -not $projectName -or $projectName -eq '<ProjectName>' -or
     -not $personalAccessToken -or $personalAccessToken -eq '<PersonalAccessToken>')
 {
-    throw 'Azure DevOps organization, project, and PAT must be configured in source/Global/ProjectSettings.yml.'
+    throw 'Configure the Azure DevOps organization and project in ProjectSettings.yml, then store a valid PAT in the configured Key Vault.'
 }
 
 Set-VSTeamAccount -Account "https://dev.azure.com/$organizationName/" -PersonalAccessToken $personalAccessToken -ErrorAction Stop

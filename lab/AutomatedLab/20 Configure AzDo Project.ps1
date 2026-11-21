@@ -22,6 +22,7 @@ if ($env:PSModulePath -notlike "*$requiredModulesPath*")
 }
 
 Import-Module -Name VSTeam -RequiredVersion '7.15.2' -ErrorAction Stop
+Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force -ErrorAction Stop
 
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
 
@@ -64,15 +65,6 @@ if ($datum.Global.ProjectSettings.AgentPoolName -eq '<AgentPoolName>' -or $null 
     $datum.Global.ProjectSettings | ConvertTo-Yaml | Out-File $PSScriptRoot\..\..\source\Global\ProjectSettings.yml
 }
 
-if ($datum.Global.ProjectSettings.PersonalAccessToken -eq '<PersonalAccessToken>' -or $null -eq $datum.Global.ProjectSettings.PersonalAccessToken)
-{
-    $pat = Read-Host -Prompt 'Enter your Azure DevOps Personal Access Token'
-    $pass = $datum.__Definition.DatumHandlers.'Datum.ProtectedData::ProtectedDatum'.CommandOptions.PlainTextPassword | ConvertTo-SecureString -AsPlainText -Force
-    $datum.Global.ProjectSettings.PersonalAccessToken = $pat | Protect-Datum -Password $pass -MaxLineLength 9999
-
-    $datum.Global.ProjectSettings | ConvertTo-Yaml | Out-File $PSScriptRoot\..\..\source\Global\ProjectSettings.yml
-}
-
 if ((git status -s) -like '*source/Global/ProjectSettings.yml')
 {
     git add $PSScriptRoot\..\..\source\Global\ProjectSettings.yml
@@ -94,6 +86,7 @@ if ((git status -s) -like '*source/Global/ProjectSettings.yml')
     }
 }
 
+Get-M365DscProjectSettingsFromKeyVault -Datum $datum -CredentialType personal-access-token | Out-Null
 Set-VSTeamAccount -Account "https://dev.azure.com/$($datum.Global.ProjectSettings.OrganizationName)/" -PersonalAccessToken $datum.Global.ProjectSettings.PersonalAccessToken -ErrorAction Stop
 Write-Host "Connected to Azure DevOps organization '$($datum.Global.ProjectSettings.OrganizationName)' with PAT."
 

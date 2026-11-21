@@ -155,11 +155,6 @@ function Resolve-M365DscKeyVaultName
         [string]$SubscriptionId
     )
 
-    $defaultName = Get-M365DscKeyVaultName `
-        -ProjectName $ProjectName `
-        -EnvironmentName $EnvironmentName `
-        -TenantId $TenantId `
-        -SubscriptionId $SubscriptionId
     $context = Get-AzContext -ErrorAction Stop
     if (-not [string]::Equals($context.Subscription.Id, $SubscriptionId, [StringComparison]::OrdinalIgnoreCase))
     {
@@ -173,20 +168,63 @@ function Resolve-M365DscKeyVaultName
         throw "More than one resource group named '$resourceGroupName' was found in the active subscription."
     }
 
-    if ($resourceGroups.Count -eq 0 -or
-        $null -eq $resourceGroups[0].Tags -or
-        -not $resourceGroups[0].Tags['M365DscKeyVaultName'])
+    $taggedVaultName = ''
+    if ($resourceGroups.Count -gt 0 -and $resourceGroups[0].Tags)
     {
-        return $defaultName
+        $taggedVaultName = [string]$resourceGroups[0].Tags['M365DscKeyVaultName']
     }
 
-    $vaultName = [string]$resourceGroups[0].Tags['M365DscKeyVaultName']
-    if ($vaultName -notmatch '^[a-z0-9-]{3,24}$')
+    $candidateNames = @(
+        for ($generation = 0; $generation -le 1000; $generation++)
+        {
+            Get-M365DscKeyVaultName `
+                -ProjectName $ProjectName `
+                -EnvironmentName $EnvironmentName `
+                -TenantId $TenantId `
+                -SubscriptionId $SubscriptionId `
+                -Generation $generation
+        }
+    )
+    if ($taggedVaultName -and $taggedVaultName -notin $candidateNames)
     {
         throw "The Key Vault name recorded on resource group '$resourceGroupName' is invalid."
     }
 
-    return $vaultName
+    $activeVaults = @(Get-AzKeyVault -ResourceGroupName $resourceGroupName -ErrorAction Stop)
+    $activeCandidates = @(
+        $activeVaults | Where-Object { $_.VaultName -in $candidateNames } | ForEach-Object {
+            $vaults = @(Get-AzKeyVault `
+                    -VaultName $_.VaultName `
+                    -ResourceGroupName $resourceGroupName `
+                    -ErrorAction Stop)
+            if ($vaults.Count -ne 1)
+            {
+                throw "Could not uniquely resolve active Key Vault '$($_.VaultName)' in resource group '$resourceGroupName'."
+            }
+
+            $vaults[0]
+        }
+    )
+    $taggedVaults = @($activeCandidates | Where-Object VaultName -IEQ $taggedVaultName)
+    if ($taggedVaults.Count -gt 1)
+    {
+        throw "More than one active Key Vault named '$taggedVaultName' was found in resource group '$resourceGroupName'."
+    }
+    if ($taggedVaults.Count -eq 1 -and $taggedVaults[0].EnableRbacAuthorization -eq $true)
+    {
+        return $taggedVaultName
+    }
+
+    $rbacCandidates = @($activeCandidates | Where-Object EnableRbacAuthorization -EQ $true)
+    if ($rbacCandidates.Count -gt 0)
+    {
+        $vault = $rbacCandidates |
+            Sort-Object { [Array]::IndexOf([string[]]$candidateNames, [string]$_.VaultName) } -Descending |
+            Select-Object -First 1
+        return [string]$vault.VaultName
+    }
+
+    throw "No active RBAC Key Vault was found in resource group '$resourceGroupName'. Run the project credential bootstrap first."
 }
 
 function Get-M365DscKeyVaultSecretName
@@ -276,7 +314,9 @@ function Initialize-M365DscKeyVault
     }
 
     $resourceGroups = @(Get-AzResourceGroup -ErrorAction Stop |
-        Where-Object Name -EQ $resourceGroupName)
+        Where-Object {
+            [string]::Equals([string]$_.ResourceGroupName, $resourceGroupName, [StringComparison]::OrdinalIgnoreCase)
+        })
     if ($resourceGroups.Count -gt 1)
     {
         throw "More than one resource group named '$resourceGroupName' was found in subscription '$SubscriptionId'."
@@ -314,73 +354,68 @@ function Initialize-M365DscKeyVault
 
     $activeVaults = @(Get-AzKeyVault -SubscriptionId $SubscriptionId -ErrorAction Stop)
     $deletedVaults = @(Get-AzKeyVault -InRemovedState -SubscriptionId $SubscriptionId -ErrorAction Stop)
-    $activeCandidates = @($activeVaults | Where-Object { $_.VaultName -in $candidateNames })
+    $activeCandidateSummaries = @(
+        $activeVaults | Where-Object {
+            $_.VaultName -in $candidateNames -and
+            [string]::Equals([string]$_.ResourceGroupName, $resourceGroupName, [StringComparison]::OrdinalIgnoreCase)
+        }
+    )
+    $activeCandidates = @(
+        foreach ($candidate in $activeCandidateSummaries)
+        {
+            $vaults = @(Get-AzKeyVault `
+                    -VaultName $candidate.VaultName `
+                    -ResourceGroupName $resourceGroupName `
+                    -ErrorAction Stop)
+            if ($vaults.Count -ne 1)
+            {
+                throw "Could not uniquely resolve active Key Vault '$($candidate.VaultName)' in resource group '$resourceGroupName'."
+            }
+
+            $vaults[0]
+        }
+    )
+    $taggedActiveVaults = @()
     if ($taggedVaultName)
     {
         $taggedActiveVaults = @($activeCandidates | Where-Object VaultName -IEQ $taggedVaultName)
-        if ($taggedActiveVaults.Count -gt 1)
-        {
-            throw "More than one active Key Vault named '$taggedVaultName' was found in subscription '$SubscriptionId'."
-        }
+    }
 
-        if ($taggedActiveVaults.Count -eq 1)
-        {
-            $vault = $taggedActiveVaults[0]
-            $vaultName = $taggedVaultName
-        }
-        elseif (@($deletedVaults | Where-Object VaultName -IEQ $taggedVaultName).Count -gt 0)
-        {
-            if ($activeCandidates.Count -gt 1)
-            {
-                throw "Multiple active generated Key Vaults were found for resource group '$resourceGroupName'; resolve the name conflict before continuing."
-            }
+    if ($taggedActiveVaults.Count -gt 1)
+    {
+        throw "More than one active Key Vault named '$taggedVaultName' was found in subscription '$SubscriptionId'."
+    }
 
-            if ($activeCandidates.Count -eq 1)
-            {
-                $vault = $activeCandidates[0]
-                $vaultName = $vault.VaultName
-            }
-            else
-            {
-                foreach ($candidateName in $candidateNames)
-                {
-                    $isDeleted = @($deletedVaults | Where-Object VaultName -IEQ $candidateName).Count -gt 0
-                    if (-not $isDeleted)
-                    {
-                        $vaultName = $candidateName
-                        break
-                    }
-                }
-            }
-        }
-        else
-        {
-            if ($activeCandidates.Count -gt 0)
-            {
-                throw "The Key Vault name recorded on resource group '$resourceGroupName' does not match its active generated vault."
-            }
-            $vaultName = $taggedVaultName
-        }
+    if ($taggedActiveVaults.Count -eq 1)
+    {
+        $vault = $taggedActiveVaults[0]
+        $vaultName = $taggedVaultName
+    }
+    elseif ($activeCandidates.Count -gt 0)
+    {
+        $rbacCandidates = @($activeCandidates | Where-Object EnableRbacAuthorization -EQ $true)
+        $selectableCandidates = if ($rbacCandidates.Count -gt 0) { $rbacCandidates } else { $activeCandidates }
+        $vault = $selectableCandidates |
+            Sort-Object { [Array]::IndexOf([string[]]$candidateNames, [string]$_.VaultName) } -Descending |
+            Select-Object -First 1
+        $vaultName = $vault.VaultName
     }
     else
     {
-        if ($activeCandidates.Count -gt 1)
+        $taggedVaultIsDeleted = $taggedVaultName -and
+            @($deletedVaults | Where-Object VaultName -IEQ $taggedVaultName).Count -gt 0
+        if ($taggedVaultName -and -not $taggedVaultIsDeleted)
         {
-            throw "Multiple active generated Key Vaults were found for resource group '$resourceGroupName'; resolve the name conflict before continuing."
-        }
-
-        if ($activeCandidates.Count -eq 1)
-        {
-            $vault = $activeCandidates[0]
-            $vaultName = $vault.VaultName
+            $vaultName = $taggedVaultName
         }
         else
         {
             $vaultName = $null
             foreach ($candidateName in $candidateNames)
             {
+                $isActive = @($activeVaults | Where-Object VaultName -IEQ $candidateName).Count -gt 0
                 $isDeleted = @($deletedVaults | Where-Object VaultName -IEQ $candidateName).Count -gt 0
-                if (-not $isDeleted)
+                if (-not ($isActive -or $isDeleted))
                 {
                     $vaultName = $candidateName
                     break
@@ -400,11 +435,11 @@ function Initialize-M365DscKeyVault
     }
     if ($matchingVaults.Count -eq 1)
     {
-        $vault = $matchingVaults[0]
-        if (-not [string]::Equals($vault.ResourceGroupName, $resourceGroupName, [StringComparison]::OrdinalIgnoreCase))
+        if (-not [string]::Equals($matchingVaults[0].ResourceGroupName, $resourceGroupName, [StringComparison]::OrdinalIgnoreCase))
         {
-            throw "Key Vault '$vaultName' already exists in resource group '$($vault.ResourceGroupName)' instead of '$resourceGroupName'."
+            throw "Key Vault '$vaultName' already exists in resource group '$($matchingVaults[0].ResourceGroupName)' instead of '$resourceGroupName'."
         }
+        $vault = Get-AzKeyVault -VaultName $vaultName -ResourceGroupName $resourceGroupName -ErrorAction Stop
     }
 
     $legacyVaultName = $null

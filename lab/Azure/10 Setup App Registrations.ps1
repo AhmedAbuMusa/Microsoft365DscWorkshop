@@ -62,20 +62,20 @@ foreach ($environmentName in $environments)
 
     Write-Host "Signing in to tenant '$($environment.AzTenantName)' for environment '$environmentName'." -ForegroundColor Magenta
     $context = Connect-M365DscEnvironmentContext -TenantName $environment.AzTenantName
-    $environment.AzTenantId = [string]$context.Tenant.Id
-    $environment.AzSubscriptionId = [string]$context.Subscription.Id
+    $tenantId = [string]$context.Tenant.Id
+    $subscriptionId = [string]$context.Subscription.Id
 
     $skipExchangeOnline = $environment.HasExchangeOnline -eq $false
     $connectionParameters = @{
-        TenantId         = $environment.AzTenantId
+        TenantId         = $tenantId
         TenantName       = $environment.AzTenantName
-        SubscriptionId   = $environment.AzSubscriptionId
+        SubscriptionId   = $subscriptionId
         SkipExchangeOnline = $skipExchangeOnline
     }
     Connect-M365Dsc @connectionParameters -ErrorAction Stop
     if (-not (Test-M365DscConnection `
-                -TenantId $environment.AzTenantId `
-                -SubscriptionId $environment.AzSubscriptionId `
+                -TenantId $tenantId `
+                -SubscriptionId $subscriptionId `
                 -SkipExchangeOnline:$skipExchangeOnline))
     {
         throw "The interactive connection does not match environment '$environmentName'."
@@ -84,8 +84,8 @@ foreach ($environmentName in $environments)
     $vault = Initialize-M365DscKeyVault `
         -ProjectName $datum.Global.ProjectSettings.ProjectName `
         -EnvironmentName ([string]$environmentName) `
-        -TenantId $environment.AzTenantId `
-        -SubscriptionId $environment.AzSubscriptionId `
+        -TenantId $tenantId `
+        -SubscriptionId $subscriptionId `
         -Location $datum.Global.ProjectSettings.BuildAgents.AzureLocation `
         -ErrorAction Stop
     if ($null -eq $vault)
@@ -268,9 +268,9 @@ foreach ($environmentName in $environments)
 
     Set-M365DscEnvironmentMetadata `
         -VaultName $vault.VaultName `
-        -TenantId $environment.AzTenantId `
+        -TenantId $tenantId `
         -TenantName $environment.AzTenantName `
-        -SubscriptionId $environment.AzSubscriptionId `
+        -SubscriptionId $subscriptionId `
         -Identities $metadataIdentities
 
     Write-Host "Key Vault '$($vault.VaultName)' is configured for environment '$environmentName'. Tenant IDs, subscription IDs, application IDs, and credentials were not written to Azure.yml." -ForegroundColor Green

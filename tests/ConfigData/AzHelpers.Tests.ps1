@@ -1027,11 +1027,20 @@ Describe 'Exchange Online entitlement in the lab scripts' -Tag Integration {
     }
 
     It "'10 Setup App Registrations.ps1' passes the Exchange Online setting to its connection test" {
-        $path = (Resolve-Path -Path "$PSScriptRoot\..\..\lab\AutomatedLab\10 Setup App Registrations.ps1").Path
-        $content = Get-Content -Path $path -Raw
+        $paths = @(
+            "$PSScriptRoot\..\..\lab\Azure\10 Setup App Registrations.ps1"
+            "$PSScriptRoot\..\..\lab\AutomatedLab\10 Setup App Registrations.ps1"
+        )
+        foreach ($path in $paths)
+        {
+            $content = Get-Content -Path $path -Raw
 
-        $content | Should -Match '\$skipExchangeOnline\s*=\s*\$environment\.HasExchangeOnline\s*-eq\s*\$false'
-        $content | Should -Match '(?s)Test-M365DscConnection `\s*-TenantId \$environment\.AzTenantId `\s*-SubscriptionId \$environment\.AzSubscriptionId `\s*-SkipExchangeOnline:\$skipExchangeOnline'
+            $content | Should -Match '\$tenantId\s*=\s*\[string\]\$context\.Tenant\.Id'
+            $content | Should -Match '\$subscriptionId\s*=\s*\[string\]\$context\.Subscription\.Id'
+            $content | Should -Not -Match '\$environment\.Az(?:Tenant|Subscription)Id\s*='
+            $content | Should -Match '\$skipExchangeOnline\s*=\s*\$environment\.HasExchangeOnline\s*-eq\s*\$false'
+            $content | Should -Match '(?s)Test-M365DscConnection `\s*-TenantId \$tenantId `\s*-SubscriptionId \$subscriptionId `\s*-SkipExchangeOnline:\$skipExchangeOnline'
+        }
     }
 
     It "'10 Setup App Registrations.ps1' stops if Key Vault initialization fails" {

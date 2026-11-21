@@ -173,7 +173,9 @@ function Resolve-M365DscKeyVaultName
         throw "More than one resource group named '$resourceGroupName' was found in the active subscription."
     }
 
-    if ($resourceGroups.Count -eq 0 -or -not $resourceGroups[0].Tags['M365DscKeyVaultName'])
+    if ($resourceGroups.Count -eq 0 -or
+        $null -eq $resourceGroups[0].Tags -or
+        -not $resourceGroups[0].Tags['M365DscKeyVaultName'])
     {
         return $defaultName
     }
@@ -287,14 +289,6 @@ function Initialize-M365DscKeyVault
         $resourceGroup = New-AzResourceGroup -Name $resourceGroupName -Location $Location -ErrorAction Stop
     }
 
-    $resourceGroupTags = @{}
-    if ($resourceGroup.Tags)
-    {
-        foreach ($tagName in $resourceGroup.Tags.Keys)
-        {
-            $resourceGroupTags[$tagName] = $resourceGroup.Tags[$tagName]
-        }
-    }
     $vault = $null
 
     $candidateNames = @(
@@ -308,7 +302,11 @@ function Initialize-M365DscKeyVault
                 -Generation $generation
         }
     )
-    $taggedVaultName = [string]$resourceGroupTags['M365DscKeyVaultName']
+    $taggedVaultName = ''
+    if ($resourceGroup.Tags)
+    {
+        $taggedVaultName = [string]$resourceGroup.Tags['M365DscKeyVaultName']
+    }
     if ($taggedVaultName -and $taggedVaultName -notin $candidateNames)
     {
         throw "Resource group '$resourceGroupName' contains an unrecognized Key Vault name tag '$taggedVaultName'."
@@ -409,6 +407,32 @@ function Initialize-M365DscKeyVault
         }
     }
 
+    $legacyVaultName = $null
+    if ($vault -and $vault.EnableRbacAuthorization -ne $true)
+    {
+        $legacyVaultName = $vaultName
+        $currentGeneration = [Array]::IndexOf([string[]]$candidateNames, $vaultName)
+        $vaultName = $null
+        for ($generation = $currentGeneration + 1; $generation -lt $candidateNames.Count; $generation++)
+        {
+            $candidateName = $candidateNames[$generation]
+            $isActive = @($activeVaults | Where-Object VaultName -IEQ $candidateName).Count -gt 0
+            $isDeleted = @($deletedVaults | Where-Object VaultName -IEQ $candidateName).Count -gt 0
+            if (-not ($isActive -or $isDeleted))
+            {
+                $vaultName = $candidateName
+                break
+            }
+        }
+        if (-not $vaultName)
+        {
+            throw "Could not generate an available RBAC Key Vault name to replace legacy vault '$legacyVaultName'."
+        }
+
+        Write-Host "Legacy Key Vault '$legacyVaultName' will not be reused or changed; creating '$vaultName'."
+        $vault = $null
+    }
+
     if (@($deletedVaults | Where-Object VaultName -IEQ $vaultName).Count -gt 0)
     {
         throw "The selected Key Vault name '$vaultName' is soft-deleted; refusing to recover or reuse it."
@@ -416,7 +440,7 @@ function Initialize-M365DscKeyVault
 
     if (-not $vault)
     {
-        if ($vaultName -ne $defaultVaultName)
+        if ($vaultName -ne $defaultVaultName -and -not $legacyVaultName)
         {
             Write-Host "Soft-deleted Key Vault '$defaultVaultName' will not be reused; creating '$vaultName'."
         }
@@ -442,10 +466,15 @@ function Initialize-M365DscKeyVault
             -ErrorAction Stop
     }
 
-    if ($resourceGroupTags['M365DscKeyVaultName'] -ne $vaultName)
+    if ($taggedVaultName -ne $vaultName)
     {
-        $resourceGroupTags['M365DscKeyVaultName'] = $vaultName
-        Set-AzResourceGroup -Name $resourceGroupName -Tag $resourceGroupTags -ErrorAction Stop | Out-Null
+        $resourceGroupId = "/subscriptions/$SubscriptionId/resourceGroups/$resourceGroupName"
+        Update-AzTag `
+            -ResourceId $resourceGroupId `
+            -Tag @{ M365DscKeyVaultName = $vaultName } `
+            -Operation Merge `
+            -Confirm:$false `
+            -ErrorAction Stop | Out-Null
     }
 
     return $vault

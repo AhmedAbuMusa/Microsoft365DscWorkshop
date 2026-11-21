@@ -185,14 +185,49 @@ Describe 'M365Dsc Key Vault naming' {
 
         $name = Get-M365DscKeyVaultName @parameters
         $sameName = Get-M365DscKeyVaultName @parameters
+        $generationParameters = $parameters.Clone()
+        $generationParameters.Generation = 1
+        $newGenerationName = Get-M365DscKeyVaultName @generationParameters
         $differentSubscriptionParameters = $parameters.Clone()
         $differentSubscriptionParameters.SubscriptionId = 'da78bd51-11ab-418d-8222-db661c2aa8d9'
         $differentSubscription = Get-M365DscKeyVaultName @differentSubscriptionParameters
 
         $name | Should -Be $sameName
+        $newGenerationName | Should -Not -Be $name
         $name | Should -Match '^kv-[a-z0-9-]+-[a-f0-9]{8}$'
+        $newGenerationName | Should -Match '^kv-[a-z0-9-]+-[a-f0-9]{8}$'
         $name.Length | Should -BeLessThan 25
         $differentSubscription | Should -Not -Be $name
+    }
+
+    It 'Should resolve a persisted generated vault name from its credential resource group' {
+        InModuleScope -ModuleName AzHelpers {
+            $subscriptionId = '9522bd96-d34f-4910-9667-0517ab5dc595'
+            $replacementName = Get-M365DscKeyVaultName `
+                -ProjectName 'DSC' `
+                -EnvironmentName 'Test' `
+                -TenantId 'b246c1af-87ab-41d8-9812-83cd5ff534cb' `
+                -SubscriptionId $subscriptionId `
+                -Generation 1
+
+            Mock -CommandName Get-AzContext -MockWith {
+                [pscustomobject]@{ Subscription = [pscustomobject]@{ Id = $subscriptionId } }
+            }
+            Mock -CommandName Get-AzResourceGroup -MockWith {
+                [pscustomobject]@{
+                    Name = 'DSC-Test-credentials-rg'
+                    Tags = @{ M365DscKeyVaultName = $replacementName }
+                }
+            }
+
+            $resolvedName = Resolve-M365DscKeyVaultName `
+                -ProjectName 'DSC' `
+                -EnvironmentName 'Test' `
+                -TenantId 'b246c1af-87ab-41d8-9812-83cd5ff534cb' `
+                -SubscriptionId $subscriptionId
+
+            $resolvedName | Should -Be $replacementName
+        }
     }
 
     It 'Should generate stable, normalized names for application credential types' {
@@ -321,7 +356,7 @@ Describe 'Project settings Key Vault hydration' {
                     Subscription = [pscustomobject]@{ Id = 'subscription-id' }
                 }
             }
-            Mock -CommandName Get-M365DscKeyVaultName -MockWith { 'vault-name' }
+            Mock -CommandName Resolve-M365DscKeyVaultName -MockWith { 'vault-name' }
             Mock -CommandName Test-M365DscKeyVaultSecret -MockWith {
                 param($VaultName, $Name)
                 $true
@@ -371,7 +406,7 @@ Describe 'Project settings Key Vault hydration' {
                     Subscription = [pscustomobject]@{ Id = 'subscription-id' }
                 }
             }
-            Mock -CommandName Get-M365DscKeyVaultName -MockWith { 'vault-name' }
+            Mock -CommandName Resolve-M365DscKeyVaultName -MockWith { 'vault-name' }
             Mock -CommandName Test-M365DscKeyVaultSecret -MockWith {
                 param($VaultName, $Name)
                 $Name -eq 'projectsettings-personal-access-token'
@@ -417,12 +452,22 @@ Describe 'M365Dsc Key Vault initialization' {
                 [pscustomobject]@{ Name = 'DSC-Test-credentials-rg' }
             }
             Mock -CommandName Get-AzKeyVault -MockWith {
-                if (-not $InRemovedState) { $vault }
+                if (-not $InRemovedState)
+                {
+                    [pscustomobject]@{
+                        VaultName               = 'kv-dsc-test-7b72ba00'
+                        ResourceGroupName       = 'DSC-Test-credentials-rg'
+                        ResourceId              = "/subscriptions/$subscriptionId/resourceGroups/DSC-Test-credentials-rg/providers/Microsoft.KeyVault/vaults/kv-dsc-test-7b72ba00"
+                        EnableRbacAuthorization = $true
+                        EnablePurgeProtection   = $true
+                    }
+                }
             }
             Mock -CommandName Remove-AzResourceGroup
             Mock -CommandName Remove-AzKeyVault
             Mock -CommandName New-AzKeyVault
             Mock -CommandName Update-AzKeyVault
+            Mock -CommandName Set-AzResourceGroup
 
             $result = Initialize-M365DscKeyVault `
                 -ProjectName 'DSC' `
@@ -436,6 +481,95 @@ Describe 'M365Dsc Key Vault initialization' {
             Should -Invoke -CommandName Remove-AzKeyVault -Times 0 -Exactly
             Should -Invoke -CommandName New-AzKeyVault -Times 0 -Exactly
             Should -Invoke -CommandName Update-AzKeyVault -Times 0 -Exactly
+            Should -Invoke -CommandName Set-AzResourceGroup -Times 1 -Exactly -ParameterFilter {
+                $Name -eq 'DSC-Test-credentials-rg' -and
+                $Tag['M365DscKeyVaultName'] -eq $vaultName
+            }
+        }
+    }
+
+    It 'Should create a new generated vault name instead of recovering a matching soft-deleted vault' {
+        InModuleScope -ModuleName AzHelpers {
+            $subscriptionId = '9522bd96-d34f-4910-9667-0517ab5dc595'
+            $tenantId = 'b246c1af-87ab-41d8-9812-83cd5ff534cb'
+            $baseVaultName = Get-M365DscKeyVaultName `
+                -ProjectName 'DSC' `
+                -EnvironmentName 'Test' `
+                -TenantId $tenantId `
+                -SubscriptionId $subscriptionId
+            $replacementVaultName = Get-M365DscKeyVaultName `
+                -ProjectName 'DSC' `
+                -EnvironmentName 'Test' `
+                -TenantId $tenantId `
+                -SubscriptionId $subscriptionId `
+                -Generation 1
+            $deletedVault = [pscustomobject]@{
+                VaultName = $baseVaultName
+                Location  = 'West US 2'
+            }
+            $resourceGroup = [pscustomobject]@{
+                Name = 'DSC-Test-credentials-rg'
+                Tags = @{}
+            }
+
+            Mock -CommandName Get-AzContext -MockWith {
+                [pscustomobject]@{ Subscription = [pscustomobject]@{ Id = $subscriptionId } }
+            }
+            Mock -CommandName Get-AzResourceProvider -MockWith {
+                [pscustomobject]@{ RegistrationState = 'Registered' }
+            }
+            Mock -CommandName Get-AzResourceGroup -MockWith {
+                $resourceGroup
+            }
+            Mock -CommandName Get-AzKeyVault -MockWith {
+                if ($InRemovedState) { $deletedVault }
+                elseif ($resourceGroup.Tags['M365DscKeyVaultName'] -eq $replacementVaultName)
+                {
+                    [pscustomobject]@{
+                        VaultName               = $replacementVaultName
+                        ResourceGroupName       = 'DSC-Test-credentials-rg'
+                        ResourceId              = "/subscriptions/$subscriptionId/resourceGroups/DSC-Test-credentials-rg/providers/Microsoft.KeyVault/vaults/$replacementVaultName"
+                        EnableRbacAuthorization = $true
+                        EnablePurgeProtection   = $true
+                    }
+                }
+            }
+            Mock -CommandName New-AzKeyVault -MockWith {
+                [pscustomobject]@{
+                    VaultName               = $VaultName
+                    ResourceGroupName       = $ResourceGroupName
+                    ResourceId              = "/subscriptions/$subscriptionId/resourceGroups/DSC-Test-credentials-rg/providers/Microsoft.KeyVault/vaults/$VaultName"
+                    EnableRbacAuthorization = $true
+                    EnablePurgeProtection   = $true
+                }
+            }
+            Mock -CommandName Set-AzResourceGroup
+            Mock -CommandName Undo-AzKeyVaultRemoval
+
+            $result = Initialize-M365DscKeyVault `
+                -ProjectName 'DSC' `
+                -EnvironmentName 'Test' `
+                -TenantId $tenantId `
+                -SubscriptionId $subscriptionId `
+                -Location 'West US 2'
+
+            $result.VaultName | Should -Be $replacementVaultName
+            $resourceGroup.Tags['M365DscKeyVaultName'] = $replacementVaultName
+            $rerunResult = Initialize-M365DscKeyVault `
+                -ProjectName 'DSC' `
+                -EnvironmentName 'Test' `
+                -TenantId $tenantId `
+                -SubscriptionId $subscriptionId `
+                -Location 'West US 2'
+
+            $rerunResult.VaultName | Should -Be $replacementVaultName
+            Should -Invoke -CommandName New-AzKeyVault -Times 1 -Exactly -ParameterFilter {
+                $VaultName -eq $replacementVaultName
+            }
+            Should -Invoke -CommandName Undo-AzKeyVaultRemoval -Times 0 -Exactly
+            Should -Invoke -CommandName Set-AzResourceGroup -Times 1 -Exactly -ParameterFilter {
+                $Tag['M365DscKeyVaultName'] -eq $replacementVaultName
+            }
         }
     }
 
@@ -463,9 +597,17 @@ Describe 'M365Dsc Key Vault initialization' {
                 [pscustomobject]@{ Name = 'DSC-Test-credentials-rg' }
             }
             Mock -CommandName Get-AzKeyVault -MockWith {
-                if (-not $InRemovedState) { $vault }
+                if (-not $InRemovedState)
+                {
+                    [pscustomobject]@{
+                        VaultName               = 'kv-dsc-test-7b72ba00'
+                        ResourceGroupName       = 'DSC-Test-credentials-rg'
+                        EnableRbacAuthorization = $false
+                    }
+                }
             }
             Mock -CommandName Update-AzKeyVault
+            Mock -CommandName Set-AzResourceGroup
             Mock -CommandName Remove-AzResourceGroup
 
             {
@@ -547,6 +689,11 @@ Describe 'M365Dsc Key Vault access grants' {
                 -PrincipalId 'service-principal-object-id' `
                 -RoleDefinitionName 'Key Vault Secrets Officer'
 
+            Should -Invoke -CommandName New-AzRoleAssignment -Times 1 -Exactly -ParameterFilter {
+                $ObjectId -eq 'service-principal-object-id' -and
+                $Scope -eq '/subscriptions/test/resourceGroups/credentials-rg' -and
+                $RoleDefinitionName -eq 'Reader'
+            }
             Should -Invoke -CommandName New-AzRoleAssignment -Times 1 -Exactly -ParameterFilter {
                 $ObjectId -eq 'service-principal-object-id' -and
                 $Scope -eq $vault.ResourceId -and

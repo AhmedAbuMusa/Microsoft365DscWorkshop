@@ -97,7 +97,11 @@ function Get-M365DscKeyVaultName
         [string]$TenantId,
 
         [Parameter(Mandatory = $true)]
-        [string]$SubscriptionId
+        [string]$SubscriptionId,
+
+        [Parameter()]
+        [ValidateRange(0, 1000)]
+        [int]$Generation = 0
     )
 
     $prefix = "$ProjectName-$EnvironmentName" -replace '[^a-zA-Z0-9-]', '-'
@@ -113,7 +117,14 @@ function Get-M365DscKeyVaultName
         $prefix = $prefix.Substring(0, 12).TrimEnd('-')
     }
 
-    $hashInput = [System.Text.Encoding]::UTF8.GetBytes("$TenantId|$SubscriptionId")
+    $hashInput = if ($Generation -eq 0)
+    {
+        [System.Text.Encoding]::UTF8.GetBytes("$TenantId|$SubscriptionId")
+    }
+    else
+    {
+        [System.Text.Encoding]::UTF8.GetBytes("$TenantId|$SubscriptionId|generation:$Generation")
+    }
     $hash = [System.Security.Cryptography.SHA256]::Create()
     try
     {
@@ -125,6 +136,55 @@ function Get-M365DscKeyVaultName
     }
 
     return "kv-$prefix-$suffix"
+}
+
+function Resolve-M365DscKeyVaultName
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$ProjectName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$EnvironmentName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TenantId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SubscriptionId
+    )
+
+    $defaultName = Get-M365DscKeyVaultName `
+        -ProjectName $ProjectName `
+        -EnvironmentName $EnvironmentName `
+        -TenantId $TenantId `
+        -SubscriptionId $SubscriptionId
+    $context = Get-AzContext -ErrorAction Stop
+    if (-not [string]::Equals($context.Subscription.Id, $SubscriptionId, [StringComparison]::OrdinalIgnoreCase))
+    {
+        throw "The active Azure subscription '$($context.Subscription.Id)' does not match the Key Vault subscription '$SubscriptionId'."
+    }
+
+    $resourceGroupName = "$ProjectName-$EnvironmentName-credentials-rg" -replace '[^a-zA-Z0-9_.()-]', '-'
+    $resourceGroups = @(Get-AzResourceGroup -Name $resourceGroupName -ErrorAction Stop)
+    if ($resourceGroups.Count -gt 1)
+    {
+        throw "More than one resource group named '$resourceGroupName' was found in the active subscription."
+    }
+
+    if ($resourceGroups.Count -eq 0 -or -not $resourceGroups[0].Tags['M365DscKeyVaultName'])
+    {
+        return $defaultName
+    }
+
+    $vaultName = [string]$resourceGroups[0].Tags['M365DscKeyVaultName']
+    if ($vaultName -notmatch '^[a-z0-9-]{3,24}$')
+    {
+        throw "The Key Vault name recorded on resource group '$resourceGroupName' is invalid."
+    }
+
+    return $vaultName
 }
 
 function Get-M365DscKeyVaultSecretName
@@ -160,41 +220,6 @@ function Get-M365DscKeyVaultSecretName
     return $secretName
 }
 
-function Get-M365DscDeletedKeyVault
-{
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$VaultName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Location,
-
-        [Parameter(Mandatory = $true)]
-        [string]$SubscriptionId
-    )
-
-    $normalizedLocation = $Location -replace '[^a-zA-Z0-9]', ''
-    $deletedVaults = @(
-        Get-AzKeyVault -InRemovedState -SubscriptionId $SubscriptionId -ErrorAction Stop |
-            Where-Object {
-                $_.VaultName -ieq $VaultName -and
-                ($_.Location -replace '[^a-zA-Z0-9]', '') -ieq $normalizedLocation
-            }
-    )
-    if ($deletedVaults.Count -gt 1)
-    {
-        throw "More than one soft-deleted Key Vault named '$VaultName' was found in subscription '$SubscriptionId'."
-    }
-
-    if ($deletedVaults.Count -eq 1)
-    {
-        return $deletedVaults[0]
-    }
-
-    return $null
-}
-
 function Initialize-M365DscKeyVault
 {
     [CmdletBinding()]
@@ -215,7 +240,7 @@ function Initialize-M365DscKeyVault
         [string]$Location
     )
 
-    $vaultName = Get-M365DscKeyVaultName `
+    $defaultVaultName = Get-M365DscKeyVaultName `
         -ProjectName $ProjectName `
         -EnvironmentName $EnvironmentName `
         -TenantId $TenantId `
@@ -262,41 +287,139 @@ function Initialize-M365DscKeyVault
         $resourceGroup = New-AzResourceGroup -Name $resourceGroupName -Location $Location -ErrorAction Stop
     }
 
-    $vaults = @(Get-AzKeyVault -ErrorAction Stop |
-        Where-Object VaultName -EQ $vaultName)
-    if ($vaults.Count -gt 1)
+    $resourceGroupTags = @{}
+    if ($resourceGroup.Tags)
+    {
+        foreach ($tagName in $resourceGroup.Tags.Keys)
+        {
+            $resourceGroupTags[$tagName] = $resourceGroup.Tags[$tagName]
+        }
+    }
+    $vault = $null
+
+    $candidateNames = @(
+        for ($generation = 0; $generation -le 1000; $generation++)
+        {
+            Get-M365DscKeyVaultName `
+                -ProjectName $ProjectName `
+                -EnvironmentName $EnvironmentName `
+                -TenantId $TenantId `
+                -SubscriptionId $SubscriptionId `
+                -Generation $generation
+        }
+    )
+    $taggedVaultName = [string]$resourceGroupTags['M365DscKeyVaultName']
+    if ($taggedVaultName -and $taggedVaultName -notin $candidateNames)
+    {
+        throw "Resource group '$resourceGroupName' contains an unrecognized Key Vault name tag '$taggedVaultName'."
+    }
+
+    $activeVaults = @(Get-AzKeyVault -SubscriptionId $SubscriptionId -ErrorAction Stop)
+    $deletedVaults = @(Get-AzKeyVault -InRemovedState -SubscriptionId $SubscriptionId -ErrorAction Stop)
+    $activeCandidates = @($activeVaults | Where-Object { $_.VaultName -in $candidateNames })
+    if ($taggedVaultName)
+    {
+        $taggedActiveVaults = @($activeCandidates | Where-Object VaultName -IEQ $taggedVaultName)
+        if ($taggedActiveVaults.Count -gt 1)
+        {
+            throw "More than one active Key Vault named '$taggedVaultName' was found in subscription '$SubscriptionId'."
+        }
+
+        if ($taggedActiveVaults.Count -eq 1)
+        {
+            $vault = $taggedActiveVaults[0]
+            $vaultName = $taggedVaultName
+        }
+        elseif (@($deletedVaults | Where-Object VaultName -IEQ $taggedVaultName).Count -gt 0)
+        {
+            if ($activeCandidates.Count -gt 1)
+            {
+                throw "Multiple active generated Key Vaults were found for resource group '$resourceGroupName'; resolve the name conflict before continuing."
+            }
+
+            if ($activeCandidates.Count -eq 1)
+            {
+                $vault = $activeCandidates[0]
+                $vaultName = $vault.VaultName
+            }
+            else
+            {
+                foreach ($candidateName in $candidateNames)
+                {
+                    $isDeleted = @($deletedVaults | Where-Object VaultName -IEQ $candidateName).Count -gt 0
+                    if (-not $isDeleted)
+                    {
+                        $vaultName = $candidateName
+                        break
+                    }
+                }
+            }
+        }
+        else
+        {
+            if ($activeCandidates.Count -gt 0)
+            {
+                throw "The Key Vault name recorded on resource group '$resourceGroupName' does not match its active generated vault."
+            }
+            $vaultName = $taggedVaultName
+        }
+    }
+    else
+    {
+        if ($activeCandidates.Count -gt 1)
+        {
+            throw "Multiple active generated Key Vaults were found for resource group '$resourceGroupName'; resolve the name conflict before continuing."
+        }
+
+        if ($activeCandidates.Count -eq 1)
+        {
+            $vault = $activeCandidates[0]
+            $vaultName = $vault.VaultName
+        }
+        else
+        {
+            $vaultName = $null
+            foreach ($candidateName in $candidateNames)
+            {
+                $isDeleted = @($deletedVaults | Where-Object VaultName -IEQ $candidateName).Count -gt 0
+                if (-not $isDeleted)
+                {
+                    $vaultName = $candidateName
+                    break
+                }
+            }
+            if (-not $vaultName)
+            {
+                throw "Could not generate an available Key Vault name for resource group '$resourceGroupName'."
+            }
+        }
+    }
+
+    $matchingVaults = @($activeVaults | Where-Object VaultName -IEQ $vaultName)
+    if ($matchingVaults.Count -gt 1)
     {
         throw "More than one Key Vault named '$vaultName' was found in subscription '$SubscriptionId'."
     }
-    $vault = $vaults | Select-Object -First 1
-    if ($vault -and -not [string]::Equals($vault.ResourceGroupName, $resourceGroupName, [StringComparison]::OrdinalIgnoreCase))
+    if ($matchingVaults.Count -eq 1)
     {
-        throw "Key Vault '$vaultName' already exists in resource group '$($vault.ResourceGroupName)' instead of '$resourceGroupName'."
+        $vault = $matchingVaults[0]
+        if (-not [string]::Equals($vault.ResourceGroupName, $resourceGroupName, [StringComparison]::OrdinalIgnoreCase))
+        {
+            throw "Key Vault '$vaultName' already exists in resource group '$($vault.ResourceGroupName)' instead of '$resourceGroupName'."
+        }
     }
 
-    $deletedVault = Get-M365DscDeletedKeyVault `
-        -VaultName $vaultName `
-        -Location $Location `
-        -SubscriptionId $SubscriptionId
-    if ($vault -and $deletedVault)
+    if (@($deletedVaults | Where-Object VaultName -IEQ $vaultName).Count -gt 0)
     {
-        throw "Both active and soft-deleted Key Vaults named '$vaultName' were found; resolve the conflict before continuing."
-    }
-    if (-not $vault -and $deletedVault)
-    {
-        Write-Host "Recovering and reusing soft-deleted Key Vault '$vaultName'."
-        Undo-AzKeyVaultRemoval -InputObject $deletedVault -ErrorAction Stop | Out-Null
-        $vaults = @(Get-AzKeyVault -ErrorAction Stop |
-            Where-Object VaultName -EQ $vaultName)
-        if ($vaults.Count -ne 1)
-        {
-            throw "Could not uniquely resolve Key Vault '$vaultName' after recovery."
-        }
-        $vault = $vaults[0]
+        throw "The selected Key Vault name '$vaultName' is soft-deleted; refusing to recover or reuse it."
     }
 
     if (-not $vault)
     {
+        if ($vaultName -ne $defaultVaultName)
+        {
+            Write-Host "Soft-deleted Key Vault '$defaultVaultName' will not be reused; creating '$vaultName'."
+        }
         Write-Host "Creating Key Vault '$vaultName' in resource group '$resourceGroupName'."
         $vault = New-AzKeyVault `
             -VaultName $vaultName `
@@ -306,11 +429,6 @@ function Initialize-M365DscKeyVault
             -DisableRbacAuthorization:$false `
             -ErrorAction Stop
     }
-    elseif (-not [string]::Equals($vault.ResourceGroupName, $resourceGroupName, [StringComparison]::OrdinalIgnoreCase))
-    {
-        throw "Key Vault '$vaultName' already exists in resource group '$($vault.ResourceGroupName)' instead of '$resourceGroupName'."
-    }
-
     if ($vault.EnableRbacAuthorization -ne $true)
     {
         throw "Key Vault '$vaultName' must use Azure RBAC authorization. Review the existing vault before changing its permission model."
@@ -322,6 +440,12 @@ function Initialize-M365DscKeyVault
             -ResourceGroupName $vault.ResourceGroupName `
             -EnablePurgeProtection `
             -ErrorAction Stop
+    }
+
+    if ($resourceGroupTags['M365DscKeyVaultName'] -ne $vaultName)
+    {
+        $resourceGroupTags['M365DscKeyVaultName'] = $vaultName
+        Set-AzResourceGroup -Name $resourceGroupName -Tag $resourceGroupTags -ErrorAction Stop | Out-Null
     }
 
     return $vault
@@ -368,6 +492,33 @@ function Ensure-M365DscKeyVaultRoleAssignment
 
     if ($enableRbacAuthorization -eq $true)
     {
+        $resourceGroupScope = [regex]::Replace(
+            $VaultResourceId,
+            '/providers/Microsoft\.KeyVault/vaults/[^/]+$',
+            '',
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+        if ($resourceGroupScope -eq $VaultResourceId)
+        {
+            throw "Could not derive the resource group scope from Key Vault resource ID '$VaultResourceId'."
+        }
+
+        $readerAssignments = @(
+            Get-AzRoleAssignment `
+                -ObjectId $PrincipalId `
+                -Scope $resourceGroupScope `
+                -RoleDefinitionName 'Reader' `
+                -ErrorAction Stop
+        )
+        if ($readerAssignments.Count -eq 0)
+        {
+            Write-Host "Assigning 'Reader' on the credential resource group to principal '$PrincipalId' so it can resolve the Key Vault name."
+            New-AzRoleAssignment `
+                -ObjectId $PrincipalId `
+                -Scope $resourceGroupScope `
+                -RoleDefinitionName 'Reader' `
+                -ErrorAction Stop | Out-Null
+        }
         $assignments = @(
             Get-AzRoleAssignment `
                 -ObjectId $PrincipalId `
@@ -507,7 +658,7 @@ function Get-M365DscProjectSettingsFromKeyVault
         $contextParameters.SubscriptionId = [string]$environment.AzSubscriptionId
     }
     $context = Connect-M365DscEnvironmentContext @contextParameters
-    $vaultName = Get-M365DscKeyVaultName `
+    $vaultName = Resolve-M365DscKeyVaultName `
         -ProjectName $settings.ProjectName `
         -EnvironmentName $environmentName `
         -TenantId $context.Tenant.Id `
@@ -814,7 +965,7 @@ function Get-M365DscEnvironmentFromKeyVault
     $context = Connect-M365DscEnvironmentContext @contextParameters
     $tenantId = [string]$context.Tenant.Id
     $subscriptionId = [string]$context.Subscription.Id
-    $vaultName = Get-M365DscKeyVaultName `
+    $vaultName = Resolve-M365DscKeyVaultName `
         -ProjectName $ProjectName `
         -EnvironmentName $EnvironmentName `
         -TenantId $tenantId `

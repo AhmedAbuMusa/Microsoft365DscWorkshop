@@ -53,7 +53,7 @@ foreach ($envKey in $datum.Global.Azure.Environments.Keys)
         -TenantName $environment.AzTenantName `
         -SubscriptionId $environment.AzSubscriptionId | Out-Null
 
-    $vaultName = Get-M365DscKeyVaultName `
+    $vaultName = Resolve-M365DscKeyVaultName `
         -ProjectName $datum.Global.ProjectSettings.ProjectName `
         -EnvironmentName $envKey `
         -TenantId $environment.AzTenantId `
@@ -242,7 +242,7 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
         throw "Managed identity '$buildAgentIdentityName' is not assigned to VM '$vmName'. Run '30 Create Agent VMs.ps1' first."
     }
 
-    $vaultName = Get-M365DscKeyVaultName `
+    $vaultName = Resolve-M365DscKeyVaultName `
         -ProjectName $projectName `
         -EnvironmentName $envName `
         -TenantId $environment.AzTenantId `

@@ -165,27 +165,6 @@ function Invoke-BootstrapStage
         return
     }
 
-    function Update-BootstrapRepositoryCheckpoint
-    {
-        param
-        (
-            [Parameter(Mandatory)]
-            [string]$Commit
-        )
-
-        if ($script:BootstrapCheckpoint['RepositoryCommit'] -eq $Commit)
-        {
-            return
-        }
-
-        $script:BootstrapCheckpoint.CompletedStages = @($script:BootstrapCheckpoint.CompletedStages | Where-Object {
-                $_ -in @('bootstrap-project-settings', 'import-repository')
-            })
-        $script:BootstrapCheckpoint['RepositoryCommit'] = $Commit
-        Save-BootstrapCheckpoint
-        Write-Host 'Repository revision changed; completed downstream provisioning stages will run again.' -ForegroundColor Yellow
-    }
-
     Write-BootstrapPhase -Index $Index -Description $Description
     $script:BootstrapCheckpoint.CurrentStage = $Name
     Save-BootstrapCheckpoint
@@ -204,6 +183,27 @@ function Invoke-BootstrapStage
         Write-Host "Bootstrap failed during phase $($Index)/$($script:BootstrapPhaseCount): $($_.Exception.Message)" -ForegroundColor Red
         throw
     }
+}
+
+function Update-BootstrapRepositoryCheckpoint
+{
+    param
+    (
+        [Parameter(Mandatory)]
+        [string]$Commit
+    )
+
+    if ($script:BootstrapCheckpoint['RepositoryCommit'] -eq $Commit)
+    {
+        return
+    }
+
+    $script:BootstrapCheckpoint.CompletedStages = @($script:BootstrapCheckpoint.CompletedStages | Where-Object {
+            $_ -in @('bootstrap-project-settings', 'import-repository')
+        })
+    $script:BootstrapCheckpoint['RepositoryCommit'] = $Commit
+    Save-BootstrapCheckpoint
+    Write-Host 'Repository revision changed; completed downstream provisioning stages will run again.' -ForegroundColor Yellow
 }
 
 function ConvertTo-SecureStringFromKeyVault

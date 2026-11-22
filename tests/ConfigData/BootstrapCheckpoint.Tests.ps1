@@ -9,17 +9,16 @@ BeforeAll {
     )
     $parseErrors | Should -BeNullOrEmpty
 
-    $checkpointFunctions = $bootstrapAst.FindAll({
-            param($astNode)
-            $astNode -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $astNode.Name -in @(
+    $checkpointFunctions = $bootstrapAst.EndBlock.Statements | Where-Object {
+            $_ -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $_.Name -in @(
                 'Write-BootstrapPhase',
                 'Save-BootstrapCheckpoint',
                 'Update-BootstrapCheckpointSchema',
                 'Invoke-BootstrapStage',
                 'Update-BootstrapRepositoryCheckpoint'
             )
-        }, $true)
+        }
     foreach ($functionAst in $checkpointFunctions)
     {
         . ([scriptblock]::Create($functionAst.Extent.Text))
@@ -106,6 +105,22 @@ Describe 'Azure lab bootstrap checkpoint' {
         $script:BootstrapCheckpoint.CompletedStages | Should -Be @('bootstrap-project-settings', 'import-repository')
         (Get-Content -LiteralPath $script:BootstrapCheckpointPath -Raw | ConvertFrom-Json).RepositoryCommit |
             Should -Be 'new-commit'
+    }
+
+    It 'Updates the repository checkpoint after the import stage returns (already completed: <AlreadyCompleted>)' -ForEach @(
+        @{ AlreadyCompleted = $false }
+        @{ AlreadyCompleted = $true }
+    ) {
+        if ($AlreadyCompleted)
+        {
+            $script:BootstrapCheckpoint.CompletedStages = @('import-repository')
+        }
+
+        Invoke-BootstrapStage -Index 4 -Name 'import-repository' -Description 'Synchronize repository' -Action {}
+        Update-BootstrapRepositoryCheckpoint -Commit 'synchronized-commit'
+
+        (Get-Content -LiteralPath $script:BootstrapCheckpointPath -Raw | ConvertFrom-Json).RepositoryCommit |
+            Should -Be 'synchronized-commit'
     }
 
     It 'Preserves completed downstream work when GitHub has not changed' {

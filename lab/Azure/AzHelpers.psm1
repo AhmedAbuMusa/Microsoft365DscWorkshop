@@ -724,6 +724,73 @@ function Get-M365DscKeyVaultSecret
     return $secret.SecretValue
 }
 
+function Wait-M365DscKeyVaultAccess
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$VaultName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$EnvironmentName
+    )
+
+    $maximumAttempts = 61
+    $retryIntervalSeconds = 10
+    for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++)
+    {
+        try
+        {
+            Get-AzKeyVaultSecret -VaultName $VaultName -ErrorAction Stop | Out-Null
+            Write-Host "[Environment: $EnvironmentName] Key Vault '$VaultName' access is ready." -ForegroundColor Green
+            return
+        }
+        catch
+        {
+            $exception = $_.Exception
+            $statusCode = 0
+            while ($exception)
+            {
+                $responseProperty = $exception.PSObject.Properties['Response']
+                if ($responseProperty -and $responseProperty.Value)
+                {
+                    $statusProperty = $responseProperty.Value.PSObject.Properties['StatusCode']
+                }
+                else
+                {
+                    $statusProperty = $exception.PSObject.Properties['StatusCode']
+                    if (-not $statusProperty)
+                    {
+                        $statusProperty = $exception.PSObject.Properties['Status']
+                    }
+                }
+                if ($statusProperty -and $null -ne $statusProperty.Value)
+                {
+                    $statusCode = [int]$statusProperty.Value
+                    break
+                }
+                $exception = $exception.InnerException
+            }
+
+            if ($statusCode -notin @(401, 403) -or
+                $_.Exception.Message -match 'ForbiddenByFirewall|ForbiddenByConnection')
+            {
+                throw
+            }
+            if ($attempt -eq $maximumAttempts)
+            {
+                throw [InvalidOperationException]::new(
+                    "Environment '$EnvironmentName': Key Vault '$VaultName' is still inaccessible after 61 attempts with ten minutes of propagation waits. Verify the operator's Key Vault Secrets Officer assignment, deny assignments, and network access. $($_.Exception.Message)",
+                    $_.Exception
+                )
+            }
+
+            Write-Host "[Environment: $EnvironmentName] Waiting for access to Key Vault '$VaultName' after role assignment (attempt $attempt/$maximumAttempts; retry in $retryIntervalSeconds seconds)." -ForegroundColor Yellow
+            Start-Sleep -Seconds $retryIntervalSeconds
+        }
+    }
+}
+
 function Get-M365DscProjectSettingsFromKeyVault
 {
     [CmdletBinding()]

@@ -112,28 +112,7 @@ foreach ($envName in $environments)
         -PrincipalId $operator.Id `
         -RoleDefinitionName 'Key Vault Secrets Officer'
 
-    $maximumKeyVaultAccessAttempts = 12
-    for ($attempt = 1; $attempt -le $maximumKeyVaultAccessAttempts; $attempt++)
-    {
-        try
-        {
-            Get-AzKeyVaultSecret -VaultName $vault.VaultName -ErrorAction Stop | Out-Null
-            break
-        }
-        catch
-        {
-            $statusCode = 0
-            if ($_.Exception.Response -and $_.Exception.Response.StatusCode)
-            {
-                $statusCode = [int]$_.Exception.Response.StatusCode
-            }
-            if ($statusCode -notin @(401, 403) -or $attempt -eq $maximumKeyVaultAccessAttempts)
-            {
-                throw "The signed-in operator could not access Key Vault '$($vault.VaultName)' after role assignment. $($_.Exception.Message)"
-            }
-            Start-Sleep -Seconds 5
-        }
-    }
+    Wait-M365DscKeyVaultAccess -VaultName $vault.VaultName -EnvironmentName $envName -ErrorAction Stop
 
     foreach ($identityDefinition in $identityDefinitions)
     {

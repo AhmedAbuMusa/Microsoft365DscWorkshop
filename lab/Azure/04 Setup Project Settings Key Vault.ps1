@@ -151,30 +151,7 @@ Ensure-M365DscKeyVaultRoleAssignment `
     -RoleDefinitionName 'Key Vault Secrets Officer' `
     -ErrorAction Stop
 
-$keyVaultAccessReady = $false
-for ($attempt = 1; $attempt -le 12; $attempt++)
-{
-    try
-    {
-        Get-AzKeyVaultSecret -VaultName $vault.VaultName -ErrorAction Stop | Out-Null
-        $keyVaultAccessReady = $true
-        break
-    }
-    catch
-    {
-        $statusCode = Get-HttpStatusCode -ErrorRecord $_
-        if ($statusCode -notin @(401, 403) -or $attempt -eq 12)
-        {
-            throw "The signed-in operator could not access Key Vault '$($vault.VaultName)' after role assignment. $($_.Exception.Message)"
-        }
-        Write-Host "Waiting for Key Vault role assignment propagation (attempt $attempt/12)." -ForegroundColor DarkGray
-        Start-Sleep -Seconds 5
-    }
-}
-if (-not $keyVaultAccessReady)
-{
-    throw "The signed-in operator could not access Key Vault '$($vault.VaultName)' after role assignment."
-}
+Wait-M365DscKeyVaultAccess -VaultName $vault.VaultName -EnvironmentName $environmentName -ErrorAction Stop
 
 $patSecretName = Get-M365DscKeyVaultSecretName -IdentityName 'ProjectSettings' -CredentialType 'personal-access-token'
 $passwordSecretName = Get-M365DscKeyVaultSecretName -IdentityName 'ProjectSettings' -CredentialType 'build-agent-password'

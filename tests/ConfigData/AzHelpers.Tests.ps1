@@ -1925,6 +1925,96 @@ Describe 'Azure lab authentication reuse' {
             }
         }
 
+        It 'Waits beyond the former one-minute window for Key Vault RBAC propagation' {
+            InModuleScope -ModuleName AzHelpers {
+                $script:VaultReadAttempts = 0
+                Mock Start-Sleep {}
+                Mock Write-Host {}
+                Mock Get-AzKeyVaultSecret {
+                    $script:VaultReadAttempts++
+                    if ($script:VaultReadAttempts -lt 10)
+                    {
+                        throw [System.Net.Http.HttpRequestException]::new('Forbidden: role assignment is not visible yet', $null, [System.Net.HttpStatusCode]::Forbidden)
+                    }
+                }
+
+                Wait-M365DscKeyVaultAccess -VaultName 'kv-stage' -EnvironmentName 'Stage'
+
+                Should -Invoke Get-AzKeyVaultSecret -Times 10 -Exactly
+                Should -Invoke Start-Sleep -Times 9 -Exactly -ParameterFilter { $Seconds -eq 10 }
+                Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter {
+                    $Object -eq "[Environment: Stage] Key Vault 'kv-stage' access is ready."
+                }
+            }
+        }
+
+        It 'Stops with the environment and original authorization error after ten minutes of waits' {
+            InModuleScope -ModuleName AzHelpers {
+                Mock Start-Sleep {}
+                Mock Write-Host {}
+                Mock Get-AzKeyVaultSecret {
+                    throw [System.Net.Http.HttpRequestException]::new('Forbidden: assignment not found', $null, [System.Net.HttpStatusCode]::Forbidden)
+                }
+
+                { Wait-M365DscKeyVaultAccess -VaultName 'kv-stage' -EnvironmentName 'Stage' } |
+                    Should -Throw "*Environment 'Stage'*kv-stage*ten minutes*Forbidden: assignment not found*"
+
+                Should -Invoke Get-AzKeyVaultSecret -Times 61 -Exactly
+                Should -Invoke Start-Sleep -Times 60 -Exactly -ParameterFilter { $Seconds -eq 10 }
+            }
+        }
+
+        It 'Recognizes an authorization response wrapped in an inner exception' {
+            InModuleScope -ModuleName AzHelpers {
+                $script:VaultReadAttempts = 0
+                Mock Start-Sleep {}
+                Mock Write-Host {}
+                Mock Get-AzKeyVaultSecret {
+                    $script:VaultReadAttempts++
+                    if ($script:VaultReadAttempts -eq 1)
+                    {
+                        $innerException = [System.Net.Http.HttpRequestException]::new('Forbidden', $null, [System.Net.HttpStatusCode]::Forbidden)
+                        throw [InvalidOperationException]::new('Wrapped Key Vault error', $innerException)
+                    }
+                }
+
+                Wait-M365DscKeyVaultAccess -VaultName 'kv-stage' -EnvironmentName 'Stage'
+
+                Should -Invoke Get-AzKeyVaultSecret -Times 2 -Exactly
+                Should -Invoke Start-Sleep -Times 1 -Exactly
+            }
+        }
+
+        It 'Does not retry unrelated Key Vault failures' {
+            InModuleScope -ModuleName AzHelpers {
+                Mock Start-Sleep {}
+                Mock Get-AzKeyVaultSecret {
+                    throw [System.Net.Http.HttpRequestException]::new('Key Vault service unavailable', $null, [System.Net.HttpStatusCode]::ServiceUnavailable)
+                }
+
+                { Wait-M365DscKeyVaultAccess -VaultName 'kv-stage' -EnvironmentName 'Stage' } |
+                    Should -Throw '*Key Vault service unavailable*'
+
+                Should -Invoke Get-AzKeyVaultSecret -Times 1 -Exactly
+                Should -Invoke Start-Sleep -Times 0 -Exactly
+            }
+        }
+
+        It 'Does not treat an explicit Key Vault firewall denial as RBAC propagation' {
+            InModuleScope -ModuleName AzHelpers {
+                Mock Start-Sleep {}
+                Mock Get-AzKeyVaultSecret {
+                    throw [System.Net.Http.HttpRequestException]::new('ForbiddenByFirewall', $null, [System.Net.HttpStatusCode]::Forbidden)
+                }
+
+                { Wait-M365DscKeyVaultAccess -VaultName 'kv-stage' -EnvironmentName 'Stage' } |
+                    Should -Throw '*ForbiddenByFirewall*'
+
+                Should -Invoke Get-AzKeyVaultSecret -Times 1 -Exactly
+                Should -Invoke Start-Sleep -Times 0 -Exactly
+            }
+        }
+
         It 'Hydrates each selected environment without turning its name into an array' {
                 InModuleScope -ModuleName AzHelpers {
                     $datum = [pscustomobject]@{

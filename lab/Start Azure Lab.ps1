@@ -12,6 +12,8 @@
     values in the two YAML files before starting. If a run fails, rerun this script to
     resume from the failed stage; use -Restart to discard its saved progress and start over.
     Use -ForceDependencyRestore only when dependency packages must also be refreshed.
+    Every start synchronizes GitHub's default branch into Azure DevOps and its local
+    checkout. A changed repository commit invalidates completed downstream stages.
 #>
 
 [CmdletBinding()]
@@ -161,6 +163,27 @@ function Invoke-BootstrapStage
         $phaseLabel = '{0:D2}/{1:D2}' -f $Index, $script:BootstrapPhaseCount
         Write-Host "Skipping completed phase $phaseLabel`: $Description" -ForegroundColor DarkGray
         return
+    }
+
+    function Update-BootstrapRepositoryCheckpoint
+    {
+        param
+        (
+            [Parameter(Mandatory)]
+            [string]$Commit
+        )
+
+        if ($script:BootstrapCheckpoint['RepositoryCommit'] -eq $Commit)
+        {
+            return
+        }
+
+        $script:BootstrapCheckpoint.CompletedStages = @($script:BootstrapCheckpoint.CompletedStages | Where-Object {
+                $_ -in @('bootstrap-project-settings', 'import-repository')
+            })
+        $script:BootstrapCheckpoint['RepositoryCommit'] = $Commit
+        Save-BootstrapCheckpoint
+        Write-Host 'Repository revision changed; completed downstream provisioning stages will run again.' -ForegroundColor Yellow
     }
 
     Write-BootstrapPhase -Index $Index -Description $Description
@@ -1115,8 +1138,12 @@ try
             }
         }
 
+    $script:BootstrapCheckpoint.CompletedStages = @($script:BootstrapCheckpoint.CompletedStages | Where-Object {
+            $_ -notin @('import-repository', 'verify-import')
+        })
+    Save-BootstrapCheckpoint
     Invoke-BootstrapStage -Index 4 -Name 'import-repository' `
-        -Description 'Import GitHub repository and prepare the Azure DevOps checkout' `
+        -Description 'Synchronize GitHub, Azure DevOps, and the local checkout' `
         -Action {
             $repositoryImportScript = Join-Path -Path $repositoryRoot -ChildPath 'lab\Azure\05 Import GitHub Repository.ps1'
             Write-Host "Running file in a clean PowerShell process: '$repositoryImportScript'." -ForegroundColor Yellow
@@ -1126,6 +1153,13 @@ try
                 throw "Azure DevOps repository import failed with exit code $LASTEXITCODE."
             }
         }
+
+    $synchronizedCommit = & $script:GitCommand.Source -C $resolvedLocalPath rev-parse HEAD
+    if ($LASTEXITCODE -ne 0)
+    {
+        throw 'Could not read the synchronized repository commit.'
+    }
+    Update-BootstrapRepositoryCheckpoint -Commit $synchronizedCommit
 
     # Keep mutable project settings current on resume without overwriting generated Azure app credentials.
     $localProjectSettingsPath = Join-Path -Path $resolvedLocalPath -ChildPath 'source\Global\ProjectSettings.yml'

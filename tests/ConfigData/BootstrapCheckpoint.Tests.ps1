@@ -16,7 +16,8 @@ BeforeAll {
                 'Write-BootstrapPhase',
                 'Save-BootstrapCheckpoint',
                 'Update-BootstrapCheckpointSchema',
-                'Invoke-BootstrapStage'
+                'Invoke-BootstrapStage',
+                'Update-BootstrapRepositoryCheckpoint'
             )
         }, $true)
     foreach ($functionAst in $checkpointFunctions)
@@ -91,6 +92,37 @@ Describe 'Azure lab bootstrap checkpoint' {
         $script:BootstrapCheckpoint.CompletedStages | Should -Contain 'test-stage'
         (Get-Content -LiteralPath $script:BootstrapCheckpointPath -Raw | ConvertFrom-Json).CompletedStages |
             Should -Contain 'test-stage'
+    }
+
+    It 'Invalidates downstream work when the synchronized GitHub revision changes' {
+        $script:BootstrapCheckpoint['RepositoryCommit'] = 'old-commit'
+        $script:BootstrapCheckpoint.CompletedStages = @(
+            'bootstrap-project-settings', 'import-repository', 'verify-import',
+            'restore-target-dependencies', 'register-applications', 'create-vms'
+        )
+
+        Update-BootstrapRepositoryCheckpoint -Commit 'new-commit'
+
+        $script:BootstrapCheckpoint.CompletedStages | Should -Be @('bootstrap-project-settings', 'import-repository')
+        (Get-Content -LiteralPath $script:BootstrapCheckpointPath -Raw | ConvertFrom-Json).RepositoryCommit |
+            Should -Be 'new-commit'
+    }
+
+    It 'Preserves completed downstream work when GitHub has not changed' {
+        $script:BootstrapCheckpoint['RepositoryCommit'] = 'same-commit'
+        $script:BootstrapCheckpoint.CompletedStages = @('import-repository', 'register-applications')
+
+        Update-BootstrapRepositoryCheckpoint -Commit 'same-commit'
+
+        $script:BootstrapCheckpoint.CompletedStages | Should -Be @('import-repository', 'register-applications')
+    }
+
+    It 'Revalidates downstream work from checkpoints without a repository revision' {
+        $script:BootstrapCheckpoint.CompletedStages = @('import-repository', 'initialize-target-build')
+
+        Update-BootstrapRepositoryCheckpoint -Commit 'first-recorded-commit'
+
+        $script:BootstrapCheckpoint.CompletedStages | Should -Be @('import-repository')
     }
 
     It 'Retries an interrupted stage and clears its current-stage marker after success' {

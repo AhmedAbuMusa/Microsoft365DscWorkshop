@@ -4,8 +4,9 @@
 
 .DESCRIPTION
     Reads source/Global/ProjectSettings.yml, creates or reuses the configured Azure DevOps
-    project and repository, imports GitHub content, and clones it to LocalPath. Local
-    ProjectSettings.yml and Azure.yml are copied into a new checkout.
+    project and repository, imports GitHub content, and clones it to LocalPath. On every
+    run, fast-forwards the GitHub default branch into Azure DevOps and the local checkout.
+    Local ProjectSettings.yml and Azure.yml are preserved.
 
 .EXAMPLE
     & '.\lab\Azure\05 Import GitHub Repository.ps1'
@@ -372,6 +373,119 @@ function Copy-WorkshopConfiguration
     }
 }
 
+function Invoke-RepositoryGit
+{
+    param
+    (
+        [Parameter(Mandatory)]
+        [string[]]$Arguments
+    )
+
+    $result = & $script:GitCommand.Source @Arguments
+    if ($LASTEXITCODE -ne 0)
+    {
+        $command = if ($Arguments[0] -eq '-C') { $Arguments[2] } else { $Arguments[0] }
+        throw "Repository synchronization Git command '$command' failed with exit code $LASTEXITCODE."
+    }
+    return $result
+}
+
+function Get-GitHubRepositoryHead
+{
+    param
+    (
+        [Parameter(Mandatory)]
+        [string]$RepositoryUrl
+    )
+
+    $remoteHead = @(Invoke-RepositoryGit -Arguments @('ls-remote', '--symref', $RepositoryUrl, 'HEAD'))
+    $branchLine = $remoteHead | Where-Object { $_ -match '^ref: refs/heads/.+\s+HEAD$' } | Select-Object -First 1
+    if (-not $branchLine -or $branchLine -notmatch '^ref: refs/heads/(.+)\s+HEAD$')
+    {
+        throw 'The GitHub repository does not advertise a default branch.'
+    }
+
+    return $Matches[1]
+}
+
+function Sync-GitHubRepository
+{
+    param
+    (
+        [Parameter(Mandatory)]
+        [string]$RepositoryPath,
+
+        [Parameter(Mandatory)]
+        [string]$RepositoryUrl,
+
+        [Parameter(Mandatory)]
+        [string]$Branch
+    )
+
+    $gitPrefix = @('-C', $RepositoryPath)
+    $localBranch = Invoke-RepositoryGit -Arguments ($gitPrefix + @('symbolic-ref', '--short', 'HEAD'))
+    if ($localBranch -ne $Branch)
+    {
+        throw "Local checkout must be on GitHub's default branch '$Branch', not '$localBranch'."
+    }
+
+    $configurationPaths = @('source/Global/ProjectSettings.yml', 'source/Global/Azure.yml')
+    $stagedPaths = @(Invoke-RepositoryGit -Arguments ($gitPrefix + @('diff', '--cached', '--name-only')))
+    $changedPaths = @(Invoke-RepositoryGit -Arguments ($gitPrefix + @('diff', '--name-only', 'HEAD')))
+    if ($stagedPaths.Count -gt 0 -or @($changedPaths | Where-Object { $_ -notin $configurationPaths }).Count -gt 0)
+    {
+        throw 'Local checkout has staged changes or edits outside ProjectSettings.yml and Azure.yml. Commit or stash them before synchronizing.'
+    }
+
+    Invoke-RepositoryGit -Arguments ($gitPrefix + @('fetch', '--no-tags', $RepositoryUrl, "+refs/heads/${Branch}:refs/bootstrap/github-default")) | Out-Null
+    $sourceCommit = Invoke-RepositoryGit -Arguments ($gitPrefix + @('rev-parse', 'refs/bootstrap/github-default'))
+    $localCommit = Invoke-RepositoryGit -Arguments ($gitPrefix + @('rev-parse', 'HEAD'))
+    & $script:GitCommand.Source -C $RepositoryPath merge-base --is-ancestor $localCommit $sourceCommit
+    if ($LASTEXITCODE -eq 1)
+    {
+        throw 'Local checkout contains commits not present on GitHub. Refusing to overwrite them.'
+    }
+    if ($LASTEXITCODE -ne 0)
+    {
+        throw "Could not compare the local checkout with GitHub (Git exit code $LASTEXITCODE)."
+    }
+
+    Invoke-RepositoryGit -Arguments ($gitPrefix + @('push', '--no-force', '--no-mirror', '--no-follow-tags', 'origin', "${sourceCommit}:refs/heads/$Branch")) | Out-Null
+    Invoke-RepositoryGit -Arguments ($gitPrefix + @('fetch', '--no-tags', 'origin', "+refs/heads/${Branch}:refs/remotes/origin/$Branch")) | Out-Null
+
+    if ($localCommit -ne $sourceCommit)
+    {
+        $configurationBackups = @{}
+        try
+        {
+            foreach ($relativePath in $configurationPaths)
+            {
+                $path = Join-Path -Path $RepositoryPath -ChildPath ($relativePath -replace '/', '\')
+                $configurationBackups[$path] = [IO.File]::ReadAllBytes($path)
+            }
+            Invoke-RepositoryGit -Arguments ($gitPrefix + @('restore', '--worktree', '--') + $configurationPaths) | Out-Null
+            Invoke-RepositoryGit -Arguments ($gitPrefix + @('merge', '--ff-only', $sourceCommit)) | Out-Null
+        }
+        finally
+        {
+            foreach ($path in $configurationBackups.Keys)
+            {
+                [IO.File]::WriteAllBytes($path, $configurationBackups[$path])
+            }
+        }
+    }
+
+    $updatedCommit = Invoke-RepositoryGit -Arguments ($gitPrefix + @('rev-parse', 'HEAD'))
+    $remoteCommit = @(Invoke-RepositoryGit -Arguments ($gitPrefix + @('ls-remote', 'origin', "refs/heads/$Branch")))
+    if ($updatedCommit -ne $sourceCommit -or $remoteCommit.Count -ne 1 -or
+        ($remoteCommit[0] -split '\s+')[0] -ne $sourceCommit)
+    {
+        throw 'GitHub, Azure DevOps, and the local checkout did not converge to the same commit. Retry synchronization.'
+    }
+
+    Write-Host "Synchronized GitHub branch '$Branch' at '$sourceCommit' into Azure DevOps and the local checkout." -ForegroundColor Green
+}
+
 $sourceSettingsPath = Join-Path -Path $repositoryRoot -ChildPath 'source\Global\ProjectSettings.yml'
 $sourceAzurePath = Join-Path -Path $repositoryRoot -ChildPath 'source\Global\Azure.yml'
 if (-not (Test-Path -LiteralPath $sourceSettingsPath -PathType Leaf) -or
@@ -443,6 +557,7 @@ $projectSettings = $null
 
 try
 {
+    $githubBranch = Get-GitHubRepositoryHead -RepositoryUrl $script:GitHubRepositoryUrl
     Write-Host "Ensuring Azure DevOps project '$script:ProjectName' exists."
     Ensure-AzureDevOpsProject
 
@@ -461,7 +576,7 @@ try
         Set-GitAuthorizationHeader -AuthorizationHeader $script:GitAuthorizationHeader
         try
         {
-            & $script:GitCommand.Source clone $cloneUrl $resolvedLocalPath
+            & $script:GitCommand.Source clone --branch $githubBranch $cloneUrl $resolvedLocalPath
             if ($LASTEXITCODE -ne 0)
             {
                 throw "Failed to clone '$script:RepositoryName' from Azure DevOps."
@@ -473,6 +588,16 @@ try
         }
 
         Copy-WorkshopConfiguration -SourceRoot $repositoryRoot -TargetRoot $resolvedLocalPath
+    }
+
+    Set-GitAuthorizationHeader -AuthorizationHeader $script:GitAuthorizationHeader
+    try
+    {
+        Sync-GitHubRepository -RepositoryPath $resolvedLocalPath -RepositoryUrl $script:GitHubRepositoryUrl -Branch $githubBranch
+    }
+    finally
+    {
+        Restore-GitAuthorizationHeader
     }
 
     & $script:GitCommand.Source -C $resolvedLocalPath config user.name $gitUserName

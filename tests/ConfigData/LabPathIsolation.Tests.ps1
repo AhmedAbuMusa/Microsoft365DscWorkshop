@@ -28,6 +28,139 @@ BeforeAll {
     {
         . ([scriptblock]::Create($functionAst.Extent.Text))
     }
+
+    $importAst = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path -Path $PSScriptRoot -ChildPath '..\..\lab\Azure\05 Import GitHub Repository.ps1'),
+        [ref]$tokens,
+        [ref]$parseErrors
+    )
+    $parseErrors | Should -BeNullOrEmpty
+    foreach ($functionAst in $importAst.FindAll({
+                param($astNode)
+                $astNode -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $astNode.Name -in @('Invoke-RepositoryGit', 'Get-GitHubRepositoryHead', 'Sync-GitHubRepository')
+            }, $true))
+    {
+        . ([scriptblock]::Create($functionAst.Extent.Text))
+    }
+}
+
+Describe 'GitHub to Azure DevOps synchronization' {
+    BeforeEach {
+        $script:GitCommand = Get-Command git
+        $syncRoot = Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
+        $githubPath = Join-Path $syncRoot 'github.git'
+        $devopsPath = Join-Path $syncRoot 'devops.git'
+        $seedPath = Join-Path $syncRoot 'seed'
+        $checkoutPath = Join-Path $syncRoot 'checkout'
+        New-Item -ItemType Directory -Path $syncRoot | Out-Null
+        Invoke-RepositoryGit -Arguments @('init', '--bare', '--initial-branch=main', $githubPath) | Out-Null
+        Invoke-RepositoryGit -Arguments @('init', '--bare', '--initial-branch=main', $devopsPath) | Out-Null
+        Invoke-RepositoryGit -Arguments @('init', '--initial-branch=main', $seedPath) | Out-Null
+        Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'config', 'user.name', 'Sync test') | Out-Null
+        Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'config', 'user.email', 'sync@example.invalid') | Out-Null
+        $configDirectory = Join-Path $seedPath 'source\Global'
+        New-Item -ItemType Directory -Path $configDirectory -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $configDirectory 'ProjectSettings.yml') -Value 'remote-project'
+        Set-Content -LiteralPath (Join-Path $configDirectory 'Azure.yml') -Value 'remote-azure'
+        Set-Content -LiteralPath (Join-Path $seedPath 'README.md') -Value 'version-one'
+        Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'add', '--all') | Out-Null
+        Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'commit', '-m', 'Initial') | Out-Null
+        Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'push', $githubPath, 'main') | Out-Null
+        Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'push', $devopsPath, 'main') | Out-Null
+        Invoke-RepositoryGit -Arguments @('clone', $devopsPath, $checkoutPath) | Out-Null
+        $initialCommit = Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'rev-parse', 'HEAD')
+        Set-Content -LiteralPath (Join-Path $seedPath 'README.md') -Value 'version-two'
+        Set-Content -LiteralPath (Join-Path $configDirectory 'Azure.yml') -Value 'updated-remote-azure'
+        Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'add', '--all') | Out-Null
+        Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'commit', '-m', 'GitHub update') | Out-Null
+        Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'push', $githubPath, 'main') | Out-Null
+        $sourceCommit = Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'rev-parse', 'HEAD')
+    }
+
+    It 'Synchronizes repeated GitHub pushes and preserves local configuration' {
+        $projectPath = Join-Path $checkoutPath 'source\Global\ProjectSettings.yml'
+        $azurePath = Join-Path $checkoutPath 'source\Global\Azure.yml'
+        Set-Content -LiteralPath $projectPath -Value 'local-project'
+        Set-Content -LiteralPath $azurePath -Value 'local-azure'
+        $branch = Get-GitHubRepositoryHead -RepositoryUrl $githubPath
+
+        Sync-GitHubRepository -RepositoryPath $checkoutPath -RepositoryUrl $githubPath -Branch $branch
+
+        Invoke-RepositoryGit -Arguments @("--git-dir=$devopsPath", 'rev-parse', 'main') | Should -Be $sourceCommit
+        Invoke-RepositoryGit -Arguments @('-C', $checkoutPath, 'rev-parse', 'HEAD') | Should -Be $sourceCommit
+        Get-Content -LiteralPath $projectPath -Raw | Should -Be "local-project$([Environment]::NewLine)"
+        Get-Content -LiteralPath $azurePath -Raw | Should -Be "local-azure$([Environment]::NewLine)"
+
+        Set-Content -LiteralPath (Join-Path $seedPath 'README.md') -Value 'version-three'
+        Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'commit', '-am', 'Another GitHub update') | Out-Null
+        Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'push', $githubPath, 'main') | Out-Null
+        $latestCommit = Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'rev-parse', 'HEAD')
+        Sync-GitHubRepository -RepositoryPath $checkoutPath -RepositoryUrl $githubPath -Branch $branch
+        Sync-GitHubRepository -RepositoryPath $checkoutPath -RepositoryUrl $githubPath -Branch $branch
+
+        Invoke-RepositoryGit -Arguments @("--git-dir=$devopsPath", 'rev-parse', 'main') | Should -Be $latestCommit
+        Invoke-RepositoryGit -Arguments @('-C', $checkoutPath, 'rev-parse', 'HEAD') | Should -Be $latestCommit
+        Get-Content -LiteralPath $azurePath -Raw | Should -Be "local-azure$([Environment]::NewLine)"
+    }
+
+    It 'Stops before remote changes when local code has uncommitted edits' {
+        Set-Content -LiteralPath (Join-Path $checkoutPath 'README.md') -Value 'local-edit'
+
+        { Sync-GitHubRepository -RepositoryPath $checkoutPath -RepositoryUrl $githubPath -Branch 'main' } |
+            Should -Throw '*edits outside*'
+
+        Invoke-RepositoryGit -Arguments @("--git-dir=$devopsPath", 'rev-parse', 'main') | Should -Be $initialCommit
+        Get-Content -LiteralPath (Join-Path $checkoutPath 'README.md') -Raw | Should -Be "local-edit$([Environment]::NewLine)"
+    }
+
+    It 'Refuses to overwrite commits made only in Azure DevOps' {
+        Invoke-RepositoryGit -Arguments @('-C', $checkoutPath, 'config', 'user.name', 'Sync test') | Out-Null
+        Invoke-RepositoryGit -Arguments @('-C', $checkoutPath, 'config', 'user.email', 'sync@example.invalid') | Out-Null
+        Set-Content -LiteralPath (Join-Path $checkoutPath 'README.md') -Value 'devops-only'
+        Invoke-RepositoryGit -Arguments @('-C', $checkoutPath, 'commit', '-am', 'DevOps-only commit') | Out-Null
+        Invoke-RepositoryGit -Arguments @('-C', $checkoutPath, 'push', 'origin', 'main') | Out-Null
+        $divergentCommit = Invoke-RepositoryGit -Arguments @('-C', $checkoutPath, 'rev-parse', 'HEAD')
+        $freshCheckout = Join-Path $syncRoot 'fresh-checkout'
+        Invoke-RepositoryGit -Arguments @('clone', $githubPath, $freshCheckout) | Out-Null
+        Invoke-RepositoryGit -Arguments @('-C', $freshCheckout, 'remote', 'set-url', 'origin', $devopsPath) | Out-Null
+
+        { Sync-GitHubRepository -RepositoryPath $freshCheckout -RepositoryUrl $githubPath -Branch 'main' } |
+            Should -Throw '*Git command*push*failed*'
+
+        Invoke-RepositoryGit -Arguments @("--git-dir=$devopsPath", 'rev-parse', 'main') | Should -Be $divergentCommit
+    }
+
+    It 'Refuses local-only commits before changing Azure DevOps' {
+        Invoke-RepositoryGit -Arguments @('-C', $checkoutPath, 'config', 'user.name', 'Sync test') | Out-Null
+        Invoke-RepositoryGit -Arguments @('-C', $checkoutPath, 'config', 'user.email', 'sync@example.invalid') | Out-Null
+        Set-Content -LiteralPath (Join-Path $checkoutPath 'README.md') -Value 'local-only'
+        Invoke-RepositoryGit -Arguments @('-C', $checkoutPath, 'commit', '-am', 'Local-only commit') | Out-Null
+        $localCommit = Invoke-RepositoryGit -Arguments @('-C', $checkoutPath, 'rev-parse', 'HEAD')
+
+        { Sync-GitHubRepository -RepositoryPath $checkoutPath -RepositoryUrl $githubPath -Branch 'main' } |
+            Should -Throw '*commits not present on GitHub*'
+
+        Invoke-RepositoryGit -Arguments @("--git-dir=$devopsPath", 'rev-parse', 'main') | Should -Be $initialCommit
+        Invoke-RepositoryGit -Arguments @('-C', $checkoutPath, 'rev-parse', 'HEAD') | Should -Be $localCommit
+    }
+
+    It 'Preserves local configuration when an untracked file blocks the checkout update' {
+        $projectPath = Join-Path $checkoutPath 'source\Global\ProjectSettings.yml'
+        Set-Content -LiteralPath $projectPath -Value 'local-project'
+        Set-Content -LiteralPath (Join-Path $seedPath 'new-file.txt') -Value 'remote-file'
+        Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'add', '--all') | Out-Null
+        Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'commit', '-m', 'New file') | Out-Null
+        Invoke-RepositoryGit -Arguments @('-C', $seedPath, 'push', $githubPath, 'main') | Out-Null
+        Set-Content -LiteralPath (Join-Path $checkoutPath 'new-file.txt') -Value 'local-untracked'
+
+        { Sync-GitHubRepository -RepositoryPath $checkoutPath -RepositoryUrl $githubPath -Branch 'main' } |
+            Should -Throw '*Git command*merge*failed*'
+
+        Get-Content -LiteralPath $projectPath -Raw | Should -Be "local-project$([Environment]::NewLine)"
+        Get-Content -LiteralPath (Join-Path $checkoutPath 'new-file.txt') -Raw | Should -Be "local-untracked$([Environment]::NewLine)"
+        Invoke-RepositoryGit -Arguments @('-C', $checkoutPath, 'rev-parse', 'HEAD') | Should -Be $initialCommit
+    }
 }
 
 Describe 'Lab script path isolation' {

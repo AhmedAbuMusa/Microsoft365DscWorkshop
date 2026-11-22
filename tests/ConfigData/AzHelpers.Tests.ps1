@@ -2000,15 +2000,21 @@ Describe 'Azure lab authentication reuse' {
             }
         }
 
-        It 'Does not treat an explicit Key Vault firewall denial as RBAC propagation' {
-            InModuleScope -ModuleName AzHelpers {
+        It 'Does not treat Key Vault network denial <NetworkError> as RBAC propagation' -ForEach @(
+            @{ NetworkError = 'ForbiddenByFirewall' }
+            @{ NetworkError = 'Public network access is disabled and request is not from a trusted service nor via an approved private link.' }
+            @{ NetworkError = 'Client address is not authorized and caller is not a trusted service.' }
+        ) {
+            InModuleScope -ModuleName AzHelpers -Parameters @{ NetworkError = $NetworkError } {
+                param($NetworkError)
+                $script:VaultNetworkError = $NetworkError
                 Mock Start-Sleep {}
                 Mock Get-AzKeyVaultSecret {
-                    throw [System.Net.Http.HttpRequestException]::new('ForbiddenByFirewall', $null, [System.Net.HttpStatusCode]::Forbidden)
+                    throw [System.Net.Http.HttpRequestException]::new($script:VaultNetworkError, $null, [System.Net.HttpStatusCode]::Forbidden)
                 }
 
                 { Wait-M365DscKeyVaultAccess -VaultName 'kv-stage' -EnvironmentName 'Stage' } |
-                    Should -Throw '*ForbiddenByFirewall*'
+                    Should -Throw "*Environment 'Stage'*network access*kv-stage*approved private endpoint*"
 
                 Should -Invoke Get-AzKeyVaultSecret -Times 1 -Exactly
                 Should -Invoke Start-Sleep -Times 0 -Exactly

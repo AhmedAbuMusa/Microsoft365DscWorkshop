@@ -772,8 +772,14 @@ function Wait-M365DscKeyVaultAccess
                 $exception = $exception.InnerException
             }
 
-            if ($statusCode -notin @(401, 403) -or
-                $_.Exception.Message -match 'ForbiddenByFirewall|ForbiddenByConnection')
+            if ($_.Exception.Message -match 'ForbiddenByFirewall|ForbiddenByConnection|Public network access is disabled|Client address is not authorized')
+            {
+                throw [InvalidOperationException]::new(
+                    "Environment '$EnvironmentName': network access to Key Vault '$VaultName' is blocked; waiting for RBAC propagation will not resolve this. Run provisioning from a host with connectivity and DNS resolution to the vault's approved private endpoint, or ask the subscription administrator to review the vault networking and applicable Azure Policy. $($_.Exception.Message)",
+                    $_.Exception
+                )
+            }
+            if ($statusCode -notin @(401, 403))
             {
                 throw
             }

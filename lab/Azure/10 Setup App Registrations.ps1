@@ -48,19 +48,19 @@ $identityDefinitions = @(
     }
 )
 
-foreach ($environmentName in $environments)
+foreach ($envName in $environments)
 {
-    $environment = $datum.Global.Azure.Environments[$environmentName]
+    $environment = $datum.Global.Azure.Environments[$envName]
     if ([string]::IsNullOrWhiteSpace([string]$environment.AzTenantName))
     {
-        $environment.AzTenantName = Read-Host -Prompt "Tenant domain for environment '$environmentName'"
+        $environment.AzTenantName = Read-Host -Prompt "Tenant domain for environment '$envName'"
     }
     if ([string]::IsNullOrWhiteSpace([string]$environment.AzTenantName))
     {
-        throw "A tenant domain is required for environment '$environmentName'."
+        throw "A tenant domain is required for environment '$envName'."
     }
 
-    Write-M365DscEnvironmentContext -EnvironmentName $environmentName -TenantName $environment.AzTenantName -Operation 'Signing in to register tenant applications'
+    Write-M365DscEnvironmentContext -EnvironmentName $envName -TenantName $environment.AzTenantName -Operation 'Signing in to register tenant applications'
     $context = Connect-M365DscEnvironmentContext -TenantName $environment.AzTenantName
     $tenantId = [string]$context.Tenant.Id
     $subscriptionId = [string]$context.Subscription.Id
@@ -78,22 +78,22 @@ foreach ($environmentName in $environments)
                 -SubscriptionId $subscriptionId `
                 -SkipExchangeOnline:$skipExchangeOnline))
     {
-        throw "The interactive connection does not match environment '$environmentName'."
+        throw "The interactive connection does not match environment '$envName'."
     }
 
     $vault = Initialize-M365DscKeyVault `
         -ProjectName $datum.Global.ProjectSettings.ProjectName `
-        -EnvironmentName ([string]$environmentName) `
+        -EnvironmentName $envName `
         -TenantId $tenantId `
         -SubscriptionId $subscriptionId `
         -Location $datum.Global.ProjectSettings.BuildAgents.AzureLocation `
         -ErrorAction Stop
     if ($null -eq $vault)
     {
-        throw "Failed to initialize the credential Key Vault for environment '$environmentName'."
+        throw "Failed to initialize the credential Key Vault for environment '$envName'."
     }
 
-    Write-M365DscEnvironmentContext -EnvironmentName $environmentName -TenantName $environment.AzTenantName `
+    Write-M365DscEnvironmentContext -EnvironmentName $envName -TenantName $environment.AzTenantName `
         -TenantId $tenantId -SubscriptionId $subscriptionId -KeyVaultName $vault.VaultName `
         -Operation 'Configuring tenant applications and credential storage'
 
@@ -138,13 +138,13 @@ foreach ($environmentName in $environments)
     foreach ($identityDefinition in $identityDefinitions)
     {
         $identityName = $identityDefinition.Name
-        Write-Host "[Environment: $environmentName] Reconciling application '$identityName' in tenant '$($environment.AzTenantName)'." -ForegroundColor Magenta
+        Write-Host "[Environment: $envName] Reconciling application '$identityName' in tenant '$($environment.AzTenantName)'." -ForegroundColor Magenta
 
         $identity = New-M365DscIdentity -Name $identityName -PassThru
 
         if (-not $identity -or -not $identity.AppId)
         {
-            throw "Could not create or uniquely resolve application '$identityName' in environment '$environmentName'."
+            throw "Could not create or uniquely resolve application '$identityName' in environment '$envName'."
         }
 
         if ($identityDefinition.AddGlobalAdmin)
@@ -277,7 +277,7 @@ foreach ($environmentName in $environments)
         -SubscriptionId $subscriptionId `
         -Identities $metadataIdentities
 
-    Write-Host "Key Vault '$($vault.VaultName)' is configured for environment '$environmentName'. Tenant IDs, subscription IDs, application IDs, and credentials were not written to Azure.yml." -ForegroundColor Green
+    Write-Host "Key Vault '$($vault.VaultName)' is configured for environment '$envName'. Tenant IDs, subscription IDs, application IDs, and credentials were not written to Azure.yml." -ForegroundColor Green
     Disconnect-M365Dsc -KeepAzureContext
 }
 

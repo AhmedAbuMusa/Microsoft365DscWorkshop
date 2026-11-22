@@ -96,6 +96,70 @@ Describe 'Azure environment context output' {
     }
 }
 
+Describe 'Azure app registration environment selection' {
+    BeforeAll {
+        $tokens = $null
+        $parseErrors = $null
+        $registrationAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $PSScriptRoot '..\..\lab\Azure\10 Setup App Registrations.ps1'),
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        $parseErrors | Should -BeNullOrEmpty
+        $filterStatement = $registrationAst.EndBlock.Statements | Where-Object {
+            $_ -is [System.Management.Automation.Language.IfStatementAst] -and
+            $_.Extent.Text -match '\$unknownEnvironments'
+        }
+        $registrationLoop = $registrationAst.EndBlock.Statements | Where-Object {
+            $_ -is [System.Management.Automation.Language.ForEachStatementAst]
+        }
+        $authenticationStatement = $registrationLoop.Body.Statements | Where-Object {
+            $_.Extent.Text -match '^\$context\s*=\s*Connect-M365DscEnvironmentContext'
+        }
+        # Exercise the real parameter/filter/loop code through the first context message, without signing in.
+        $loopPrefix = $registrationLoop.Extent.Text.Substring(
+            0, $authenticationStatement.Extent.StartOffset - $registrationLoop.Extent.StartOffset
+        )
+        $registrationContextScript = [scriptblock]::Create(
+            $registrationAst.ParamBlock.Extent.Text + "`n" + $filterStatement.Extent.Text + "`n" + $loopPrefix + "`n}"
+        )
+    }
+
+    It 'Prints scalar environment names with filter <Filter>' -ForEach @(
+        @{ Filter = @('Dev', 'Test'); ExpectedCount = 2 }
+        @{ Filter = $null; ExpectedCount = 3 }
+    ) {
+        $datum = [pscustomobject]@{
+            Global = [pscustomobject]@{
+                Azure = [pscustomobject]@{
+                    Environments = [ordered]@{
+                        Dev = [pscustomobject]@{ AzTenantName = 'dev.example' }
+                        Test = [pscustomobject]@{ AzTenantName = 'test.example' }
+                        Prod = [pscustomobject]@{ AzTenantName = 'prod.example' }
+                    }
+                }
+            }
+        }
+        $environments = @($datum.Global.Azure.Environments.Keys)
+        Mock Write-Host {}
+        $arguments = @{}
+        if ($Filter)
+        {
+            $arguments.EnvironmentName = $Filter
+        }
+
+        & $registrationContextScript @arguments
+
+        Should -Invoke Write-Host -Times $ExpectedCount -Exactly
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter {
+            $Object -eq '[Environment: Dev] Signing in to register tenant applications | Tenant: dev.example'
+        }
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter {
+            $Object -eq '[Environment: Test] Signing in to register tenant applications | Tenant: test.example'
+        }
+    }
+}
+
 Describe 'GitHub to Azure DevOps synchronization' {
     BeforeEach {
         $script:GitCommand = Get-Command git

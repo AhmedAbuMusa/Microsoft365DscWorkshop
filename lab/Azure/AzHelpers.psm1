@@ -926,7 +926,7 @@ function Connect-M365DscEnvironmentContext
         {
             $cachedContext = $cachedContexts[0]
             $contextName = $cachedContext.Name
-            Set-AzContext -Context $cachedContext -Scope Process -ErrorAction Stop | Out-Null
+            Set-AzContext -Context $cachedContext -Scope Process -Force -ErrorAction Stop | Out-Null
             try
             {
                 Get-AzAccessToken -TenantId $cachedContext.Tenant.Id -ResourceTypeName Arm -ErrorAction Stop | Out-Null
@@ -1045,6 +1045,7 @@ function Connect-M365DscEnvironmentContext
     {
         $contextParameters.Name = $contextName
         $contextParameters.Scope = 'CurrentUser'
+        $contextParameters.Force = $true
     }
     Set-AzContext @contextParameters | Out-Null
 
@@ -1262,12 +1263,12 @@ function Update-M365DscDatumFromKeyVault
         $environmentNames = @($environmentNames | Where-Object { $_ -in $EnvironmentName })
     }
 
-    foreach ($environmentName in $environmentNames)
+    foreach ($envName in $environmentNames)
     {
-        $manifest = $Datum.Global.Azure.Environments[$environmentName]
+        $manifest = $Datum.Global.Azure.Environments[$envName]
         $environmentParameters = @{
             ProjectName         = $ProjectName
-            EnvironmentName     = [string]$environmentName
+            EnvironmentName     = [string]$envName
             TenantName          = [string]$manifest.AzTenantName
             HasExchangeOnline   = [bool]$manifest.HasExchangeOnline
             HasSharePointOnline = [bool]$manifest.HasSharePointOnline
@@ -1285,7 +1286,7 @@ function Update-M365DscDatumFromKeyVault
             $environmentParameters.CredentialIdentityName = $CredentialIdentityName
         }
 
-        $Datum.Global.Azure.Environments[$environmentName] = Get-M365DscEnvironmentFromKeyVault @environmentParameters
+        $Datum.Global.Azure.Environments[$envName] = Get-M365DscEnvironmentFromKeyVault @environmentParameters
     }
 
     return $Datum

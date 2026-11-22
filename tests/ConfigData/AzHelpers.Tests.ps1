@@ -1677,7 +1677,11 @@ Describe 'Azure lab authentication reuse' {
                     return $script:AuthTestActiveContext
                 }
                 Mock Set-AzContext {
-                    param($Context, $Name, $SubscriptionId)
+                    param($Context, $Name, $SubscriptionId, $Force)
+                    if (($Context -or ($Name -and $script:AuthTestContexts.ContainsKey($Name))) -and -not $Force)
+                    {
+                        throw 'Updating a saved context would require an overwrite confirmation.'
+                    }
                     if ($Context)
                     {
                         $script:AuthTestActiveContext = $Context
@@ -1722,7 +1726,7 @@ Describe 'Azure lab authentication reuse' {
                 Should -Invoke Connect-AzAccount -Times 1 -Exactly
                 Should -Invoke Connect-MgGraph -Times 1 -Exactly
                 Should -Invoke Set-AzContext -Times 3 -Exactly -ParameterFilter {
-                    $Name -eq 'M365DscWorkshop-dev.example' -and $Scope -eq 'CurrentUser'
+                    $Name -eq 'M365DscWorkshop-dev.example' -and $Scope -eq 'CurrentUser' -and $Force
                 }
             }
         }
@@ -1920,4 +1924,31 @@ Describe 'Azure lab authentication reuse' {
                 Should -Invoke Connect-ExchangeOnline -Times 0 -Exactly
             }
         }
+
+        It 'Hydrates each selected environment without turning its name into an array' {
+                InModuleScope -ModuleName AzHelpers {
+                    $datum = [pscustomobject]@{
+                        Global = [pscustomobject]@{
+                            Azure = [pscustomobject]@{
+                                Environments = [ordered]@{
+                                    Dev = [pscustomobject]@{ AzTenantName = 'dev.example'; HasExchangeOnline = $false; HasSharePointOnline = $false }
+                                    Test = [pscustomobject]@{ AzTenantName = 'test.example'; HasExchangeOnline = $false; HasSharePointOnline = $false }
+                                    Prod = [pscustomobject]@{ AzTenantName = 'prod.example'; HasExchangeOnline = $false; HasSharePointOnline = $false }
+                                }
+                            }
+                        }
+                    }
+                    Mock Get-M365DscEnvironmentFromKeyVault {
+                        param([string]$EnvironmentName)
+                        [pscustomobject]@{ AzTenantName = "$EnvironmentName.example"; KeyVaultName = "kv-$EnvironmentName" }
+                    }
+
+                    Update-M365DscDatumFromKeyVault -Datum $datum -ProjectName 'DSC' -EnvironmentName @('Dev', 'Test') | Out-Null
+
+                    $datum.Global.Azure.Environments.Dev.KeyVaultName | Should -Be 'kv-Dev'
+                    $datum.Global.Azure.Environments.Test.KeyVaultName | Should -Be 'kv-Test'
+                    $datum.Global.Azure.Environments.Prod.AzTenantName | Should -Be 'prod.example'
+                    Should -Invoke Get-M365DscEnvironmentFromKeyVault -Times 2 -Exactly
+                }
+            }
     }

@@ -36,7 +36,9 @@ foreach ($envName in $environments)
 {
     $environment = $datum.Global.Azure.Environments."$envName"
     $setupIdentity = $environment.Identities | Where-Object Name -EQ $SetupApplicationName
-    Write-Host "Testing connection to environment '$envName'" -ForegroundColor Magenta
+    Write-M365DscEnvironmentContext -EnvironmentName $envName -TenantName $environment.AzTenantName `
+        -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -KeyVaultName $environment.KeyVaultName `
+        -Operation 'Testing tenant application connections'
 
     if (-not $setupIdentity.ApplicationId)
     {
@@ -68,7 +70,7 @@ foreach ($envName in $environments)
 
     if (-not $DoNotDisconnect)
     {
-        Disconnect-M365Dsc
+        Disconnect-M365Dsc -KeepAzureContext
     }
 }
 

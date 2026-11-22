@@ -43,6 +43,57 @@ BeforeAll {
     {
         . ([scriptblock]::Create($functionAst.Extent.Text))
     }
+
+    $helperAst = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path -Path $PSScriptRoot -ChildPath '..\..\lab\Azure\AzHelpers.psm1'),
+        [ref]$tokens,
+        [ref]$parseErrors
+    )
+    $parseErrors | Should -BeNullOrEmpty
+    $contextFunction = $helperAst.EndBlock.Statements | Where-Object {
+        $_ -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $_.Name -eq 'Write-M365DscEnvironmentContext'
+    }
+    . ([scriptblock]::Create($contextFunction.Extent.Text))
+}
+
+Describe 'Azure environment context output' {
+    BeforeEach {
+        Mock Write-Host {}
+    }
+
+    It 'Prints environment and tenant before sign-in without claiming undiscovered IDs' {
+        $output = @(Write-M365DscEnvironmentContext -EnvironmentName 'Dev' -TenantName 'dev.example' -Operation 'Signing in')
+
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter {
+            $Object -eq '[Environment: Dev] Signing in | Tenant: dev.example'
+        }
+        $output | Should -BeNullOrEmpty
+    }
+
+    It 'Includes discovered tenant, subscription, and vault details in terminal output' {
+        Write-M365DscEnvironmentContext -EnvironmentName 'Test' -TenantName 'test.example' `
+            -TenantId 'tenant-test' -SubscriptionId 'subscription-test' -KeyVaultName 'kv-test' `
+            -Operation 'Configuring applications'
+
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter {
+            $Object -eq '[Environment: Test] Configuring applications | Tenant: test.example | Tenant ID: tenant-test | Subscription ID: subscription-test | Key Vault: kv-test'
+        }
+    }
+
+    It 'Uses the current environment details on each environment switch' {
+        Write-M365DscEnvironmentContext -EnvironmentName 'Dev' -TenantName 'dev.example' `
+            -TenantId 'tenant-dev' -SubscriptionId 'subscription-dev' -Operation 'Testing connections'
+        Write-M365DscEnvironmentContext -EnvironmentName 'Prod' -TenantName 'prod.example' `
+            -TenantId 'tenant-prod' -SubscriptionId 'subscription-prod' -Operation 'Testing connections'
+
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter {
+            $Object -eq '[Environment: Dev] Testing connections | Tenant: dev.example | Tenant ID: tenant-dev | Subscription ID: subscription-dev'
+        }
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter {
+            $Object -eq '[Environment: Prod] Testing connections | Tenant: prod.example | Tenant ID: tenant-prod | Subscription ID: subscription-prod'
+        }
+    }
 }
 
 Describe 'GitHub to Azure DevOps synchronization' {

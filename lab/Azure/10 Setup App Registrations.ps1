@@ -60,7 +60,7 @@ foreach ($environmentName in $environments)
         throw "A tenant domain is required for environment '$environmentName'."
     }
 
-    Write-Host "Signing in to tenant '$($environment.AzTenantName)' for environment '$environmentName'." -ForegroundColor Magenta
+    Write-M365DscEnvironmentContext -EnvironmentName $environmentName -TenantName $environment.AzTenantName -Operation 'Signing in to register tenant applications'
     $context = Connect-M365DscEnvironmentContext -TenantName $environment.AzTenantName
     $tenantId = [string]$context.Tenant.Id
     $subscriptionId = [string]$context.Subscription.Id
@@ -92,6 +92,10 @@ foreach ($environmentName in $environments)
     {
         throw "Failed to initialize the credential Key Vault for environment '$environmentName'."
     }
+
+    Write-M365DscEnvironmentContext -EnvironmentName $environmentName -TenantName $environment.AzTenantName `
+        -TenantId $tenantId -SubscriptionId $subscriptionId -KeyVaultName $vault.VaultName `
+        -Operation 'Configuring tenant applications and credential storage'
 
     $operatorAccount = (Get-MgContext -ErrorAction Stop).Account
     if ([string]::IsNullOrWhiteSpace([string]$operatorAccount))
@@ -134,7 +138,7 @@ foreach ($environmentName in $environments)
     foreach ($identityDefinition in $identityDefinitions)
     {
         $identityName = $identityDefinition.Name
-        Write-Host "Reconciling application '$identityName'." -ForegroundColor Magenta
+        Write-Host "[Environment: $environmentName] Reconciling application '$identityName' in tenant '$($environment.AzTenantName)'." -ForegroundColor Magenta
 
         $identity = New-M365DscIdentity -Name $identityName -PassThru
 
@@ -274,7 +278,7 @@ foreach ($environmentName in $environments)
         -Identities $metadataIdentities
 
     Write-Host "Key Vault '$($vault.VaultName)' is configured for environment '$environmentName'. Tenant IDs, subscription IDs, application IDs, and credentials were not written to Azure.yml." -ForegroundColor Green
-    Disconnect-M365Dsc
+    Disconnect-M365Dsc -KeepAzureContext
 }
 
 Write-Host 'Finished bootstrapping tenant application identities and Key Vault metadata.' -ForegroundColor Green

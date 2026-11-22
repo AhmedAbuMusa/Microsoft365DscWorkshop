@@ -49,6 +49,9 @@ foreach ($envKey in $datum.Global.Azure.Environments.Keys)
     }
 
     $environment = $datum.Global.Azure.Environments[$envKey]
+    Write-M365DscEnvironmentContext -EnvironmentName $envKey -TenantName $environment.AzTenantName `
+        -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -KeyVaultName $environment.KeyVaultName `
+        -Operation 'Installing application certificates'
     Connect-M365DscEnvironmentContext `
         -TenantName $environment.AzTenantName `
         -SubscriptionId $environment.AzSubscriptionId | Out-Null
@@ -201,7 +204,9 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
     }
 
     $environment = $datum.Global.Azure.Environments.$envName
-    Write-Host "Working in environment '$envName'" -ForegroundColor Magenta
+    Write-M365DscEnvironmentContext -EnvironmentName $envName -TenantName $environment.AzTenantName `
+        -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -KeyVaultName $environment.KeyVaultName `
+        -Operation 'Configuring the Azure DevOps agent'
 
     Write-Host "Connecting to environment '$envName'" -ForegroundColor Magenta
     $param = @{

@@ -50,7 +50,9 @@ $vmResourceGroupNames = @{}
 foreach ($envName in $environments)
 {
     $environment = $datum.Global.Azure.Environments.$envName
-    Write-Host "Testing connection to environment '$envName'" -ForegroundColor Magenta
+    Write-M365DscEnvironmentContext -EnvironmentName $envName -TenantName $environment.AzTenantName `
+        -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -KeyVaultName $environment.KeyVaultName `
+        -Operation 'Testing connections before VM provisioning'
 
     $param = @{
         TenantId       = $environment.AzTenantId
@@ -70,7 +72,9 @@ foreach ($envName in $environments)
 foreach ($envName in $environments)
 {
     $environment = $datum.Global.Azure.Environments.$envName
-    Write-Host "Working in environment '$envName'" -ForegroundColor Magenta
+    Write-M365DscEnvironmentContext -EnvironmentName $envName -TenantName $environment.AzTenantName `
+        -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -KeyVaultName $environment.KeyVaultName `
+        -Operation 'Provisioning Azure agent VMs'
 
     Write-Host "Connecting to environment '$envName'" -ForegroundColor Magenta
 
@@ -247,6 +251,10 @@ foreach ($envName in $environments)
     }
 
     $environment = $datum.Global.Azure.Environments."$envName"
+
+    Write-M365DscEnvironmentContext -EnvironmentName $envName -TenantName $environment.AzTenantName `
+        -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -KeyVaultName $environment.KeyVaultName `
+        -Operation 'Assigning VM managed identities and permissions'
 
     Write-Host "Connecting to environment '$envName'" -ForegroundColor Magenta
     $param = @{

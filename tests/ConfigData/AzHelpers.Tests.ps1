@@ -1634,4 +1634,290 @@ Describe 'Remove-M365DscIdentity' -Tag Integration {
             Should -Invoke -CommandName Remove-MgApplication -Times 0 -Exactly
         }
     }
+
 }
+
+Describe 'Azure lab authentication reuse' {
+        BeforeAll {
+            Remove-Module -Name AzHelpers -Force
+            Import-Module -Name $PSScriptRoot\..\..\lab\Azure\AzHelpers.psm1 -Force
+        }
+
+        AfterAll {
+            Remove-Module -Name AzHelpers -Force
+            Import-Module -Name $PSScriptRoot\..\..\lab\AutomatedLab\AzHelpers.psm1 -Force
+        }
+
+        BeforeEach {
+            InModuleScope -ModuleName AzHelpers {
+                $script:AuthTestContexts = @{}
+                $script:AuthTestActiveContext = $null
+                $script:AuthTestWamConfigured = $true
+                Mock Get-AzConfig { [pscustomobject]@{ Value = $false } }
+                Mock Update-AzConfig { $script:AuthTestWamConfigured = $true }
+                Mock Enable-AzContextAutosave
+                Mock Connect-AzAccount {
+                    param($Tenant)
+                    if (-not $script:AuthTestWamConfigured)
+                    {
+                        throw 'The login mode must be configured before authentication.'
+                    }
+                    $tenantId = if ($Tenant -eq 'prod.example') { 'tenant-prod' } else { 'tenant-dev' }
+                    $script:AuthTestActiveContext = [pscustomobject]@{
+                        Name         = 'initial-context'
+                        Tenant       = [pscustomobject]@{ Id = $tenantId }
+                        Subscription = [pscustomobject]@{ Id = 'subscription-one'; Name = 'Subscription one' }
+                        Account      = [pscustomobject]@{ Id = 'operator@example.invalid'; Type = 'User' }
+                    }
+                    [pscustomobject]@{ Context = $script:AuthTestActiveContext }
+                }
+                Mock Get-AzContext {
+                    param($ListAvailable)
+                    if ($ListAvailable) { return @($script:AuthTestContexts.Values) }
+                    return $script:AuthTestActiveContext
+                }
+                Mock Set-AzContext {
+                    param($Context, $Name, $SubscriptionId)
+                    if ($Context)
+                    {
+                        $script:AuthTestActiveContext = $Context
+                    }
+                    else
+                    {
+                        $script:AuthTestActiveContext.Subscription.Id = $SubscriptionId
+                        if ($Name)
+                        {
+                            $script:AuthTestActiveContext.Name = $Name
+                            $script:AuthTestContexts[$Name] = $script:AuthTestActiveContext
+                        }
+                    }
+                    return $script:AuthTestActiveContext
+                }
+                Mock Get-AzSubscription {
+                    [pscustomobject]@{ Id = 'subscription-one'; Name = 'Subscription one'; State = 'Enabled' }
+                }
+                Mock Get-AzTenant {
+                    param($TenantId)
+                    $domain = if ($TenantId -eq 'tenant-prod') { 'prod.example' } else { 'dev.example' }
+                    [pscustomobject]@{ Id = $TenantId; Domains = @($domain) }
+                }
+                Mock Get-AzAccessToken {
+                    [pscustomobject]@{ Token = ConvertTo-M365DscSecureString -Value 'test-token' }
+                }
+                Mock Connect-MgGraph
+                Mock Get-MgContext {
+                    [pscustomobject]@{ TenantId = $script:AuthTestActiveContext.Tenant.Id; ClientId = 'test-client' }
+                }
+                Mock Read-Host { throw 'Unexpected subscription prompt' }
+            }
+        }
+
+        It 'Signs in once for repeated domain and tenant-ID calls, including Graph connections' {
+            InModuleScope -ModuleName AzHelpers {
+                Connect-M365DscEnvironmentContext -TenantName 'dev.example' | Out-Null
+                $script:AuthTestActiveContext = $null
+                Connect-M365DscEnvironmentContext -TenantName 'dev.example' | Out-Null
+                Connect-M365DscAzure -TenantId 'tenant-dev' -SubscriptionId 'subscription-one' -ErrorAction Stop
+
+                Should -Invoke Connect-AzAccount -Times 1 -Exactly
+                Should -Invoke Connect-MgGraph -Times 1 -Exactly
+                Should -Invoke Set-AzContext -Times 3 -Exactly -ParameterFilter {
+                    $Name -eq 'M365DscWorkshop-dev.example' -and $Scope -eq 'CurrentUser'
+                }
+            }
+        }
+
+        It 'Uses the preparation script login mode before the first sign-in without changing global settings' {
+            InModuleScope -ModuleName AzHelpers {
+                $script:AuthTestWamConfigured = $false
+                Mock Get-AzConfig { [pscustomobject]@{ Value = $true } }
+
+                Connect-M365DscEnvironmentContext -TenantName 'dev.example' | Out-Null
+
+                Should -Invoke Update-AzConfig -Times 1 -Exactly -ParameterFilter {
+                    $EnableLoginByWam -eq $false -and $Scope -eq 'Process'
+                }
+                Should -Invoke Connect-AzAccount -Times 1 -Exactly
+            }
+        }
+
+        It 'Keeps separate tenant sessions when switching Dev to Prod and back' {
+            InModuleScope -ModuleName AzHelpers {
+                Connect-M365DscEnvironmentContext -TenantName 'dev.example' | Out-Null
+                Connect-M365DscEnvironmentContext -TenantName 'prod.example' | Out-Null
+                $context = Connect-M365DscEnvironmentContext -TenantName 'dev.example'
+
+                $context.Tenant.Id | Should -Be 'tenant-dev'
+                Should -Invoke Connect-AzAccount -Times 1 -Exactly -ParameterFilter { $Tenant -eq 'dev.example' }
+                Should -Invoke Connect-AzAccount -Times 1 -Exactly -ParameterFilter { $Tenant -eq 'prod.example' }
+            }
+        }
+
+        It 'Reuses the selected subscription without asking again in a multi-subscription tenant' {
+            InModuleScope -ModuleName AzHelpers {
+                Mock Get-AzSubscription {
+                    [pscustomobject]@{ Id = 'subscription-one'; State = 'Enabled' }
+                    [pscustomobject]@{ Id = 'subscription-two'; State = 'Enabled' }
+                }
+                Connect-M365DscEnvironmentContext -TenantName 'dev.example' -SubscriptionId 'subscription-two' | Out-Null
+                $context = Connect-M365DscEnvironmentContext -TenantName 'dev.example'
+
+                $context.Subscription.Id | Should -Be 'subscription-two'
+                Should -Invoke Connect-AzAccount -Times 1 -Exactly
+                Should -Invoke Read-Host -Times 0 -Exactly
+            }
+        }
+
+        It 'Does not hide a cached-token network failure by starting another sign-in' {
+            InModuleScope -ModuleName AzHelpers {
+                Connect-M365DscEnvironmentContext -TenantName 'dev.example' | Out-Null
+                Mock Get-AzAccessToken { throw 'Token endpoint unavailable' }
+
+                { Connect-M365DscEnvironmentContext -TenantName 'dev.example' } |
+                    Should -Throw '*Token endpoint unavailable*'
+
+                Should -Invoke Connect-AzAccount -Times 1 -Exactly
+            }
+        }
+
+        It 'Rejects a cached context whose tenant domain does not match the requested environment' {
+            InModuleScope -ModuleName AzHelpers {
+                Connect-M365DscEnvironmentContext -TenantName 'dev.example' | Out-Null
+                Mock Get-AzTenant {
+                    [pscustomobject]@{ Id = 'tenant-other'; Domains = @('other.example') }
+                }
+
+                { Connect-M365DscEnvironmentContext -TenantName 'dev.example' } |
+                    Should -Throw '*does not belong to tenant domain*'
+
+                Should -Invoke Connect-AzAccount -Times 1 -Exactly
+            }
+        }
+
+        It 'Does not reuse a service-principal context for interactive administrator work' {
+            InModuleScope -ModuleName AzHelpers {
+                Connect-M365DscEnvironmentContext -TenantName 'dev.example' | Out-Null
+                $script:AuthTestContexts['M365DscWorkshop-dev.example'].Account.Type = 'ServicePrincipal'
+
+                $context = Connect-M365DscEnvironmentContext -TenantName 'dev.example'
+
+                $context.Account.Type | Should -Be 'User'
+                Should -Invoke Connect-AzAccount -Times 2 -Exactly
+            }
+        }
+
+        It 'Reauthenticates only when token acquisition explicitly requires user interaction' {
+            InModuleScope -ModuleName AzHelpers {
+                Connect-M365DscEnvironmentContext -TenantName 'dev.example' | Out-Null
+                $msalPath = Join-Path (Get-Module Az.Accounts).ModuleBase 'lib\netstandard2.0\Microsoft.Identity.Client.dll'
+                Add-Type -Path $msalPath -ErrorAction Stop
+                Mock Get-AzAccessToken {
+                    throw [Microsoft.Identity.Client.MsalUiRequiredException]::new('interaction_required', 'Fresh authentication required')
+                }
+
+                Connect-M365DscEnvironmentContext -TenantName 'dev.example' | Out-Null
+
+                Should -Invoke Connect-AzAccount -Times 2 -Exactly
+            }
+        }
+
+        It 'Reconnects lab services without clearing the Azure sign-in or requesting credentials again' {
+            InModuleScope -ModuleName AzHelpers {
+                Connect-M365DscEnvironmentContext -TenantName 'dev.example' | Out-Null
+                Mock Test-M365DscExchangeOnlineConnection { $false }
+                Mock Disconnect-MgGraph
+                Mock Disconnect-AzAccount
+                Mock Test-M365DscExchangeOnlineLicense { $true }
+                Mock Connect-M365DscExchangeOnline
+
+                Connect-M365Dsc -TenantId 'tenant-dev' -TenantName 'dev.example' -SubscriptionId 'subscription-one' -ErrorAction Stop
+                Connect-M365Dsc -TenantId 'tenant-dev' -TenantName 'dev.example' -SubscriptionId 'subscription-one' -ErrorAction Stop
+
+                Should -Invoke Connect-AzAccount -Times 1 -Exactly
+                Should -Invoke Disconnect-AzAccount -Times 0 -Exactly
+                Should -Invoke Connect-MgGraph -Times 2 -Exactly
+            }
+        }
+
+        It 'Preserves noninteractive Azure authentication with <CredentialType>' -ForEach @(
+            @{ CredentialType = 'AppSecret' }
+            @{ CredentialType = 'Certificate' }
+        ) {
+            InModuleScope -ModuleName AzHelpers -Parameters @{ CredentialType = $CredentialType } {
+                param($CredentialType)
+                $parameters = @{
+                    TenantId           = 'tenant-dev'
+                    SubscriptionId     = 'subscription-one'
+                    ServicePrincipalId = 'test-application'
+                    ErrorAction        = 'Stop'
+                }
+                if ($CredentialType -eq 'AppSecret')
+                {
+                    $parameters.ServicePrincipalSecret = ConvertTo-M365DscSecureString -Value 'test-secret'
+                }
+                else
+                {
+                    $parameters.CertificateThumbprint = 'test-thumbprint'
+                }
+
+                Connect-M365DscAzure @parameters
+
+                Should -Invoke Connect-AzAccount -Times 1 -Exactly -ParameterFilter {
+                    $Tenant -eq 'tenant-dev' -and $Subscription -eq 'subscription-one'
+                }
+                Should -Invoke Enable-AzContextAutosave -Times 0 -Exactly
+            }
+        }
+
+        It 'Retains the Azure session when disconnecting lab services but keeps explicit sign-out available' {
+            InModuleScope -ModuleName AzHelpers {
+                Mock Test-M365DscExchangeOnlineConnection { $true }
+                Mock Disconnect-ExchangeOnline
+                Mock Disconnect-MgGraph
+                Mock Disconnect-AzAccount
+
+                Disconnect-M365Dsc -KeepAzureContext
+
+                Should -Invoke Disconnect-AzAccount -Times 0 -Exactly
+                Should -Invoke Disconnect-MgGraph -Times 1 -Exactly
+                Should -Invoke Disconnect-ExchangeOnline -Times 1 -Exactly
+
+                Disconnect-M365Dsc
+
+                Should -Invoke Disconnect-AzAccount -Times 1 -Exactly
+            }
+        }
+
+        It 'Connects delegated Exchange Online with the Azure token instead of an interactive login' {
+            InModuleScope -ModuleName AzHelpers {
+                Connect-M365DscEnvironmentContext -TenantName 'dev.example' | Out-Null
+                Mock Connect-ExchangeOnline
+                Mock Get-ConnectionInformation {
+                    [pscustomobject]@{ TenantID = 'tenant-dev'; UserPrincipalName = 'operator@example.invalid' }
+                }
+
+                Connect-M365DscExchangeOnline -TenantId 'tenant-dev' -TenantName 'dev.example' -ErrorAction Stop
+
+                Should -Invoke Get-AzAccessToken -Times 1 -Exactly -ParameterFilter {
+                    $TenantId -eq 'tenant-dev' -and $ResourceUrl -eq 'https://outlook.office365.com'
+                }
+                Should -Invoke Connect-ExchangeOnline -Times 1 -Exactly -ParameterFilter {
+                    $AccessToken -eq 'test-token' -and $UserPrincipalName -eq 'operator@example.invalid'
+                }
+                Should -Invoke Connect-AzAccount -Times 1 -Exactly
+            }
+        }
+
+        It 'Does not acquire an Exchange token or connect with an Azure context from another tenant' {
+            InModuleScope -ModuleName AzHelpers {
+                Connect-M365DscEnvironmentContext -TenantName 'dev.example' | Out-Null
+                Mock Connect-ExchangeOnline
+
+                { Connect-M365DscExchangeOnline -TenantId 'tenant-prod' -TenantName 'prod.example' -ErrorAction Stop } |
+                    Should -Throw '*requires a user Azure context*'
+
+                Should -Invoke Get-AzAccessToken -Times 0 -Exactly
+                Should -Invoke Connect-ExchangeOnline -Times 0 -Exactly
+            }
+        }
+    }

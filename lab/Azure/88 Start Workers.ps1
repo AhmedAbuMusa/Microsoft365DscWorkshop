@@ -35,7 +35,9 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
     }
 
     $environment = $datum.Global.Azure.Environments.$envName
-    Write-Host "Connecting to environment '$envName'" -ForegroundColor Magenta
+    Write-M365DscEnvironmentContext -EnvironmentName $envName -TenantName $environment.AzTenantName `
+        -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -KeyVaultName $environment.KeyVaultName `
+        -Operation 'Starting worker VMs'
 
     $param = @{
         TenantId       = $environment.AzTenantId

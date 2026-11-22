@@ -1,5 +1,44 @@
 Import-Module -Name $PSScriptRoot\CertHelpers.psm1 -Force
 
+function Write-M365DscEnvironmentContext
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$EnvironmentName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TenantName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Operation,
+
+        [Parameter()]
+        [string]$TenantId,
+
+        [Parameter()]
+        [string]$SubscriptionId,
+
+        [Parameter()]
+        [string]$KeyVaultName
+    )
+
+    $fields = [ordered]@{
+        Tenant            = $TenantName
+        'Tenant ID'       = $TenantId
+        'Subscription ID' = $SubscriptionId
+        'Key Vault'       = $KeyVaultName
+    }
+    $details = foreach ($field in $fields.GetEnumerator())
+    {
+        if (-not [string]::IsNullOrWhiteSpace($field.Value))
+        {
+            '{0}: {1}' -f $field.Key, $field.Value
+        }
+    }
+    Write-Host "[Environment: $EnvironmentName] $Operation | $($details -join ' | ')" -ForegroundColor Cyan
+}
+
 function Get-M365DscAgentResourceGroupName
 {
     [CmdletBinding()]
@@ -721,12 +760,17 @@ function Get-M365DscProjectSettingsFromKeyVault
     {
         $contextParameters.SubscriptionId = [string]$environment.AzSubscriptionId
     }
+    Write-M365DscEnvironmentContext -EnvironmentName $environmentName -TenantName $environment.AzTenantName -Operation 'Signing in for project credential access'
     $context = Connect-M365DscEnvironmentContext @contextParameters
     $vaultName = Resolve-M365DscKeyVaultName `
         -ProjectName $settings.ProjectName `
         -EnvironmentName $environmentName `
         -TenantId $context.Tenant.Id `
         -SubscriptionId $context.Subscription.Id
+
+    Write-M365DscEnvironmentContext -EnvironmentName $environmentName -TenantName $environment.AzTenantName `
+        -TenantId $context.Tenant.Id -SubscriptionId $context.Subscription.Id -KeyVaultName $vaultName `
+        -Operation 'Loading project credentials'
 
     $credentials = @(
         @{
@@ -850,6 +894,7 @@ function Connect-M365DscEnvironmentContext
         [switch]$ManagedIdentity
     )
 
+    $cachedContext = $null
     if ($ManagedIdentity)
     {
         $managedIdentityClientId = [string]$env:AZURE_CLIENT_ID
@@ -862,7 +907,68 @@ function Connect-M365DscEnvironmentContext
     }
     else
     {
-        Connect-AzAccount -Tenant $TenantName -ErrorAction Stop | Out-Null
+        if ((Get-AzConfig -EnableLoginByWam -ErrorAction Stop).Value)
+        {
+            Update-AzConfig -EnableLoginByWam $false -Scope Process -ErrorAction Stop | Out-Null
+        }
+        Enable-AzContextAutosave -Scope Process -ErrorAction Stop | Out-Null
+        $contextName = "M365DscWorkshop-$($TenantName.ToLowerInvariant())"
+        $cachedContexts = @(Get-AzContext -ListAvailable -ErrorAction Stop | Where-Object {
+                $_.Account.Type -eq 'User' -and
+                ($_.Name -eq $contextName -or
+                    ($_.Name -like 'M365DscWorkshop-*' -and $_.Tenant.Id -eq $TenantName))
+            })
+        if ($cachedContexts.Count -gt 1)
+        {
+            throw "Multiple saved user contexts match tenant '$TenantName'. Remove the ambiguous workshop contexts before retrying."
+        }
+        if ($cachedContexts.Count -eq 1)
+        {
+            $cachedContext = $cachedContexts[0]
+            $contextName = $cachedContext.Name
+            Set-AzContext -Context $cachedContext -Scope Process -ErrorAction Stop | Out-Null
+            try
+            {
+                Get-AzAccessToken -TenantId $cachedContext.Tenant.Id -ResourceTypeName Arm -ErrorAction Stop | Out-Null
+            }
+            catch
+            {
+                $exception = $_.Exception
+                $requiresSignIn = $false
+                while ($exception)
+                {
+                    if ($exception.GetType().FullName -eq 'Microsoft.Identity.Client.MsalUiRequiredException')
+                    {
+                        $requiresSignIn = $true
+                        break
+                    }
+                    $exception = $exception.InnerException
+                }
+                if (-not $requiresSignIn)
+                {
+                    throw
+                }
+                Write-Warning "The saved session for tenant '$TenantName' requires interactive authentication again."
+                $cachedContext = $null
+            }
+        }
+        if ($cachedContext)
+        {
+            if ($TenantName -ne $cachedContext.Tenant.Id)
+            {
+                $tenant = Get-AzTenant -TenantId $cachedContext.Tenant.Id -ErrorAction Stop
+                if ($TenantName -notin $tenant.Domains)
+                {
+                    throw "Saved context '$contextName' does not belong to tenant domain '$TenantName'."
+                }
+            }
+            Write-Host "Reusing Azure sign-in for tenant '$TenantName'." -ForegroundColor Green
+        }
+        else
+        {
+            Write-Host "Signing in to tenant '$TenantName'; later lab steps will reuse this session." -ForegroundColor Cyan
+            Connect-AzAccount -Tenant $TenantName -Scope CurrentUser -ErrorAction Stop | Out-Null
+        }
     }
 
     $context = Get-AzContext -ErrorAction Stop
@@ -875,6 +981,9 @@ function Connect-M365DscEnvironmentContext
         Get-AzSubscription -TenantId $context.Tenant.Id -ErrorAction Stop |
             Where-Object { $_.State -eq 'Enabled' }
     )
+    $cachedSubscription = @($subscriptions | Where-Object {
+            $cachedContext -and $_.Id -eq $cachedContext.Subscription.Id
+        })
     if ($SubscriptionId)
     {
         $selectedSubscription = @(
@@ -888,6 +997,10 @@ function Connect-M365DscEnvironmentContext
     elseif ($subscriptions.Count -eq 1)
     {
         $selectedSubscription = $subscriptions
+    }
+    elseif ($cachedSubscription.Count -eq 1)
+    {
+        $selectedSubscription = $cachedSubscription
     }
     elseif ($subscriptions.Count -gt 1 -and -not $ManagedIdentity)
     {
@@ -923,10 +1036,17 @@ function Connect-M365DscEnvironmentContext
         throw "No enabled Azure subscriptions are available in tenant '$($context.Tenant.Id)'."
     }
 
-    Set-AzContext `
-        -TenantId $context.Tenant.Id `
-        -SubscriptionId $selectedSubscription[0].Id `
-        -ErrorAction Stop | Out-Null
+    $contextParameters = @{
+        TenantId       = $context.Tenant.Id
+        SubscriptionId = $selectedSubscription[0].Id
+        ErrorAction    = 'Stop'
+    }
+    if (-not $ManagedIdentity)
+    {
+        $contextParameters.Name = $contextName
+        $contextParameters.Scope = 'CurrentUser'
+    }
+    Set-AzContext @contextParameters | Out-Null
 
     return Get-AzContext -ErrorAction Stop
 }
@@ -1026,6 +1146,7 @@ function Get-M365DscEnvironmentFromKeyVault
     {
         $contextParameters.ManagedIdentity = $true
     }
+    Write-M365DscEnvironmentContext -EnvironmentName $EnvironmentName -TenantName $TenantName -Operation 'Signing in to load environment metadata'
     $context = Connect-M365DscEnvironmentContext @contextParameters
     $tenantId = [string]$context.Tenant.Id
     $subscriptionId = [string]$context.Subscription.Id
@@ -1034,6 +1155,10 @@ function Get-M365DscEnvironmentFromKeyVault
         -EnvironmentName $EnvironmentName `
         -TenantId $tenantId `
         -SubscriptionId $subscriptionId
+
+    Write-M365DscEnvironmentContext -EnvironmentName $EnvironmentName -TenantName $TenantName `
+        -TenantId $tenantId -SubscriptionId $subscriptionId -KeyVaultName $vaultName `
+        -Operation 'Loading environment metadata'
 
     $metadata = [ordered]@{
         TenantId       = $tenantId
@@ -2083,25 +2208,14 @@ function Connect-M365DscAzure
         }
         else
         {
-            $param = @{
-                Tenant        = $TenantId
-                ErrorAction   = 'Stop'
-                WarningAction = 'Ignore'
-            }
+            $contextParameters = @{ TenantName = $TenantId }
             if ($SubscriptionId)
             {
-                $param.SubscriptionId = $SubscriptionId
+                $contextParameters.SubscriptionId = $SubscriptionId
             }
-
-            $subscription = if ($SubscriptionId)
-            {
-                Connect-AzAccount @param *>&1
+            $subscription = [pscustomobject]@{
+                Context = Connect-M365DscEnvironmentContext @contextParameters
             }
-            else
-            {
-                Connect-AzAccount @param
-            }
-
         }
         Write-Host "Successfully connected to Azure subscription '$($subscription.Context.Subscription.Name)' ($($subscription.Context.Subscription.Id))' with account '$($subscription.Context.Account.Id)'"
     }
@@ -2258,7 +2372,21 @@ function Connect-M365DscExchangeOnline
         }
         else
         {
-            Connect-ExchangeOnline -ShowBanner:$false
+            $context = Get-AzContext -ErrorAction Stop
+            if ($context.Tenant.Id -ne $TenantId -or $context.Account.Type -ne 'User')
+            {
+                throw "Delegated Exchange Online authentication requires a user Azure context for tenant '$TenantId'."
+            }
+            $token = Get-AzAccessToken -TenantId $TenantId -ResourceUrl 'https://outlook.office365.com' -ErrorAction Stop
+            $accessToken = ConvertTo-M365DscPlainText -Value $token.Token
+            try
+            {
+                Connect-ExchangeOnline -AccessToken $accessToken -UserPrincipalName $context.Account.Id -ShowBanner:$false -ErrorAction Stop
+            }
+            finally
+            {
+                $accessToken = $null
+            }
         }
 
         $connection = Get-ConnectionInformation
@@ -2342,7 +2470,7 @@ function Connect-M365Dsc
         [switch]$SkipExchangeOnline
     )
 
-    Disconnect-M365Dsc -ErrorAction SilentlyContinue
+    Disconnect-M365Dsc -KeepAzureContext -ErrorAction SilentlyContinue
 
     Write-Host 'Connecting to Azure, Microsoft Graph, and Exchange Online services.' -ForegroundColor Green
     $param = Select-M365DscCommandParameter -Command (Get-Command -Name Connect-M365DscAzure) -Parameters $PSBoundParameters
@@ -2369,13 +2497,22 @@ function Connect-M365Dsc
 function Disconnect-M365Dsc
 {
     [CmdletBinding()]
-    param ()
+    param (
+        [Parameter()]
+        [switch]$KeepAzureContext
+    )
 
     if (Test-M365DscExchangeOnlineConnection)
     {
         Disconnect-ExchangeOnline -Confirm:$false
     }
     Disconnect-MgGraph | Out-Null
+
+    if ($KeepAzureContext)
+    {
+        Write-Host 'Disconnected from Graph and Exchange Online; Azure sign-in retained for subsequent lab steps.'
+        return
+    }
 
     # Az.Accounts writes this failure as a non-terminating error, unless the caller preference makes it terminating.
     $disconnectError = $null

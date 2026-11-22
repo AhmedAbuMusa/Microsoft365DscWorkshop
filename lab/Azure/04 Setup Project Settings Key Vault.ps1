@@ -117,6 +117,7 @@ if ($null -eq $environment)
     throw "CredentialVaultEnvironment '$environmentName' is not configured in 'source/Global/Azure.yml'."
 }
 
+Write-M365DscEnvironmentContext -EnvironmentName $environmentName -TenantName $environment.AzTenantName -Operation 'Signing in to configure the project credential vault'
 $context = Connect-M365DscEnvironmentContext -TenantName ([string]$environment.AzTenantName)
 $vault = Initialize-M365DscKeyVault `
     -ProjectName ([string]$projectSettings.ProjectName) `
@@ -129,6 +130,10 @@ if ($null -eq $vault)
 {
     throw "Failed to initialize the project-settings Key Vault for environment '$environmentName'."
 }
+
+Write-M365DscEnvironmentContext -EnvironmentName $environmentName -TenantName $environment.AzTenantName `
+    -TenantId $context.Tenant.Id -SubscriptionId $context.Subscription.Id -KeyVaultName $vault.VaultName `
+    -Operation 'Configuring project credential storage'
 
 $operatorAccount = [string]$context.Account.Id
 if ([string]::IsNullOrWhiteSpace($operatorAccount))

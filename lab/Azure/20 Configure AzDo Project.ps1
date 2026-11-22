@@ -185,6 +185,10 @@ $existingEnvironments = Invoke-VSTeamRequest -Method Get -Area distributedtask -
 
 foreach ($environment in $environments)
 {
+    Write-M365DscEnvironmentContext -EnvironmentName $environment `
+        -TenantName $datum.Global.Azure.Environments[$environment].AzTenantName `
+        -Operation 'Configuring the Azure DevOps environment'
+
     if (-not ($existingEnvironments.value | Where-Object { $_.name -eq $environment }))
     {
         Write-Host "Creating environment '$environment' in project '$($datum.Global.ProjectSettings.ProjectName)'."

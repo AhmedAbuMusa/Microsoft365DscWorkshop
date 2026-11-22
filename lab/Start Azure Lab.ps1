@@ -777,6 +777,9 @@ function Get-EnvironmentNames
             }
         }
 
+        Write-Host ("[Environment: {0}] Configured tenant: {1} | Exchange Online: {2} | SharePoint Online: {3}" -f
+            $environmentName, $environment.AzTenantName, $environment.HasExchangeOnline, $environment.HasSharePointOnline) -ForegroundColor Cyan
+
     }
 
     return $environments

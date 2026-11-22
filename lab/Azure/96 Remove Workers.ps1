@@ -141,7 +141,9 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
         continue
     }
 
-    Write-Host "Testing connection to environment '$envName'" -ForegroundColor Magenta
+    Write-M365DscEnvironmentContext -EnvironmentName $envName -TenantName $environment.AzTenantName `
+        -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -KeyVaultName $environment.KeyVaultName `
+        -Operation 'Removing worker identities and VMs'
 
     $param = @{
         TenantId       = $environment.AzTenantId

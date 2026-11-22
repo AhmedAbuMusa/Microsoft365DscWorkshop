@@ -51,6 +51,8 @@
     PSDesiredStateConfiguration                    = '2.0.8'
 
     # Azure
+    # Private endpoint/DNS deployment uses the pinned Az.Resources and Az.Accounts below.
+    # It does not need Az.Network, Az.PrivateDns, or Bicep during credential-vault bootstrap.
     # Az.KeyVault 6.4.2 is the newest release that works with the Az.Accounts version Microsoft365DSC pins below.
     'Az.KeyVault'                                  = '6.4.2'
     'Az.Compute'                                   = '11.3.0'

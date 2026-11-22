@@ -55,6 +55,226 @@ BeforeAll {
         $_.Name -eq 'Write-M365DscEnvironmentContext'
     }
     . ([scriptblock]::Create($contextFunction.Extent.Text))
+    foreach ($functionAst in $helperAst.EndBlock.Statements | Where-Object {
+            $_ -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $_.Name -in @('Get-M365DscKeyVaultNetworkParameters', 'Initialize-M365DscKeyVaultPrivateEndpoint', 'Initialize-M365DscAgentKeyVaultPrivateEndpoint')
+        })
+    {
+        . ([scriptblock]::Create($functionAst.Extent.Text))
+    }
+}
+
+Describe 'Key Vault private endpoint deployment' {
+    BeforeAll {
+        $requiredModulesPath = (Resolve-Path $PSScriptRoot\..\..\output\RequiredModules).Path
+        $env:PSModulePath += [IO.Path]::PathSeparator + $requiredModulesPath
+        Import-Module Az.Resources -RequiredVersion 9.0.1 -ErrorAction Stop
+        Import-Module Az.KeyVault -RequiredVersion 6.4.2 -ErrorAction Stop
+    }
+
+    BeforeEach {
+        $vnetId = '/subscriptions/sub-one/resourceGroups/network-rg/providers/Microsoft.Network/virtualNetworks/provisioning'
+        $subnetId = "$vnetId/subnets/endpoints"
+        $vault = [pscustomobject]@{
+            VaultName = 'kv-stage'
+            ResourceGroupName = 'credential-rg'
+            ResourceId = '/subscriptions/sub-one/resourceGroups/credential-rg/providers/Microsoft.KeyVault/vaults/kv-stage'
+        }
+        $endpointId = '/subscriptions/sub-one/resourceGroups/credential-rg/providers/Microsoft.Network/privateEndpoints/endpoint'
+        $nicId = '/subscriptions/sub-one/resourceGroups/credential-rg/providers/Microsoft.Network/networkInterfaces/endpoint-nic'
+        Mock Write-Host {}
+        Mock Import-Module {}
+        Mock Import-PowerShellDataFile { @{ 'Az.Resources' = '9.0.1' } }
+        Mock Get-AzContext {
+            [pscustomobject]@{ Subscription = [pscustomobject]@{ Id = 'sub-one' }; Tenant = [pscustomobject]@{ Id = 'tenant-stage' } }
+        }
+        Mock Get-AzResourceProvider { [pscustomobject]@{ RegistrationState = 'Registered' } }
+        Mock Register-AzResourceProvider {}
+        Mock New-AzResourceGroupDeployment {
+            [pscustomobject]@{
+                ProvisioningState = 'Succeeded'
+                Outputs = @{ endpointResourceId = @{ Value = $endpointId } }
+            }
+        }
+        Mock Get-AzResource {
+            param($ResourceId)
+            if ($ResourceId -eq $endpointId)
+            {
+                return [pscustomobject]@{
+                    Properties = @{
+                        privateLinkServiceConnections = @(
+                            @{ properties = @{
+                                privateLinkServiceId = $vault.ResourceId
+                                privateLinkServiceConnectionState = @{ status = 'Approved' }
+                            } }
+                        )
+                        networkInterfaces = @(@{ id = $nicId })
+                    }
+                }
+            }
+            if ($ResourceId -eq $nicId)
+            {
+                return [pscustomobject]@{
+                    Properties = @{ ipConfigurations = @(@{ properties = @{ privateIPAddress = '10.20.0.4' } }) }
+                }
+            }
+            [pscustomobject]@{ Location = 'westus2'; Properties = @{} }
+        }
+        Mock Resolve-DnsName { [pscustomobject]@{ Type = 'A'; IPAddress = '10.20.0.4' } }
+        Mock Test-NetConnection { $true }
+        Mock Start-Sleep {}
+    }
+
+    It 'Deploys repeatable private endpoint and DNS resources and validates the actual vault hostname' {
+        Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName 'Stage' `
+            -PrivateEndpointSubnetId $subnetId -ValidateLocalConnectivity
+        Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName 'Stage' `
+            -PrivateEndpointSubnetId $subnetId -ValidateLocalConnectivity
+
+        Should -Invoke New-AzResourceGroupDeployment -Times 2 -Exactly -ParameterFilter {
+            $Mode -eq 'Incremental' -and $Force -and
+            $ResourceGroupName -eq 'credential-rg' -and
+            $TemplateParameterObject.vaultResourceId -eq $vault.ResourceId -and
+            $TemplateParameterObject.subnetResourceId -eq $subnetId -and
+            $TemplateParameterObject.virtualNetworkIds.Count -eq 1 -and
+            $TemplateParameterObject.virtualNetworkIds[0] -eq $vnetId.ToLowerInvariant() -and
+            $Name -eq $TemplateParameterObject.endpointName
+        }
+        Should -Invoke Resolve-DnsName -Times 2 -Exactly -ParameterFilter { $Name -eq 'kv-stage.vault.azure.net' }
+        Should -Invoke Test-NetConnection -Times 2 -Exactly -ParameterFilter {
+            $ComputerName -eq 'kv-stage.vault.azure.net' -and $Port -eq 443
+        }
+    }
+
+    It 'Rejects missing and cross-subscription subnet topology before deployment' {
+        { Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName 'Stage' -PrivateEndpointSubnetId 'unknown' } |
+            Should -Throw '*full existing Azure subnet resource ID*'
+        { Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName 'Stage' `
+            -PrivateEndpointSubnetId ($subnetId -replace 'sub-one', 'sub-other') } |
+            Should -Throw '*active subscription*'
+
+        Should -Invoke New-AzResourceGroupDeployment -Times 0 -Exactly
+    }
+
+    It 'Stops when endpoint approval is pending rather than reporting usable connectivity' {
+        Mock Get-AzResource {
+            [pscustomobject]@{
+                Location = 'westus2'
+                Properties = @{ privateLinkServiceConnections = @(
+                    @{ properties = @{
+                        privateLinkServiceId = $vault.ResourceId
+                        privateLinkServiceConnectionState = @{ status = 'Pending' }
+                    } }
+                ) }
+            }
+        }
+
+        { Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName 'Stage' -PrivateEndpointSubnetId $subnetId } |
+            Should -Throw '*not Approved*'
+
+        Should -Invoke Test-NetConnection -Times 0 -Exactly
+    }
+
+    It 'Fails when private DNS resolves a public IP instead of the allocated endpoint IP' {
+        Mock Resolve-DnsName { [pscustomobject]@{ Type = 'A'; IPAddress = '20.1.2.3' } }
+
+        { Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName 'Stage' `
+            -PrivateEndpointSubnetId $subnetId -ValidateLocalConnectivity } |
+            Should -Throw '*does not resolve to this endpoint*'
+
+        Should -Invoke Start-Sleep -Times 11 -Exactly
+        Should -Invoke Test-NetConnection -Times 0 -Exactly
+    }
+
+    It 'Fails when the provisioning machine has private DNS but no network route' {
+        Mock Test-NetConnection { $false }
+
+        { Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName 'Stage' `
+            -PrivateEndpointSubnetId $subnetId -ValidateLocalConnectivity } |
+            Should -Throw '*cannot reach*TCP 443*'
+    }
+
+    It 'Stops before connectivity checks when ARM reports a failed private endpoint deployment' {
+        Mock New-AzResourceGroupDeployment {
+            [pscustomobject]@{ ProvisioningState = 'Failed' }
+        }
+
+        { Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName 'Stage' `
+            -PrivateEndpointSubnetId $subnetId -ValidateLocalConnectivity } |
+            Should -Throw '*private endpoint deployment failed*'
+
+        Should -Invoke Test-NetConnection -Times 0 -Exactly
+        Should -Invoke Resolve-DnsName -Times 0 -Exactly
+    }
+
+    It 'Keeps public-only configuration unchanged and reads private topology from local project settings' {
+        $datum = [pscustomobject]@{ Global = [pscustomobject]@{ ProjectSettings = [ordered]@{} } }
+        (Get-M365DscKeyVaultNetworkParameters -Datum $datum -EnvironmentName 'Dev').Count | Should -Be 0
+        $datum.Global.ProjectSettings.KeyVaultNetworking = [ordered]@{
+            Stage = [ordered]@{ PrivateEndpointSubnetId = $subnetId }
+        }
+
+        $parameters = Get-M365DscKeyVaultNetworkParameters -Datum $datum -EnvironmentName 'Stage'
+
+        $parameters.PrivateEndpointSubnetId | Should -Be $subnetId
+        $parameters.DnsVirtualNetworkId.Count | Should -Be 0
+        (Get-M365DscKeyVaultNetworkParameters -Datum $datum -EnvironmentName 'Dev').Count | Should -Be 0
+    }
+
+    It 'Deploys a separate endpoint and DNS zone for an isolated adopted agent VNet' {
+        $datum = [pscustomobject]@{
+            Global = [pscustomobject]@{
+                ProjectSettings = @{ KeyVaultNetworking = @{ Stage = @{ PrivateEndpointSubnetId = $subnetId } } }
+                Azure = @{ Environments = @{ Stage = @{ KeyVaultName = 'kv-stage' } } }
+            }
+        }
+        $vm = [pscustomobject]@{
+            ResourceGroupName = 'agent-rg'
+            NetworkProfile = @{ NetworkInterfaces = @(@{ Id = 'agent-nic' }) }
+        }
+        Mock Get-AzKeyVault { $vault }
+        Mock Get-AzResource {
+            [pscustomobject]@{
+                Properties = @{ ipConfigurations = @(
+                    @{ properties = @{ subnet = @{ id = '/subscriptions/sub-one/resourceGroups/agent-rg/providers/Microsoft.Network/virtualNetworks/agent/subnets/default' } } }
+                ) }
+            }
+        }
+        Mock Initialize-M365DscKeyVaultPrivateEndpoint {}
+
+        Initialize-M365DscAgentKeyVaultPrivateEndpoint -Datum $datum -EnvironmentName 'Stage' -VM $vm
+
+        Should -Invoke Initialize-M365DscKeyVaultPrivateEndpoint -Times 1 -Exactly -ParameterFilter {
+            $EndpointResourceGroupName -eq 'agent-rg' -and $PrivateEndpointSubnetId -like '*/agent/subnets/default' -and
+            -not $ValidateLocalConnectivity
+        }
+    }
+
+    It 'Reuses private connectivity when the worker is in the configured endpoint VNet' {
+        $datum = [pscustomobject]@{
+            Global = [pscustomobject]@{
+                ProjectSettings = @{ KeyVaultNetworking = @{ Stage = @{ PrivateEndpointSubnetId = $subnetId } } }
+                Azure = @{ Environments = @{ Stage = @{ KeyVaultName = 'kv-stage' } } }
+            }
+        }
+        $vm = [pscustomobject]@{
+            ResourceGroupName = 'agent-rg'
+            NetworkProfile = @{ NetworkInterfaces = @(@{ Id = 'agent-nic' }) }
+        }
+        Mock Get-AzKeyVault { $vault }
+        Mock Get-AzResource {
+            [pscustomobject]@{
+                Properties = @{ ipConfigurations = @(
+                    @{ properties = @{ subnet = @{ id = "$vnetId/subnets/workers" } } }
+                ) }
+            }
+        }
+        Mock Initialize-M365DscKeyVaultPrivateEndpoint {}
+
+        Initialize-M365DscAgentKeyVaultPrivateEndpoint -Datum $datum -EnvironmentName 'Stage' -VM $vm
+
+        Should -Invoke Initialize-M365DscKeyVaultPrivateEndpoint -Times 0 -Exactly
+    }
 }
 
 Describe 'Azure environment context output' {

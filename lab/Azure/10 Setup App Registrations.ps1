@@ -81,12 +81,14 @@ foreach ($envName in $environments)
         throw "The interactive connection does not match environment '$envName'."
     }
 
+    $networkParameters = Get-M365DscKeyVaultNetworkParameters -Datum $datum -EnvironmentName $envName
     $vault = Initialize-M365DscKeyVault `
         -ProjectName $datum.Global.ProjectSettings.ProjectName `
         -EnvironmentName $envName `
         -TenantId $tenantId `
         -SubscriptionId $subscriptionId `
         -Location $datum.Global.ProjectSettings.BuildAgents.AzureLocation `
+        @networkParameters `
         -ErrorAction Stop
     if ($null -eq $vault)
     {

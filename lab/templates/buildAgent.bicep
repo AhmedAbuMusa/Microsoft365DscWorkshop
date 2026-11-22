@@ -95,6 +95,7 @@ resource virtualNetwork 'Microsoft.Network/virtualNetworks@2023-09-01' = {
         name: subnetName
         properties: {
           addressPrefix: '10.40.0.0/24'
+          privateEndpointNetworkPolicies: 'Disabled'
           natGateway: {
             id: natGateway.id
           }

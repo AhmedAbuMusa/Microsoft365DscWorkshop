@@ -1027,6 +1027,14 @@ if ([string]::IsNullOrWhiteSpace($credentialVaultEnvironment) -or
     throw "Set 'CredentialVaultEnvironment' in 'source/Global/ProjectSettings.yml' to an environment defined in 'source/Global/Azure.yml'."
 }
 
+$keyVaultNetworking = if ($sourceProjectSettings -is [System.Collections.IDictionary])
+{
+    $sourceProjectSettings['KeyVaultNetworking']
+}
+elseif ($sourceProjectSettings.PSObject.Properties['KeyVaultNetworking'])
+{
+    $sourceProjectSettings.KeyVaultNetworking
+}
 $resumeIdentity = [ordered]@{
     RepositoryRoot       = $repositoryRoot
     OrganizationName     = $script:OrganizationName
@@ -1054,6 +1062,10 @@ $resumeIdentity = [ordered]@{
             }
         }
     )
+}
+if ($null -ne $keyVaultNetworking)
+{
+    $resumeIdentity.KeyVaultNetworking = $keyVaultNetworking
 }
 $identityJson = ConvertTo-Json -InputObject $resumeIdentity -Depth 10 -Compress
 $identityBytes = [Text.Encoding]::UTF8.GetBytes($identityJson)

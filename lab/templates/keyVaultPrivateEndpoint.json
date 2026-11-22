@@ -1,0 +1,84 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": { "type": "string" },
+    "vaultResourceId": { "type": "string" },
+    "subnetResourceId": { "type": "string" },
+    "endpointName": { "type": "string" },
+    "virtualNetworkIds": { "type": "array" }
+  },
+  "variables": {
+    "zoneName": "privatelink.vaultcore.azure.net"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/privateDnsZones",
+      "apiVersion": "2020-06-01",
+      "name": "[variables('zoneName')]",
+      "location": "global",
+      "properties": {}
+    },
+    {
+      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+      "apiVersion": "2020-06-01",
+      "name": "[format('{0}/vnet-{1}', variables('zoneName'), uniqueString(toLower(parameters('virtualNetworkIds')[copyIndex()])))]",
+      "location": "global",
+      "copy": {
+        "name": "dnsLinks",
+        "count": "[length(parameters('virtualNetworkIds'))]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('zoneName'))]"
+      ],
+      "properties": {
+        "registrationEnabled": false,
+        "virtualNetwork": { "id": "[parameters('virtualNetworkIds')[copyIndex()]]" }
+      }
+    },
+    {
+      "type": "Microsoft.Network/privateEndpoints",
+      "apiVersion": "2023-09-01",
+      "name": "[parameters('endpointName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "subnet": { "id": "[parameters('subnetResourceId')]" },
+        "privateLinkServiceConnections": [
+          {
+            "name": "vault",
+            "properties": {
+              "privateLinkServiceId": "[parameters('vaultResourceId')]",
+              "groupIds": [ "vault" ],
+              "requestMessage": "Microsoft365DSC lab credential connectivity"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2023-09-01",
+      "name": "[format('{0}/vault', parameters('endpointName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateEndpoints', parameters('endpointName'))]",
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('zoneName'))]"
+      ],
+      "properties": {
+        "privateDnsZoneConfigs": [
+          {
+            "name": "vault",
+            "properties": {
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('zoneName'))]"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "endpointResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Network/privateEndpoints', parameters('endpointName'))]"
+    }
+  }
+}

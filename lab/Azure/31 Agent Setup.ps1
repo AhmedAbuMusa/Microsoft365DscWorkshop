@@ -49,6 +49,13 @@ foreach ($envKey in $datum.Global.Azure.Environments.Keys)
     }
 
     $environment = $datum.Global.Azure.Environments[$envKey]
+    $projectName = $datum.Global.ProjectSettings.ProjectName
+    $vm = Get-M365DscAgentVm -ProjectName $projectName -EnvironmentName $envKey -ErrorAction Stop
+    if ($null -eq $vm)
+    {
+        throw "Environment '$envKey': the agent VM must exist before configuring private vault connectivity."
+    }
+    Initialize-M365DscAgentKeyVaultPrivateEndpoint -Datum $datum -EnvironmentName $envKey -VM $vm -ErrorAction Stop
     Write-M365DscEnvironmentContext -EnvironmentName $envKey -TenantName $environment.AzTenantName `
         -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -KeyVaultName $environment.KeyVaultName `
         -Operation 'Installing application certificates'

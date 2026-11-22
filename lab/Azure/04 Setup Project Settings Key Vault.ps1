@@ -119,12 +119,14 @@ if ($null -eq $environment)
 
 Write-M365DscEnvironmentContext -EnvironmentName $environmentName -TenantName $environment.AzTenantName -Operation 'Signing in to configure the project credential vault'
 $context = Connect-M365DscEnvironmentContext -TenantName ([string]$environment.AzTenantName)
+$networkParameters = Get-M365DscKeyVaultNetworkParameters -Datum $datum -EnvironmentName $environmentName
 $vault = Initialize-M365DscKeyVault `
     -ProjectName ([string]$projectSettings.ProjectName) `
     -EnvironmentName $environmentName `
     -TenantId ([string]$context.Tenant.Id) `
     -SubscriptionId ([string]$context.Subscription.Id) `
     -Location ([string]$projectSettings.BuildAgents.AzureLocation) `
+    @networkParameters `
     -ErrorAction Stop
 if ($null -eq $vault)
 {

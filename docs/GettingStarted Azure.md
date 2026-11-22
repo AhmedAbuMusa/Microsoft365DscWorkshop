@@ -40,6 +40,31 @@ After granting operator access to a credential Key Vault, both project-credentia
 
 If Azure reports `Public network access is disabled`, waiting or signing in again will not fix it. Run the provisioning machine with connectivity to the vault's approved private endpoint (for example, inside its connected virtual network or over an approved VPN) and ensure the vault hostname resolves to that endpoint's private IP. Ask the subscription administrator to review Key Vault networking and Azure Policy if needed. The bootstrap does not enable public access, weaken firewall rules, or bypass policy; Azure's trusted-services option does not automatically admit a local PowerShell session.
 
+### Automated Key Vault private endpoints
+
+Configure the existing, reachable endpoint subnet for each private environment in your **local** `source/Global/ProjectSettings.yml` (do not publish subscription-specific settings):
+
+```yaml
+KeyVaultNetworking:
+  Stage:
+    PrivateEndpointSubnetId: /subscriptions/<subscription>/resourceGroups/<network-rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<endpoint-subnet>
+    # Optional connected VNets that use Azure-provided DNS:
+    DnsVirtualNetworkIds:
+      - /subscriptions/<subscription>/resourceGroups/<network-rg>/providers/Microsoft.Network/virtualNetworks/<provisioning-vnet>
+```
+
+Use real resource IDs, repeat the entry for each environment that needs private connectivity, and leave public-only environments absent to preserve their existing behavior. The subnet and linked VNets must already exist in that environment's subscription. Reserve enough free subnet addresses for the endpoint and ensure subnet delegations/NSGs/route policies allow private endpoints and HTTPS. The endpoint is deployed in the subnet's region, which may differ from the vault's region.
+
+On vault creation **or reuse**, the bootstrap registers `Microsoft.Network` if needed, deploys a stable per-subnet private endpoint for the vault's `vault` service, checks connection approval, and provisions `privatelink.vaultcore.azure.net`, VNet links, and a private DNS zone group (Azure maintains the A record). The deployment is incremental and never deletes existing network resources. It also repairs configured project-credential connectivity before reading the PAT on resume. The operator needs deployment permissions in the vault resource group, subnet join permissions, VNet/DNS link permissions, and permission to approve the vault's private endpoint connection. Pending/rejected connections and policy failures stop explicitly.
+
+Provisioning verifies that the **actual vault hostname** resolves to an allocated endpoint IP from the local machine and that TCP 443 is reachable before accessing secrets. Creating a DNS link does not create routes: an on-premises machine still needs an approved VPN/ExpressRoute connection and conditional DNS forwarding for `privatelink.vaultcore.azure.net` through an Azure DNS Private Resolver or suitable DNS forwarder. Additional DNS-linked VNets must be routed to the endpoint subnet. No VPN, address ranges, peering, hosts-file overrides, firewall exceptions, or DNS servers are invented automatically.
+
+Worker creation/adoption and agent setup also provision an endpoint in an otherwise isolated agent VM VNet, with a separate private DNS zone in the agent resource group. This prevents an isolated worker from resolving an unreachable provisioning-endpoint IP. Workers already in the configured or explicitly DNS-linked VNet reuse its endpoint/DNS path; those VNets must have routing in place. Workers with multiple NICs/subnets require an explicit topology and are rejected rather than guessed. DNS zones remain associated with their VNet, so do not link two zones of the same name to one VNet.
+
+New worker subnets explicitly disable private-endpoint network policies so their deny-inbound worker NSG does not block the vault endpoint. Existing/customer subnets and their security policies are not modified automatically; ensure their policies allow the endpoint traffic before adoption.
+
+The ARM template runs using the already pinned `Az.Accounts` and `Az.Resources` dependencies. No `Az.Network`, `Az.PrivateDns`, Bicep CLI, or new module versions are required during the early credential bootstrap. Existing module restore installs these prerequisites normally. Private endpoints have Azure costs; resource cleanup remains an explicit administrator action.
+
 Preparation errors are terminating: the bootstrapper will not mark the machine-preparation phase complete or continue to dependency restoration if the preparation script detects a loaded Az.Accounts assembly or another failure.
 
 The imported Azure build initialization runs the dedicated `azureinit` workflow in a separate no-profile PowerShell process. It loads configuration and Azure build settings without reusing loaded YAML/Datum modules or running the shared `init` workflow, which also performs AutomatedLab-specific initialization. Before tenant or DevOps changes, the bootstrap validates that the imported checkout contains the Azure workflow and build-failure reporting, then imports its pinned Az.Compute module. A failed build or module import leaves initialization incomplete and prevents later stages from running.

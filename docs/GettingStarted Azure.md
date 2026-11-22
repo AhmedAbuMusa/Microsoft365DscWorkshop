@@ -42,7 +42,11 @@ If Azure reports `Public network access is disabled`, waiting or signing in agai
 
 ### Automated Key Vault private endpoints
 
-Configure the existing, reachable endpoint subnet for each private environment in your **local** `source/Global/ProjectSettings.yml` (do not publish subscription-specific settings):
+The bootstrap can discover networking during the environment's Azure sign-in; no Azure login is needed in the editor session. For a vault with public access disabled, it first reads a previously verified `M365DscPrivateEndpointSubnetId` vault tag, then queries the vault's existing private endpoints for their subnet IDs. If neither exists, it enumerates the active subscription's existing VNet subnets, excluding delegated subnets and reserved gateway/firewall/Bastion/Route Server subnets. It selects a subnet only when exactly one candidate exists; otherwise it lists the candidates and stops rather than choosing an arbitrary network. A unique subnet does not guarantee routing: local DNS and TCP connectivity must still pass.
+
+After successful local connectivity validation, the subnet ID is remembered in a vault tag for future runs and credential hydration. Tenant-specific IDs are not written into Git or copied between checkouts. Existing endpoints are reused without changing their private-link connections; their DNS zone groups and links are discovered, missing VNet links are added to the existing zone, and a missing zone group is provisioned. Existing conflicting DNS zones or unapproved connections still require administrator action. Agent setup uses discovered networking too.
+
+An explicit setting takes precedence over discovery. For multiple candidates or a different desired network, configure the existing, reachable endpoint subnet in your **local** `source/Global/ProjectSettings.yml` in both existing checkouts (synchronization preserves each checkout's local settings; do not publish subscription-specific settings):
 
 ```yaml
 KeyVaultNetworking:
@@ -62,6 +66,8 @@ Provisioning verifies that the **actual vault hostname** resolves to an allocate
 Worker creation/adoption and agent setup also provision an endpoint in an otherwise isolated agent VM VNet, with a separate private DNS zone in the agent resource group. This prevents an isolated worker from resolving an unreachable provisioning-endpoint IP. Workers already in the configured or explicitly DNS-linked VNet reuse its endpoint/DNS path; those VNets must have routing in place. Workers with multiple NICs/subnets require an explicit topology and are rejected rather than guessed. DNS zones remain associated with their VNet, so do not link two zones of the same name to one VNet.
 
 New worker subnets explicitly disable private-endpoint network policies so their deny-inbound worker NSG does not block the vault endpoint. Existing/customer subnets and their security policies are not modified automatically; ensure their policies allow the endpoint traffic before adoption.
+
+Remembering the subnet requires permission to update the vault's tags (`Microsoft.Resources/tags/write`). Network discovery requires read access to the vault's private connections, endpoints, and subscription VNets.
 
 The ARM template runs using the already pinned `Az.Accounts` and `Az.Resources` dependencies. No `Az.Network`, `Az.PrivateDns`, Bicep CLI, or new module versions are required during the early credential bootstrap. Existing module restore installs these prerequisites normally. Private endpoints have Azure costs; resource cleanup remains an explicit administrator action.
 

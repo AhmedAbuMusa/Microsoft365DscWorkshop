@@ -57,7 +57,7 @@ BeforeAll {
     . ([scriptblock]::Create($contextFunction.Extent.Text))
     foreach ($functionAst in $helperAst.EndBlock.Statements | Where-Object {
             $_ -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $_.Name -in @('Get-M365DscKeyVaultNetworkParameters', 'Initialize-M365DscKeyVaultPrivateEndpoint', 'Initialize-M365DscAgentKeyVaultPrivateEndpoint')
+            $_.Name -in @('Get-M365DscKeyVaultNetworkParameters', 'Get-M365DscKeyVaultPrivateEndpoints', 'Resolve-M365DscKeyVaultNetworkParameters', 'Initialize-M365DscKeyVaultPrivateEndpoint', 'Initialize-M365DscAgentKeyVaultPrivateEndpoint')
         })
     {
         . ([scriptblock]::Create($functionAst.Extent.Text))
@@ -82,6 +82,18 @@ Describe 'Key Vault private endpoint deployment' {
         }
         $endpointId = '/subscriptions/sub-one/resourceGroups/credential-rg/providers/Microsoft.Network/privateEndpoints/endpoint'
         $nicId = '/subscriptions/sub-one/resourceGroups/credential-rg/providers/Microsoft.Network/networkInterfaces/endpoint-nic'
+        $existingEndpoint = [pscustomobject]@{
+            ResourceId = $endpointId
+            Properties = @{
+                subnet = @{ id = $subnetId }
+                privateLinkServiceConnections = @(@{ properties = @{
+                    privateLinkServiceId = $vault.ResourceId
+                    privateLinkServiceConnectionState = @{ status = 'Approved' }
+                } })
+                networkInterfaces = @(@{ id = $nicId })
+            }
+        }
+        $zoneId = '/subscriptions/sub-one/resourceGroups/dns-rg/providers/Microsoft.Network/privateDnsZones/privatelink.vaultcore.azure.net'
         Mock Write-Host {}
         Mock Import-Module {}
         Mock Import-PowerShellDataFile { @{ 'Az.Resources' = '9.0.1' } }
@@ -90,6 +102,21 @@ Describe 'Key Vault private endpoint deployment' {
         }
         Mock Get-AzResourceProvider { [pscustomobject]@{ RegistrationState = 'Registered' } }
         Mock Register-AzResourceProvider {}
+        Mock Update-AzTag {}
+        Mock Invoke-AzRestMethod {
+            param($Path)
+            $value = @(if ($Path -like '*privateDnsZoneGroups?*')
+            {
+                @(@{ properties = @{ privateDnsZoneConfigs = @(@{ properties = @{ privateDnsZoneId = $zoneId } }) } })
+            }
+            else
+            {
+                @(@{ properties = @{ virtualNetwork = @{ id = $vnetId } } })
+            }
+            )
+            [pscustomobject]@{ StatusCode = 200; Content = (@{ value = $value } | ConvertTo-Json -Depth 10) }
+        }
+        Mock New-AzResource { [pscustomobject]@{ Properties = @{ provisioningState = 'Succeeded' } } }
         Mock New-AzResourceGroupDeployment {
             [pscustomobject]@{
                 ProvisioningState = 'Succeeded'
@@ -144,6 +171,10 @@ Describe 'Key Vault private endpoint deployment' {
         Should -Invoke Test-NetConnection -Times 2 -Exactly -ParameterFilter {
             $ComputerName -eq 'kv-stage.vault.azure.net' -and $Port -eq 443
         }
+        Should -Invoke Update-AzTag -Times 2 -Exactly -ParameterFilter {
+            $ResourceId -eq $vault.ResourceId -and $Tag.M365DscPrivateEndpointSubnetId -eq $subnetId -and
+            $Operation -eq 'Merge' -and $Confirm -eq $false
+        }
     }
 
     It 'Rejects missing and cross-subscription subnet topology before deployment' {
@@ -173,6 +204,7 @@ Describe 'Key Vault private endpoint deployment' {
             Should -Throw '*not Approved*'
 
         Should -Invoke Test-NetConnection -Times 0 -Exactly
+        Should -Invoke Update-AzTag -Times 0 -Exactly
     }
 
     It 'Fails when private DNS resolves a public IP instead of the allocated endpoint IP' {
@@ -221,7 +253,156 @@ Describe 'Key Vault private endpoint deployment' {
         (Get-M365DscKeyVaultNetworkParameters -Datum $datum -EnvironmentName 'Dev').Count | Should -Be 0
     }
 
-    It 'Deploys a separate endpoint and DNS zone for an isolated adopted agent VNet' {
+    It 'Gives explicit settings precedence over remembered topology and preserves public-only behavior' {
+        $vault | Add-Member Tags @{ M365DscPrivateEndpointSubnetId = 'old-subnet' }
+        (Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage -PrivateEndpointSubnetId $subnetId).
+            PrivateEndpointSubnetId | Should -Be $subnetId
+        $vault.Tags.Clear()
+        (Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage).Count | Should -Be 0
+
+        Should -Invoke Get-AzResource -Times 0 -Exactly
+    }
+
+    It 'Reads the previously verified subnet from the vault tag without enumerating networks' {
+        $vault | Add-Member Tags @{ M365DscPrivateEndpointSubnetId = $subnetId }
+
+        (Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage).
+            PrivateEndpointSubnetId | Should -Be $subnetId
+
+        Should -Invoke Get-AzResource -Times 0 -Exactly
+    }
+
+    It 'Discovers the subnet by querying the existing vault private endpoint' {
+        $vault | Add-Member PublicNetworkAccess Disabled
+        Mock Get-AzResource {
+            [pscustomobject]@{ Properties = @{ privateEndpointConnections = @(
+                @{ properties = @{ privateEndpoint = @{ id = $endpointId } } }
+            ) } }
+        } -ParameterFilter { $ResourceId -eq $vault.ResourceId }
+        Mock Get-AzResource { $existingEndpoint } -ParameterFilter { $ResourceId -eq $endpointId }
+
+        (Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage).
+            PrivateEndpointSubnetId | Should -Be $subnetId
+
+        Should -Invoke Get-AzResource -Times 0 -Exactly -ParameterFilter { $ResourceType -eq 'Microsoft.Network/virtualNetworks' }
+    }
+
+    It 'Discovers a unique existing subnet while excluding delegated and reserved subnets' {
+        $vault | Add-Member PublicNetworkAccess Disabled
+        Mock Get-AzResource {
+            [pscustomobject]@{ Properties = @{ subnets = @(
+                @{ name = 'endpoints'; id = $subnetId; properties = @{} }
+                @{ name = 'GatewaySubnet'; id = "$vnetId/subnets/GatewaySubnet"; properties = @{} }
+                @{ name = 'app'; id = "$vnetId/subnets/app"; properties = @{ delegations = @(@{ name = 'app' }) } }
+            ) } }
+        } -ParameterFilter { $ResourceType -eq 'Microsoft.Network/virtualNetworks' }
+
+        (Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage).
+            PrivateEndpointSubnetId | Should -Be $subnetId
+    }
+
+    It 'Lists ambiguous candidates instead of choosing an arbitrary subnet' {
+        $vault | Add-Member PublicNetworkAccess Disabled
+        Mock Get-AzResource {
+            [pscustomobject]@{ Properties = @{ subnets = @(
+                @{ name = 'endpoints'; id = $subnetId; properties = @{} }
+                @{ name = 'other'; id = "$vnetId/subnets/other"; properties = @{} }
+            ) } }
+        } -ParameterFilter { $ResourceType -eq 'Microsoft.Network/virtualNetworks' }
+
+        { Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage } |
+            Should -Throw '*Candidates: */subnets/endpoints, */subnets/other*'
+
+        Should -Invoke New-AzResourceGroupDeployment -Times 0 -Exactly
+        Should -Invoke Update-AzTag -Times 0 -Exactly
+    }
+
+    It 'Stops explicitly when no existing subnet is available or Azure discovery is denied' {
+        $vault | Add-Member PublicNetworkAccess Disabled
+        Mock Get-AzResource {} -ParameterFilter { $ResourceType -eq 'Microsoft.Network/virtualNetworks' }
+        { Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage } |
+            Should -Throw '*Candidates: none*'
+        Mock Get-AzResource { throw 'Azure network inventory denied' } -ParameterFilter { $ResourceType -eq 'Microsoft.Network/virtualNetworks' }
+        { Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage } |
+            Should -Throw '*Azure network inventory denied*'
+    }
+
+    It 'Reuses an existing endpoint and its external DNS zone without redeploying either' {
+        Mock Get-M365DscKeyVaultPrivateEndpoints { $existingEndpoint }
+
+        Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName Stage `
+            -PrivateEndpointSubnetId $subnetId -ValidateLocalConnectivity
+
+        Should -Invoke New-AzResourceGroupDeployment -Times 0 -Exactly
+        Should -Invoke New-AzResource -Times 0 -Exactly
+        Should -Invoke Test-NetConnection -Times 1 -Exactly
+        Should -Invoke Update-AzTag -Times 1 -Exactly
+    }
+
+    It 'Adds requested missing DNS links to the existing zone rather than creating a conflicting zone' {
+        Mock Get-M365DscKeyVaultPrivateEndpoints { $existingEndpoint }
+        $additionalVnetId = '/subscriptions/sub-one/resourceGroups/network-rg/providers/Microsoft.Network/virtualNetworks/connected'
+
+        Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName Stage `
+            -PrivateEndpointSubnetId $subnetId -DnsVirtualNetworkId $additionalVnetId
+
+        Should -Invoke New-AzResourceGroupDeployment -Times 0 -Exactly
+        Should -Invoke New-AzResource -Times 1 -Exactly -ParameterFilter {
+            $ResourceId -like "$zoneId/virtualNetworkLinks/*" -and
+            $PropertyObject.virtualNetwork.id -eq $additionalVnetId -and
+            $PropertyObject.registrationEnabled -eq $false
+        }
+        Should -Invoke Update-AzTag -Times 0 -Exactly
+    }
+
+    It 'Provisions missing DNS infrastructure without replacing an existing private link connection' {
+        Mock Get-M365DscKeyVaultPrivateEndpoints { $existingEndpoint }
+        Mock Invoke-AzRestMethod { [pscustomobject]@{ StatusCode = 200; Content = '{"value":[]}' } }
+
+        Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName Stage -PrivateEndpointSubnetId $subnetId
+
+        Should -Invoke New-AzResourceGroupDeployment -Times 1 -Exactly -ParameterFilter {
+            $TemplateParameterObject.deployEndpoint -eq $false -and
+            $TemplateParameterObject.endpointName -eq 'endpoint'
+        }
+    }
+
+    It 'Reads subsequent DNS-link pages before deciding a VNet link is missing' {
+        Mock Get-M365DscKeyVaultPrivateEndpoints { $existingEndpoint }
+        Mock Invoke-AzRestMethod {
+            param($Path)
+            $body = if ($Path -like '*page=2*')
+            {
+                @{ value = @(@{ properties = @{ virtualNetwork = @{ id = $vnetId } } }) }
+            }
+            else
+            {
+                @{ value = @(); nextLink = "https://management.azure.com$zoneId/virtualNetworkLinks?api-version=2020-06-01&page=2" }
+            }
+            [pscustomobject]@{ StatusCode = 200; Content = ($body | ConvertTo-Json -Depth 10) }
+        } -ParameterFilter { $Path -like '*virtualNetworkLinks?*' }
+
+        Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName Stage -PrivateEndpointSubnetId $subnetId
+
+        Should -Invoke New-AzResource -Times 0 -Exactly
+        Should -Invoke Invoke-AzRestMethod -Times 1 -Exactly -ParameterFilter { $Path -like '*page=2*' }
+    }
+
+    It 'Does not modify DNS resources for an existing unapproved connection' {
+        $existingEndpoint.Properties.privateLinkServiceConnections[0].properties.privateLinkServiceConnectionState.status = 'Pending'
+        Mock Get-M365DscKeyVaultPrivateEndpoints { $existingEndpoint }
+
+        { Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName Stage -PrivateEndpointSubnetId $subnetId } |
+            Should -Throw '*not Approved*'
+
+        Should -Invoke Invoke-AzRestMethod -Times 0 -Exactly
+        Should -Invoke New-AzResourceGroupDeployment -Times 0 -Exactly
+    }
+
+    It 'Deploys a separate endpoint for an isolated agent using remembered topology <UseRememberedSubnet>' -ForEach @(
+        @{ UseRememberedSubnet = $false }
+        @{ UseRememberedSubnet = $true }
+    ) {
         $datum = [pscustomobject]@{
             Global = [pscustomobject]@{
                 ProjectSettings = @{ KeyVaultNetworking = @{ Stage = @{ PrivateEndpointSubnetId = $subnetId } } }
@@ -231,6 +412,11 @@ Describe 'Key Vault private endpoint deployment' {
         $vm = [pscustomobject]@{
             ResourceGroupName = 'agent-rg'
             NetworkProfile = @{ NetworkInterfaces = @(@{ Id = 'agent-nic' }) }
+        }
+        if ($UseRememberedSubnet)
+        {
+            $datum.Global.ProjectSettings.Clear()
+            $vault | Add-Member Tags @{ M365DscPrivateEndpointSubnetId = $subnetId }
         }
         Mock Get-AzKeyVault { $vault }
         Mock Get-AzResource {

@@ -361,6 +361,110 @@ function Get-M365DscKeyVaultNetworkParameters
     }
 }
 
+function Get-M365DscKeyVaultPrivateEndpoints
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [object]$Vault
+    )
+
+    $resource = Get-AzResource -ResourceId $Vault.ResourceId -ApiVersion '2023-07-01' -ExpandProperties -ErrorAction Stop
+    if ($null -eq $resource)
+    {
+        throw "Could not read networking for Key Vault '$($Vault.VaultName)'."
+    }
+    foreach ($connection in $resource.Properties.privateEndpointConnections)
+    {
+        $endpointId = [string]$connection.properties.privateEndpoint.id
+        if ([string]::IsNullOrWhiteSpace($endpointId))
+        {
+            throw "Key Vault '$($Vault.VaultName)' has a private connection without an endpoint resource ID."
+        }
+        $endpoint = Get-AzResource -ResourceId $endpointId -ApiVersion '2023-09-01' -ExpandProperties -ErrorAction Stop
+        if ($null -eq $endpoint -or [string]::IsNullOrWhiteSpace([string]$endpoint.Properties.subnet.id))
+        {
+            throw "Could not resolve the subnet of private endpoint '$endpointId'."
+        }
+        $endpoint
+    }
+}
+
+function Resolve-M365DscKeyVaultNetworkParameters
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [object]$Vault,
+
+        [Parameter(Mandatory)]
+        [string]$EnvironmentName,
+
+        [Parameter()]
+        [string]$PrivateEndpointSubnetId,
+
+        [Parameter()]
+        [string[]]$DnsVirtualNetworkId
+    )
+
+    if ($PrivateEndpointSubnetId)
+    {
+        return @{ PrivateEndpointSubnetId = $PrivateEndpointSubnetId; DnsVirtualNetworkId = @($DnsVirtualNetworkId) }
+    }
+    $rememberedSubnetId = if ($Vault.Tags) { [string]$Vault.Tags['M365DscPrivateEndpointSubnetId'] }
+    if (-not $rememberedSubnetId -and $Vault.PublicNetworkAccess -ne 'Disabled')
+    {
+        return @{}
+    }
+
+    $subscriptionId = (Get-AzContext -ErrorAction Stop).Subscription.Id
+    if ($Vault.ResourceId -notmatch '^/subscriptions/([^/]+)/resourceGroups/[^/]+/providers/Microsoft\.KeyVault/vaults/[^/]+$' -or
+        $Matches[1] -ne $subscriptionId)
+    {
+        throw "Environment '$EnvironmentName': network discovery requires the vault's active Azure subscription."
+    }
+    $requiredVersions = Import-PowerShellDataFile -Path $PSScriptRoot\..\..\RequiredModules.psd1 -ErrorAction Stop
+    Import-Module Az.Resources -RequiredVersion $requiredVersions['Az.Resources'] -ErrorAction Stop
+    $selectedSubnetId = $rememberedSubnetId
+    $source = 'the vault tag'
+    if (-not $selectedSubnetId)
+    {
+        $subnetIds = @(Get-M365DscKeyVaultPrivateEndpoints -Vault $Vault |
+            ForEach-Object { $_.Properties.subnet.id } | Sort-Object -Unique)
+        $source = 'existing vault private endpoints'
+        if ($subnetIds.Count -eq 0)
+        {
+            $vnets = @(Get-AzResource -ResourceType 'Microsoft.Network/virtualNetworks' -ApiVersion '2023-09-01' `
+                -ExpandProperties -ErrorAction Stop)
+            $subnetIds = @(
+                foreach ($vnet in $vnets)
+                {
+                    foreach ($subnet in $vnet.Properties.subnets)
+                    {
+                        if ($subnet.name -notin @('GatewaySubnet', 'AzureFirewallSubnet', 'AzureFirewallManagementSubnet', 'AzureBastionSubnet', 'RouteServerSubnet') -and
+                            @($subnet.properties.delegations | Where-Object { $null -ne $_ }).Count -eq 0 -and
+                            -not [string]::IsNullOrWhiteSpace([string]$subnet.id))
+                        {
+                            $subnet.id
+                        }
+                    }
+                }
+            ) | Sort-Object -Unique
+            $subnetIds = @($subnetIds)
+            $source = 'the only eligible existing subnet in the subscription'
+        }
+        if ($subnetIds.Count -ne 1)
+        {
+            $candidates = if ($subnetIds.Count -gt 0) { $subnetIds -join ', ' } else { 'none' }
+            throw "Environment '$EnvironmentName': cannot uniquely discover a private endpoint subnet for '$($Vault.VaultName)'. Candidates: $candidates. Set KeyVaultNetworking.$EnvironmentName.PrivateEndpointSubnetId to an existing subnet reachable from the provisioning machine; no network was guessed or created."
+        }
+        $selectedSubnetId = $subnetIds[0]
+    }
+
+    Write-Host "[Environment: $EnvironmentName] Discovered private endpoint subnet '$selectedSubnetId' from $source."
+    return @{ PrivateEndpointSubnetId = [string]$selectedSubnetId; DnsVirtualNetworkId = @($DnsVirtualNetworkId) }
+}
+
 function Initialize-M365DscKeyVaultPrivateEndpoint
 {
     [CmdletBinding()]
@@ -441,36 +545,129 @@ function Initialize-M365DscKeyVaultPrivateEndpoint
         [Text.Encoding]::UTF8.GetBytes($PrivateEndpointSubnetId.ToLowerInvariant())
     )).Substring(0, 8).ToLowerInvariant()
     $endpointName = "$($Vault.VaultName)-pe-$endpointSuffix"
+    $existingEndpoints = @(Get-M365DscKeyVaultPrivateEndpoints -Vault $Vault |
+        Where-Object { $_.Properties.subnet.id -eq $PrivateEndpointSubnetId })
+    if ($existingEndpoints.Count -gt 1)
+    {
+        throw "Environment '$EnvironmentName': multiple vault private endpoints use subnet '$PrivateEndpointSubnetId'; refusing to replace an arbitrary endpoint."
+    }
+    if ($existingEndpoints.Count -eq 1)
+    {
+        if ($existingEndpoints[0].ResourceId -notmatch '^/subscriptions/([^/]+)/resourceGroups/([^/]+)/providers/Microsoft\.Network/privateEndpoints/([^/]+)$' -or
+            $Matches[1] -ne $subscriptionId)
+        {
+            throw "Environment '$EnvironmentName': the existing private endpoint must belong to the active subscription."
+        }
+        $EndpointResourceGroupName = $Matches[2]
+        $endpointName = $Matches[3]
+        Write-Host "[Environment: $EnvironmentName] Reusing existing private endpoint '$endpointName' in '$EndpointResourceGroupName'."
+    }
     Write-M365DscEnvironmentContext -EnvironmentName $EnvironmentName -TenantName (Get-AzContext).Tenant.Id `
         -KeyVaultName $Vault.VaultName -Operation "Provisioning private endpoint '$endpointName' and private DNS"
-    $deployment = New-AzResourceGroupDeployment `
-        -Name $endpointName `
-        -ResourceGroupName $EndpointResourceGroupName `
-        -TemplateFile $PSScriptRoot\..\templates\keyVaultPrivateEndpoint.json `
-        -TemplateParameterObject @{
-            location          = $vnet.Location
-            vaultResourceId   = $Vault.ResourceId
-            subnetResourceId  = $PrivateEndpointSubnetId
-            endpointName      = $endpointName
-            virtualNetworkIds = $virtualNetworkIds
-        } `
-        -Mode Incremental -Force -ErrorAction Stop
-    if ($deployment.ProvisioningState -ne 'Succeeded')
-    {
-        throw "Environment '$EnvironmentName': private endpoint deployment failed (state '$($deployment.ProvisioningState)')."
+    $templateParameters = @{
+        location          = $vnet.Location
+        vaultResourceId   = $Vault.ResourceId
+        subnetResourceId  = $PrivateEndpointSubnetId
+        endpointName      = $endpointName
+        virtualNetworkIds = $virtualNetworkIds
     }
-    $endpointId = $deployment.Outputs.endpointResourceId.Value
-    if ([string]::IsNullOrWhiteSpace([string]$endpointId))
+    if ($existingEndpoints.Count -eq 1)
     {
-        throw "Environment '$EnvironmentName': private endpoint deployment returned no endpoint resource ID."
+        $endpoint = $existingEndpoints[0]
     }
-    $endpoint = Get-AzResource -ResourceId $endpointId -ApiVersion '2023-09-01' -ExpandProperties -ErrorAction Stop
-    $connections = @($endpoint.Properties.privateLinkServiceConnections)
+    else
+    {
+        $deployment = New-AzResourceGroupDeployment -Name $endpointName -ResourceGroupName $EndpointResourceGroupName `
+            -TemplateFile $PSScriptRoot\..\templates\keyVaultPrivateEndpoint.json -TemplateParameterObject $templateParameters `
+            -Mode Incremental -Force -ErrorAction Stop
+        if ($deployment.ProvisioningState -ne 'Succeeded')
+        {
+            throw "Environment '$EnvironmentName': private endpoint deployment failed (state '$($deployment.ProvisioningState)')."
+        }
+        $endpointId = $deployment.Outputs.endpointResourceId.Value
+        if ([string]::IsNullOrWhiteSpace([string]$endpointId))
+        {
+            throw "Environment '$EnvironmentName': private endpoint deployment returned no endpoint resource ID."
+        }
+        $endpoint = Get-AzResource -ResourceId $endpointId -ApiVersion '2023-09-01' -ExpandProperties -ErrorAction Stop
+    }
+    $connections = @(@($endpoint.Properties.privateLinkServiceConnections) + @($endpoint.Properties.manualPrivateLinkServiceConnections) |
+        Where-Object { $null -ne $_ })
     if ($connections.Count -ne 1 -or
         $connections[0].properties.privateLinkServiceId -ne $Vault.ResourceId -or
         $connections[0].properties.privateLinkServiceConnectionState.status -ne 'Approved')
     {
         throw "Environment '$EnvironmentName': private endpoint '$endpointName' is not Approved for this vault. Ask a vault administrator to approve its connection."
+    }
+
+    if ($existingEndpoints.Count -eq 1)
+    {
+        $response = Invoke-AzRestMethod -Path "$($endpoint.ResourceId)/privateDnsZoneGroups?api-version=2023-09-01" `
+            -Method GET -ErrorAction Stop
+        if ($response.StatusCode -ne 200)
+        {
+            throw "Environment '$EnvironmentName': could not query existing endpoint DNS groups (HTTP $($response.StatusCode)). $($response.Content)"
+        }
+        $zoneGroupResponse = $response.Content | ConvertFrom-Json -ErrorAction Stop
+        if ($zoneGroupResponse.value -isnot [array])
+        {
+            throw "Environment '$EnvironmentName': Azure returned an invalid private DNS zone group list."
+        }
+        $zoneGroups = @($zoneGroupResponse.value)
+        if ($zoneGroups.Count -eq 0)
+        {
+            $templateParameters.deployEndpoint = $false
+            $deployment = New-AzResourceGroupDeployment -Name "$endpointName-dns" -ResourceGroupName $EndpointResourceGroupName `
+                -TemplateFile $PSScriptRoot\..\templates\keyVaultPrivateEndpoint.json -TemplateParameterObject $templateParameters `
+                -Mode Incremental -Force -ErrorAction Stop
+            if ($deployment.ProvisioningState -ne 'Succeeded')
+            {
+                throw "Environment '$EnvironmentName': existing endpoint DNS deployment failed (state '$($deployment.ProvisioningState)')."
+            }
+        }
+        else
+        {
+            $zoneIds = @($zoneGroups.properties.privateDnsZoneConfigs.properties.privateDnsZoneId |
+                Where-Object { $_ -like '*/privateDnsZones/privatelink.vaultcore.azure.net' } | Sort-Object -Unique)
+            if ($zoneIds.Count -ne 1 -or $zoneIds[0] -notlike "/subscriptions/$subscriptionId/*")
+            {
+                throw "Environment '$EnvironmentName': could not uniquely resolve the existing endpoint's Key Vault private DNS zone in the active subscription."
+            }
+            $zoneId = $zoneIds[0]
+            $linkedVnets = @()
+            $linksPath = "$zoneId/virtualNetworkLinks?api-version=2020-06-01"
+            do
+            {
+                $response = Invoke-AzRestMethod -Path $linksPath -Method GET -ErrorAction Stop
+                if ($response.StatusCode -ne 200)
+                {
+                    throw "Environment '$EnvironmentName': could not query private DNS VNet links (HTTP $($response.StatusCode)). $($response.Content)"
+                }
+                $linkResponse = $response.Content | ConvertFrom-Json -ErrorAction Stop
+                if ($linkResponse.value -isnot [array])
+                {
+                    throw "Environment '$EnvironmentName': Azure returned an invalid private DNS VNet link list."
+                }
+                $linkedVnets += @($linkResponse.value.properties.virtualNetwork.id)
+                $linksPath = if ($linkResponse.nextLink) { ([uri]$linkResponse.nextLink).PathAndQuery } else { $null }
+            } while ($linksPath)
+            foreach ($vnetId in $virtualNetworkIds)
+            {
+                if ($vnetId -notin $linkedVnets)
+                {
+                    $linkSuffix = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+                        [Text.Encoding]::UTF8.GetBytes($vnetId)
+                    )).Substring(0, 8).ToLowerInvariant()
+                    $link = New-AzResource -ResourceId "$zoneId/virtualNetworkLinks/vnet-dsc-$linkSuffix" -ApiVersion '2020-06-01' `
+                        -Location global -PropertyObject @{ registrationEnabled = $false; virtualNetwork = @{ id = $vnetId } } `
+                        -Force -ErrorAction Stop
+                    if ($link.Properties.provisioningState -ne 'Succeeded')
+                    {
+                        throw "Environment '$EnvironmentName': private DNS VNet link failed (state '$($link.Properties.provisioningState)')."
+                    }
+                }
+            }
+        }
     }
 
     if ($ValidateLocalConnectivity)
@@ -519,6 +716,12 @@ function Initialize-M365DscKeyVaultPrivateEndpoint
         {
             throw "Environment '$EnvironmentName': the provisioning machine cannot reach '$vaultHost' on TCP 443. Connect it to the endpoint VNet using approved routing/VPN before continuing."
         }
+        if (-not $Vault.Tags -or $Vault.Tags['M365DscPrivateEndpointSubnetId'] -ne $PrivateEndpointSubnetId)
+        {
+            Update-AzTag -ResourceId $Vault.ResourceId -Tag @{ M365DscPrivateEndpointSubnetId = $PrivateEndpointSubnetId } `
+                -Operation Merge -Confirm:$false -ErrorAction Stop | Out-Null
+            Write-Host "[Environment: $EnvironmentName] Remembered the verified subnet on Key Vault '$($Vault.VaultName)' for subsequent runs."
+        }
     }
 }
 
@@ -537,12 +740,13 @@ function Initialize-M365DscAgentKeyVaultPrivateEndpoint
     )
 
     $parameters = Get-M365DscKeyVaultNetworkParameters -Datum $Datum -EnvironmentName $EnvironmentName
+    $environment = $Datum.Global.Azure.Environments[$EnvironmentName]
+    $vault = Get-AzKeyVault -VaultName $environment.KeyVaultName -ErrorAction Stop
+    $parameters = Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName $EnvironmentName @parameters
     if ($parameters.Count -eq 0)
     {
         return
     }
-    $environment = $Datum.Global.Azure.Environments[$EnvironmentName]
-    $vault = Get-AzKeyVault -VaultName $environment.KeyVaultName -ErrorAction Stop
     $nicReferences = @($VM.NetworkProfile.NetworkInterfaces)
     if ($nicReferences.Count -ne 1)
     {
@@ -824,11 +1028,12 @@ function Initialize-M365DscKeyVault
             -ErrorAction Stop | Out-Null
     }
 
-    if ($PrivateEndpointSubnetId)
+    $networkParameters = Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName $EnvironmentName `
+        -PrivateEndpointSubnetId $PrivateEndpointSubnetId -DnsVirtualNetworkId $DnsVirtualNetworkId
+    if ($networkParameters.Count -gt 0)
     {
         Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName $EnvironmentName `
-            -PrivateEndpointSubnetId $PrivateEndpointSubnetId -DnsVirtualNetworkId $DnsVirtualNetworkId `
-            -ValidateLocalConnectivity -ErrorAction Stop
+            @networkParameters -ValidateLocalConnectivity -ErrorAction Stop
     }
 
     return $vault
@@ -1122,9 +1327,10 @@ function Get-M365DscProjectSettingsFromKeyVault
         -SubscriptionId $context.Subscription.Id
 
     $networkParameters = Get-M365DscKeyVaultNetworkParameters -Datum $Datum -EnvironmentName $environmentName
+    $vault = Get-AzKeyVault -VaultName $vaultName -ErrorAction Stop
+    $networkParameters = Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName $environmentName @networkParameters
     if ($networkParameters.Count -gt 0)
     {
-        $vault = Get-AzKeyVault -VaultName $vaultName -ErrorAction Stop
         Initialize-M365DscKeyVaultPrivateEndpoint -Vault $vault -EnvironmentName $environmentName `
             @networkParameters -ValidateLocalConnectivity -ErrorAction Stop
     }

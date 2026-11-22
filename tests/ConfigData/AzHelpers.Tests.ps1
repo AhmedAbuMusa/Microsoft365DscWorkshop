@@ -416,8 +416,28 @@ Describe 'M365Dsc Key Vault naming' {
 }
 
 Describe 'Project settings Key Vault hydration' {
-    It 'Should load the PAT and build-agent password into memory without changing the configured vault environment' {
+    BeforeAll {
+        Remove-Module -Name AzHelpers -Force
+        Import-Module -Name $PSScriptRoot\..\..\lab\Azure\AzHelpers.psm1 -Force
+    }
+
+    AfterAll {
+        Remove-Module -Name AzHelpers -Force
+        Import-Module -Name $PSScriptRoot\..\..\lab\AutomatedLab\AzHelpers.psm1 -Force
+    }
+
+    BeforeEach {
         InModuleScope -ModuleName AzHelpers {
+            Mock Get-AzKeyVault { [pscustomobject]@{ VaultName = 'vault-name'; PublicNetworkAccess = 'Enabled' } }
+        }
+    }
+
+    It 'Should load credentials with discovered private networking <PrivateNetworking> without changing the configured vault environment' -ForEach @(
+        @{ PrivateNetworking = $false }
+        @{ PrivateNetworking = $true }
+    ) {
+        InModuleScope -ModuleName AzHelpers -Parameters @{ PrivateNetworking = $PrivateNetworking } {
+            param($PrivateNetworking)
             $datum = [pscustomobject]@{
                 Global = [pscustomobject]@{
                     ProjectSettings = [pscustomobject]@{
@@ -443,6 +463,13 @@ Describe 'Project settings Key Vault hydration' {
                 }
             }
             Mock -CommandName Resolve-M365DscKeyVaultName -MockWith { 'vault-name' }
+            Mock Initialize-M365DscKeyVaultPrivateEndpoint {}
+            if ($PrivateNetworking)
+            {
+                Mock Resolve-M365DscKeyVaultNetworkParameters {
+                    @{ PrivateEndpointSubnetId = '/subscriptions/subscription-id/resourceGroups/network-rg/providers/Microsoft.Network/virtualNetworks/vnet/subnets/endpoints' }
+                }
+            }
             Mock -CommandName Test-M365DscKeyVaultSecret -MockWith {
                 param($VaultName, $Name)
                 $true
@@ -463,6 +490,10 @@ Describe 'Project settings Key Vault hydration' {
             $result.Global.ProjectSettings.CredentialVaultEnvironment | Should -Be 'Dev'
             Should -Invoke Connect-M365DscEnvironmentContext -Times 1 -Exactly
             Should -Invoke Get-M365DscKeyVaultSecret -Times 2 -Exactly
+            Should -Invoke Initialize-M365DscKeyVaultPrivateEndpoint -Times ([int]$PrivateNetworking) -Exactly -ParameterFilter {
+                $EnvironmentName -eq 'Dev' -and $ValidateLocalConnectivity -and
+                $PrivateEndpointSubnetId -like '*/vnet/subnets/endpoints'
+            }
         }
     }
 
@@ -512,8 +543,22 @@ Describe 'Project settings Key Vault hydration' {
 }
 
 Describe 'M365Dsc Key Vault initialization' {
-    It 'Should reuse an existing RBAC Key Vault without prompting or deleting resources' {
-        InModuleScope -ModuleName AzHelpers {
+    BeforeAll {
+        Remove-Module -Name AzHelpers -Force
+        Import-Module -Name $PSScriptRoot\..\..\lab\Azure\AzHelpers.psm1 -Force
+    }
+
+    AfterAll {
+        Remove-Module -Name AzHelpers -Force
+        Import-Module -Name $PSScriptRoot\..\..\lab\AutomatedLab\AzHelpers.psm1 -Force
+    }
+
+    It 'Should reuse an existing RBAC Key Vault with private networking <PrivateNetworking> without prompting or deleting resources' -ForEach @(
+        @{ PrivateNetworking = $false }
+        @{ PrivateNetworking = $true }
+    ) {
+        InModuleScope -ModuleName AzHelpers -Parameters @{ PrivateNetworking = $PrivateNetworking } {
+            param($PrivateNetworking)
             $subscriptionId = '9522bd96-d34f-4910-9667-0517ab5dc595'
             $vaultName = Get-M365DscKeyVaultName `
                 -ProjectName 'DSC' `
@@ -554,6 +599,13 @@ Describe 'M365Dsc Key Vault initialization' {
             Mock -CommandName New-AzKeyVault
             Mock -CommandName Update-AzKeyVault
             Mock -CommandName Update-AzTag
+            Mock Initialize-M365DscKeyVaultPrivateEndpoint {}
+            if ($PrivateNetworking)
+            {
+                Mock Resolve-M365DscKeyVaultNetworkParameters {
+                    @{ PrivateEndpointSubnetId = "/subscriptions/$subscriptionId/resourceGroups/network-rg/providers/Microsoft.Network/virtualNetworks/vnet/subnets/endpoints" }
+                }
+            }
 
             $result = Initialize-M365DscKeyVault `
                 -ProjectName 'DSC' `
@@ -572,6 +624,10 @@ Describe 'M365Dsc Key Vault initialization' {
                 $Tag['M365DscKeyVaultName'] -eq $vaultName -and
                 $Operation -eq 'Merge' -and
                 $Confirm -eq $false
+            }
+            Should -Invoke Initialize-M365DscKeyVaultPrivateEndpoint -Times ([int]$PrivateNetworking) -Exactly -ParameterFilter {
+                $EnvironmentName -eq 'Test' -and $ValidateLocalConnectivity -and
+                $PrivateEndpointSubnetId -like '*/vnet/subnets/endpoints'
             }
         }
     }
@@ -746,7 +802,7 @@ Describe 'M365Dsc Key Vault initialization' {
                         -Generation $_
                 }
             )
-            $activeVaults = @(
+            $fixtureActiveVaults = @(
                 [pscustomobject]@{
                     VaultName               = $candidateNames[1]
                     ResourceGroupName       = $resourceGroupName
@@ -783,11 +839,11 @@ Describe 'M365Dsc Key Vault initialization' {
                 }
                 elseif ($VaultName)
                 {
-                    $activeVaults | Where-Object VaultName -IEQ $VaultName
+                    $fixtureActiveVaults | Where-Object VaultName -IEQ $VaultName
                 }
                 else
                 {
-                    $activeVaults | ForEach-Object {
+                    $fixtureActiveVaults | ForEach-Object {
                         [pscustomobject]@{
                             VaultName               = $_.VaultName
                             ResourceGroupName       = $_.ResourceGroupName

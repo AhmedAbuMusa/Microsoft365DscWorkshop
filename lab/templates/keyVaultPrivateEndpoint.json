@@ -6,6 +6,7 @@
     "vaultResourceId": { "type": "string" },
     "subnetResourceId": { "type": "string" },
     "endpointName": { "type": "string" },
+    "deployEndpoint": { "type": "bool", "defaultValue": true },
     "virtualNetworkIds": { "type": "array" }
   },
   "variables": {
@@ -38,6 +39,7 @@
     },
     {
       "type": "Microsoft.Network/privateEndpoints",
+      "condition": "[parameters('deployEndpoint')]",
       "apiVersion": "2023-09-01",
       "name": "[parameters('endpointName')]",
       "location": "[parameters('location')]",

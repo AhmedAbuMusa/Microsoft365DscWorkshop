@@ -43,10 +43,30 @@ function Write-BootstrapPhase
     )
 
     $script:BootstrapPhase = $Index
+    $script:BootstrapPhaseStartedAt = [DateTimeOffset]::Now
+    $script:BootstrapPhaseTimer = [Diagnostics.Stopwatch]::StartNew()
     Write-Host ''
     Write-Host ('=' * 78) -ForegroundColor DarkCyan
     Write-Host ('Phase {0:D2}/{1:D2}: {2}' -f $Index, $script:BootstrapPhaseCount, $Description) -ForegroundColor Cyan
     Write-Host ('=' * 78) -ForegroundColor DarkCyan
+    Write-Host ('Started: {0}' -f $script:BootstrapPhaseStartedAt.ToString('yyyy-MM-dd HH:mm:ss.fff zzz')) -ForegroundColor Cyan
+}
+
+function Complete-BootstrapPhase
+{
+    param
+    (
+        [Parameter(Mandatory)]
+        [ValidateSet('Completed', 'Failed', 'Skipped')]
+        [string]$Status
+    )
+
+    $script:BootstrapPhaseTimer.Stop()
+    $finishedAt = [DateTimeOffset]::Now
+    $color = if ($Status -eq 'Failed') { 'Red' } elseif ($Status -eq 'Skipped') { 'DarkGray' } else { 'Green' }
+    Write-Host ('Phase {0:D2}/{1:D2} finished: {2} | Status: {3} | Elapsed: {4:F3}s' -f
+        $script:BootstrapPhase, $script:BootstrapPhaseCount, $finishedAt.ToString('yyyy-MM-dd HH:mm:ss.fff zzz'),
+        $Status, $script:BootstrapPhaseTimer.Elapsed.TotalSeconds) -ForegroundColor $color
 }
 
 function Assert-FreshAzureSession
@@ -157,19 +177,19 @@ function Invoke-BootstrapStage
         [scriptblock]$Action
     )
 
-    $script:BootstrapPhase = $Index
-    if ($Name -in $script:BootstrapCheckpoint.CompletedStages)
-    {
-        $phaseLabel = '{0:D2}/{1:D2}' -f $Index, $script:BootstrapPhaseCount
-        Write-Host "Skipping completed phase $phaseLabel`: $Description" -ForegroundColor DarkGray
-        return
-    }
-
     Write-BootstrapPhase -Index $Index -Description $Description
-    $script:BootstrapCheckpoint.CurrentStage = $Name
-    Save-BootstrapCheckpoint
+    $phaseStatus = 'Failed'
     try
     {
+        if ($Name -in $script:BootstrapCheckpoint.CompletedStages)
+        {
+            $phaseLabel = '{0:D2}/{1:D2}' -f $Index, $script:BootstrapPhaseCount
+            Write-Host "Skipping completed phase $phaseLabel`: $Description" -ForegroundColor DarkGray
+            $phaseStatus = 'Skipped'
+            return
+        }
+        $script:BootstrapCheckpoint.CurrentStage = $Name
+        Save-BootstrapCheckpoint
         & $Action
         $script:BootstrapCheckpoint.CompletedStages = @(
             $script:BootstrapCheckpoint.CompletedStages
@@ -177,11 +197,16 @@ function Invoke-BootstrapStage
         ) | Select-Object -Unique
         $script:BootstrapCheckpoint.CurrentStage = $null
         Save-BootstrapCheckpoint
+        $phaseStatus = 'Completed'
     }
     catch
     {
         Write-Host "Bootstrap failed during phase $($Index)/$($script:BootstrapPhaseCount): $($_.Exception.Message)" -ForegroundColor Red
         throw
+    }
+    finally
+    {
+        Complete-BootstrapPhase -Status $phaseStatus
     }
 }
 
@@ -939,205 +964,221 @@ if ($env:PSModulePath -notlike "*$sourceRequiredModules*")
     $env:PSModulePath = "$sourceRequiredModules;$env:PSModulePath"
 }
 
-$dependenciesAvailable = Test-SourceDependencyRestoreComplete `
-    -RepositoryRoot $repositoryRoot `
-    -RequiredModulesPath $sourceRequiredModules `
-    -ForceRestore:$ForceDependencyRestore
+Write-BootstrapPhase -Index 1 -Description 'Restore dependencies for the source checkout'
+$phaseStatus = 'Failed'
+try
+{
+    $dependenciesAvailable = Test-SourceDependencyRestoreComplete `
+        -RepositoryRoot $repositoryRoot `
+        -RequiredModulesPath $sourceRequiredModules `
+        -ForceRestore:$ForceDependencyRestore
 
-if ($dependenciesAvailable)
-{
-    Write-Host 'Skipping phase 01/12: all required dependency versions are already installed.' -ForegroundColor DarkGray
-}
-else
-{
-    $yamlModuleRoot = Join-Path -Path $sourceRequiredModules -ChildPath 'powershell-yaml'
-    $yamlModuleManifest = Get-ChildItem -LiteralPath $yamlModuleRoot -Filter 'powershell-yaml.psd1' -File -Recurse -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    $dependencyRestoreArguments = @('-UsePSResourceGet')
-    if (-not $yamlModuleManifest)
+    if ($dependenciesAvailable)
     {
-        $dependencyRestoreArguments += '-WithYAML'
+        Write-Host ('Skipping phase 01/{0:D2}: all required dependency versions are already installed.' -f $script:BootstrapPhaseCount) -ForegroundColor DarkGray
+        $phaseStatus = 'Skipped'
     }
     else
     {
-        $dependencyRestoreArguments += '-WithYAML:$false'
-        Write-Host "Using existing PowerShell-Yaml module at '$($yamlModuleManifest.FullName)'; it is excluded as a direct restore target, but another package may still request it as a transitive dependency." -ForegroundColor Yellow
-    }
+        $yamlModuleRoot = Join-Path -Path $sourceRequiredModules -ChildPath 'powershell-yaml'
+        $yamlModuleManifest = Get-ChildItem -LiteralPath $yamlModuleRoot -Filter 'powershell-yaml.psd1' -File -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        $dependencyRestoreArguments = @('-UsePSResourceGet')
+        if (-not $yamlModuleManifest)
+        {
+            $dependencyRestoreArguments += '-WithYAML'
+        }
+        else
+        {
+            $dependencyRestoreArguments += '-WithYAML:$false'
+            Write-Host "Using existing PowerShell-Yaml module at '$($yamlModuleManifest.FullName)'; it is excluded as a direct restore target, but another package may still request it as a transitive dependency." -ForegroundColor Yellow
+        }
 
-    $sourceDependencyScript = Join-Path -Path $repositoryRoot -ChildPath 'Resolve-Dependency.ps1'
-    Write-BootstrapPhase -Index 1 -Description 'Restore dependencies for the source checkout'
-    Write-Host "Running file: '$sourceDependencyScript' $($dependencyRestoreArguments -join ' ')."
-    try
-    {
+        $sourceDependencyScript = Join-Path -Path $repositoryRoot -ChildPath 'Resolve-Dependency.ps1'
+        Write-Host "Running file: '$sourceDependencyScript' $($dependencyRestoreArguments -join ' ')."
         & $pwshCommand.Source -NoLogo -NoProfile -File $sourceDependencyScript @dependencyRestoreArguments
         if ($LASTEXITCODE -ne 0)
         {
             throw "Source dependency restore failed with exit code $LASTEXITCODE."
         }
+        Write-Host 'Completed source checkout dependency restore.' -ForegroundColor Green
+        $phaseStatus = 'Completed'
     }
-    catch
-    {
-        Write-Host "Bootstrap failed during phase $($script:BootstrapPhase)/$($script:BootstrapPhaseCount): $($_.Exception.Message)" -ForegroundColor Red
-        throw
-    }
-    Write-Host 'Completed source checkout dependency restore.' -ForegroundColor Green
 }
-
-Import-Module -Name Datum -ErrorAction Stop
-Import-Module -Name Datum.ProtectedData -ErrorAction Stop
+catch
+{
+    Write-Host "Bootstrap failed during phase $($script:BootstrapPhase)/$($script:BootstrapPhaseCount): $($_.Exception.Message)" -ForegroundColor Red
+    throw
+}
+finally
+{
+    Complete-BootstrapPhase -Status $phaseStatus
+}
 
 Write-BootstrapPhase -Index 2 -Description 'Read and validate project and tenant configuration'
-$sourceDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $repositoryRoot -ChildPath 'source\Datum.yml')
-$sourceProjectSettings = $sourceDatum.Global.ProjectSettings
-$script:OrganizationName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'OrganizationName' -Path 'source/Global/ProjectSettings.yml: OrganizationName')
-$script:ProjectName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'ProjectName' -Path 'source/Global/ProjectSettings.yml: ProjectName')
-$script:RepositoryName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'RepositoryName' -Path 'source/Global/ProjectSettings.yml: RepositoryName')
-$localPathValue = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'LocalPath' -Path 'source/Global/ProjectSettings.yml: LocalPath')
-$null = Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'AgentPoolName' -Path 'source/Global/ProjectSettings.yml: AgentPoolName'
-$buildAgentUserName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'UserName' -Path 'source/Global/ProjectSettings.yml: BuildAgents.UserName')
-$null = Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'AzureLocation' -Path 'source/Global/ProjectSettings.yml: BuildAgents.AzureLocation'
-$buildAgentVmSize = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'AzureRoleSize' -Path 'source/Global/ProjectSettings.yml: BuildAgents.AzureRoleSize')
+$phaseStatus = 'Failed'
+try
+{
+    Import-Module -Name Datum -ErrorAction Stop
+    Import-Module -Name Datum.ProtectedData -ErrorAction Stop
 
-if ($script:OrganizationName -notmatch '^[A-Za-z0-9._-]+$')
-{
-    throw "Invalid OrganizationName in 'source/Global/ProjectSettings.yml'."
-}
-if ($script:ProjectName -notmatch '^[A-Za-z0-9._ -]+$' -or
-    $script:RepositoryName -notmatch '^[A-Za-z0-9._ -]+$')
-{
-    throw 'ProjectName and RepositoryName in ProjectSettings.yml may contain only letters, digits, spaces, periods, underscores, and hyphens.'
-}
-if ($buildAgentUserName -notmatch '^[A-Za-z0-9._-]+$' -or $buildAgentVmSize -notmatch '^[A-Za-z0-9_]+$')
-{
-    throw 'BuildAgents.UserName or BuildAgents.AzureRoleSize in ProjectSettings.yml contains unsupported characters.'
-}
-$resolvedLocalPath = [IO.Path]::GetFullPath($localPathValue)
-$repositoryPrefix = $repositoryRoot.TrimEnd('\') + '\'
-if ($resolvedLocalPath.Equals($repositoryRoot, [StringComparison]::OrdinalIgnoreCase) -or
-    $resolvedLocalPath.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase))
-{
-    throw 'LocalPath must be outside the source checkout.'
-}
+    $sourceDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $repositoryRoot -ChildPath 'source\Datum.yml')
+    $sourceProjectSettings = $sourceDatum.Global.ProjectSettings
+    $script:OrganizationName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'OrganizationName' -Path 'source/Global/ProjectSettings.yml: OrganizationName')
+    $script:ProjectName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'ProjectName' -Path 'source/Global/ProjectSettings.yml: ProjectName')
+    $script:RepositoryName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'RepositoryName' -Path 'source/Global/ProjectSettings.yml: RepositoryName')
+    $localPathValue = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'LocalPath' -Path 'source/Global/ProjectSettings.yml: LocalPath')
+    $null = Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'AgentPoolName' -Path 'source/Global/ProjectSettings.yml: AgentPoolName'
+    $buildAgentUserName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'UserName' -Path 'source/Global/ProjectSettings.yml: BuildAgents.UserName')
+    $null = Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'AzureLocation' -Path 'source/Global/ProjectSettings.yml: BuildAgents.AzureLocation'
+    $buildAgentVmSize = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'AzureRoleSize' -Path 'source/Global/ProjectSettings.yml: BuildAgents.AzureRoleSize')
 
-$script:EnvironmentNames = @(Get-EnvironmentNames -Datum $sourceDatum)
-$credentialVaultEnvironment = [string]$sourceProjectSettings.CredentialVaultEnvironment
-if ([string]::IsNullOrWhiteSpace($credentialVaultEnvironment) -or
-    $credentialVaultEnvironment -notin $script:EnvironmentNames)
-{
-    throw "Set 'CredentialVaultEnvironment' in 'source/Global/ProjectSettings.yml' to an environment defined in 'source/Global/Azure.yml'."
-}
+    if ($script:OrganizationName -notmatch '^[A-Za-z0-9._-]+$')
+    {
+        throw "Invalid OrganizationName in 'source/Global/ProjectSettings.yml'."
+    }
+    if ($script:ProjectName -notmatch '^[A-Za-z0-9._ -]+$' -or
+        $script:RepositoryName -notmatch '^[A-Za-z0-9._ -]+$')
+    {
+        throw 'ProjectName and RepositoryName in ProjectSettings.yml may contain only letters, digits, spaces, periods, underscores, and hyphens.'
+    }
+    if ($buildAgentUserName -notmatch '^[A-Za-z0-9._-]+$' -or $buildAgentVmSize -notmatch '^[A-Za-z0-9_]+$')
+    {
+        throw 'BuildAgents.UserName or BuildAgents.AzureRoleSize in ProjectSettings.yml contains unsupported characters.'
+    }
+    $resolvedLocalPath = [IO.Path]::GetFullPath($localPathValue)
+    $repositoryPrefix = $repositoryRoot.TrimEnd('\') + '\'
+    if ($resolvedLocalPath.Equals($repositoryRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $resolvedLocalPath.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase))
+    {
+        throw 'LocalPath must be outside the source checkout.'
+    }
 
-$keyVaultNetworking = if ($sourceProjectSettings -is [System.Collections.IDictionary])
-{
-    $sourceProjectSettings['KeyVaultNetworking']
-}
-elseif ($sourceProjectSettings.PSObject.Properties['KeyVaultNetworking'])
-{
-    $sourceProjectSettings.KeyVaultNetworking
-}
-$resumeIdentity = [ordered]@{
-    RepositoryRoot       = $repositoryRoot
-    OrganizationName     = $script:OrganizationName
-    ProjectName          = $script:ProjectName
-    RepositoryName       = $script:RepositoryName
-    CredentialVaultEnvironment = $credentialVaultEnvironment
-    GitHubRepositoryUrl  = [string]$sourceProjectSettings.GitHubRepositoryUrl
-    LocalPath            = $resolvedLocalPath
-    AgentPoolName        = [string]$sourceProjectSettings.AgentPoolName
-    NumberOfBuildAgents  = [string]$sourceProjectSettings.NumbertOfBuildAgents
-    GitUserName          = [string]$sourceProjectSettings.GitUserName
-    GitUserEmail         = [string]$sourceProjectSettings.GitUserEmail
-    BuildAgentUserName   = [string]$sourceProjectSettings.BuildAgents.UserName
-    BuildAgentLocation   = [string]$sourceProjectSettings.BuildAgents.AzureLocation
-    BuildAgentVmSize     = [string]$sourceProjectSettings.BuildAgents.AzureRoleSize
-    Environments         = @(
-        foreach ($environmentName in ($script:EnvironmentNames | Sort-Object))
+    $script:EnvironmentNames = @(Get-EnvironmentNames -Datum $sourceDatum)
+    $credentialVaultEnvironment = [string]$sourceProjectSettings.CredentialVaultEnvironment
+    if ([string]::IsNullOrWhiteSpace($credentialVaultEnvironment) -or
+        $credentialVaultEnvironment -notin $script:EnvironmentNames)
+    {
+        throw "Set 'CredentialVaultEnvironment' in 'source/Global/ProjectSettings.yml' to an environment defined in 'source/Global/Azure.yml'."
+    }
+
+    $keyVaultNetworking = if ($sourceProjectSettings -is [System.Collections.IDictionary])
+    {
+        $sourceProjectSettings['KeyVaultNetworking']
+    }
+    elseif ($sourceProjectSettings.PSObject.Properties['KeyVaultNetworking'])
+    {
+        $sourceProjectSettings.KeyVaultNetworking
+    }
+    $resumeIdentity = [ordered]@{
+        RepositoryRoot       = $repositoryRoot
+        OrganizationName     = $script:OrganizationName
+        ProjectName          = $script:ProjectName
+        RepositoryName       = $script:RepositoryName
+        CredentialVaultEnvironment = $credentialVaultEnvironment
+        GitHubRepositoryUrl  = [string]$sourceProjectSettings.GitHubRepositoryUrl
+        LocalPath            = $resolvedLocalPath
+        AgentPoolName        = [string]$sourceProjectSettings.AgentPoolName
+        NumberOfBuildAgents  = [string]$sourceProjectSettings.NumbertOfBuildAgents
+        GitUserName          = [string]$sourceProjectSettings.GitUserName
+        GitUserEmail         = [string]$sourceProjectSettings.GitUserEmail
+        BuildAgentUserName   = [string]$sourceProjectSettings.BuildAgents.UserName
+        BuildAgentLocation   = [string]$sourceProjectSettings.BuildAgents.AzureLocation
+        BuildAgentVmSize     = [string]$sourceProjectSettings.BuildAgents.AzureRoleSize
+        Environments         = @(
+            foreach ($environmentName in ($script:EnvironmentNames | Sort-Object))
+            {
+                $environment = $sourceDatum.Global.Azure.Environments[$environmentName]
+                [ordered]@{
+                    Name                = $environmentName
+                    TenantName          = [string]$environment.AzTenantName
+                    HasExchangeOnline   = [string]$environment.HasExchangeOnline
+                    HasSharePointOnline = [string]$environment.HasSharePointOnline
+                }
+            }
+        )
+    }
+    if ($null -ne $keyVaultNetworking)
+    {
+        $resumeIdentity.KeyVaultNetworking = $keyVaultNetworking
+    }
+    $identityJson = ConvertTo-Json -InputObject $resumeIdentity -Depth 10 -Compress
+    $identityBytes = [Text.Encoding]::UTF8.GetBytes($identityJson)
+    $identityHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($identityBytes)).ToLowerInvariant()
+    $checkpointDirectory = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Microsoft365DscWorkshop\AzureLabBootstrap'
+    $script:BootstrapCheckpointPath = Join-Path -Path $checkpointDirectory -ChildPath "$identityHash.json"
+    $allowedStages = @(
+        'bootstrap-project-settings'
+        'import-repository'
+        'verify-import'
+        'prepare-machine'
+        'restore-target-dependencies'
+        'initialize-target-build'
+        'register-applications'
+        'test-connections'
+        'configure-devops'
+        'create-vms'
+        'configure-agents'
+    )
+
+    if (-not $Restart -and (Test-Path -LiteralPath $script:BootstrapCheckpointPath -PathType Leaf))
+    {
+        try
         {
-            $environment = $sourceDatum.Global.Azure.Environments[$environmentName]
-            [ordered]@{
-                Name                = $environmentName
-                TenantName          = [string]$environment.AzTenantName
-                HasExchangeOnline   = [string]$environment.HasExchangeOnline
-                HasSharePointOnline = [string]$environment.HasSharePointOnline
+            $script:BootstrapCheckpoint = Get-Content -LiteralPath $script:BootstrapCheckpointPath -Raw |
+                ConvertFrom-Json -AsHashtable -ErrorAction Stop
+            $checkpointMigrated = Update-BootstrapCheckpointSchema -Checkpoint $script:BootstrapCheckpoint
+            $savedStages = @($script:BootstrapCheckpoint.CompletedStages)
+            if ($script:BootstrapCheckpoint.Fingerprint -ne $identityHash -or
+                @($savedStages | Where-Object { $_ -notin $allowedStages }).Count -gt 0 -or
+                ($script:BootstrapCheckpoint.CurrentStage -and $script:BootstrapCheckpoint.CurrentStage -notin $allowedStages))
+            {
+                throw 'The checkpoint schema or contents are invalid.'
+            }
+
+            $script:BootstrapCheckpoint.CompletedStages = $savedStages
+            if ($checkpointMigrated)
+            {
+                Save-BootstrapCheckpoint
+                Write-Host 'Updated the saved checkpoint and will repeat machine preparation, which may have stopped early in a previous run.' -ForegroundColor Yellow
+            }
+            if ($script:BootstrapCheckpoint.CurrentStage)
+            {
+                Write-Host "Resuming by retrying the previously interrupted stage '$($script:BootstrapCheckpoint.CurrentStage)'." -ForegroundColor Yellow
+            }
+            else
+            {
+                Write-Host 'Resuming from the last successfully completed stage.' -ForegroundColor Yellow
             }
         }
-    )
-}
-if ($null -ne $keyVaultNetworking)
-{
-    $resumeIdentity.KeyVaultNetworking = $keyVaultNetworking
-}
-$identityJson = ConvertTo-Json -InputObject $resumeIdentity -Depth 10 -Compress
-$identityBytes = [Text.Encoding]::UTF8.GetBytes($identityJson)
-$identityHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($identityBytes)).ToLowerInvariant()
-$checkpointDirectory = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Microsoft365DscWorkshop\AzureLabBootstrap'
-$script:BootstrapCheckpointPath = Join-Path -Path $checkpointDirectory -ChildPath "$identityHash.json"
-$allowedStages = @(
-    'bootstrap-project-settings'
-    'import-repository'
-    'verify-import'
-    'prepare-machine'
-    'restore-target-dependencies'
-    'initialize-target-build'
-    'register-applications'
-    'test-connections'
-    'configure-devops'
-    'create-vms'
-    'configure-agents'
-)
-
-if (-not $Restart -and (Test-Path -LiteralPath $script:BootstrapCheckpointPath -PathType Leaf))
-{
-    try
+        catch
+        {
+            throw "Could not load the Azure lab resume checkpoint '$script:BootstrapCheckpointPath'. Use -Restart to discard it and start over. $($_.Exception.Message)"
+        }
+    }
+    else
     {
-        $script:BootstrapCheckpoint = Get-Content -LiteralPath $script:BootstrapCheckpointPath -Raw |
-            ConvertFrom-Json -AsHashtable -ErrorAction Stop
-        $checkpointMigrated = Update-BootstrapCheckpointSchema -Checkpoint $script:BootstrapCheckpoint
-        $savedStages = @($script:BootstrapCheckpoint.CompletedStages)
-        if ($script:BootstrapCheckpoint.Fingerprint -ne $identityHash -or
-            @($savedStages | Where-Object { $_ -notin $allowedStages }).Count -gt 0 -or
-            ($script:BootstrapCheckpoint.CurrentStage -and $script:BootstrapCheckpoint.CurrentStage -notin $allowedStages))
+        if ($Restart -and (Test-Path -LiteralPath $script:BootstrapCheckpointPath -PathType Leaf))
         {
-            throw 'The checkpoint schema or contents are invalid.'
+            Write-Host 'Discarding the saved Azure lab checkpoint and starting over.' -ForegroundColor Yellow
         }
 
-        $script:BootstrapCheckpoint.CompletedStages = $savedStages
-        if ($checkpointMigrated)
-        {
-            Save-BootstrapCheckpoint
-            Write-Host 'Updated the saved checkpoint and will repeat machine preparation, which may have stopped early in a previous run.' -ForegroundColor Yellow
-        }
-        if ($script:BootstrapCheckpoint.CurrentStage)
-        {
-            Write-Host "Resuming by retrying the previously interrupted stage '$($script:BootstrapCheckpoint.CurrentStage)'." -ForegroundColor Yellow
-        }
-        else
-        {
-            Write-Host 'Resuming from the last successfully completed stage.' -ForegroundColor Yellow
+        $script:BootstrapCheckpoint = @{
+            SchemaVersion   = 3
+            Fingerprint     = $identityHash
+            CompletedStages = @()
+            CurrentStage    = $null
         }
     }
-    catch
-    {
-        throw "Could not load the Azure lab resume checkpoint '$script:BootstrapCheckpointPath'. Use -Restart to discard it and start over. $($_.Exception.Message)"
-    }
+
+    $sourceDatum = $null
+    $sourceProjectSettings = $null
+    $phaseStatus = 'Completed'
 }
-else
+finally
 {
-    if ($Restart -and (Test-Path -LiteralPath $script:BootstrapCheckpointPath -PathType Leaf))
-    {
-        Write-Host 'Discarding the saved Azure lab checkpoint and starting over.' -ForegroundColor Yellow
-    }
-
-    $script:BootstrapCheckpoint = @{
-        SchemaVersion   = 3
-        Fingerprint     = $identityHash
-        CompletedStages = @()
-        CurrentStage    = $null
-    }
+    Complete-BootstrapPhase -Status $phaseStatus
 }
-
-$sourceDatum = $null
-$sourceProjectSettings = $null
 
 try
 {

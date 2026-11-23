@@ -57,7 +57,7 @@ BeforeAll {
     . ([scriptblock]::Create($contextFunction.Extent.Text))
     foreach ($functionAst in $helperAst.EndBlock.Statements | Where-Object {
             $_ -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $_.Name -in @('Get-M365DscKeyVaultNetworkParameters', 'Get-M365DscKeyVaultPrivateEndpoints', 'Resolve-M365DscKeyVaultNetworkParameters', 'Initialize-M365DscKeyVaultPrivateEndpoint', 'Initialize-M365DscAgentKeyVaultPrivateEndpoint')
+            $_.Name -in @('Get-M365DscKeyVaultNetworkParameters', 'Get-M365DscKeyVaultPrivateEndpoints', 'Initialize-M365DscNetworkProvider', 'Initialize-M365DscKeyVaultSubnet', 'Resolve-M365DscKeyVaultNetworkParameters', 'Initialize-M365DscKeyVaultPrivateEndpoint', 'Initialize-M365DscAgentKeyVaultPrivateEndpoint')
         })
     {
         . ([scriptblock]::Create($functionAst.Extent.Text))
@@ -77,6 +77,7 @@ Describe 'Key Vault private endpoint deployment' {
         $subnetId = "$vnetId/subnets/endpoints"
         $vault = [pscustomobject]@{
             VaultName = 'kv-stage'
+            Location = 'westus2'
             ResourceGroupName = 'credential-rg'
             ResourceId = '/subscriptions/sub-one/resourceGroups/credential-rg/providers/Microsoft.KeyVault/vaults/kv-stage'
         }
@@ -118,6 +119,14 @@ Describe 'Key Vault private endpoint deployment' {
         }
         Mock New-AzResource { [pscustomobject]@{ Properties = @{ provisioningState = 'Succeeded' } } }
         Mock New-AzResourceGroupDeployment {
+            param($TemplateFile)
+            if ($TemplateFile -like '*keyVaultNetwork.json')
+            {
+                return [pscustomobject]@{
+                    ProvisioningState = 'Succeeded'
+                    Outputs = @{ subnetResourceId = @{ Value = '/subscriptions/sub-one/resourceGroups/credential-rg/providers/Microsoft.Network/virtualNetworks/kv-stage-vnet/subnets/private-endpoints' } }
+                }
+            }
             [pscustomobject]@{
                 ProvisioningState = 'Succeeded'
                 Outputs = @{ endpointResourceId = @{ Value = $endpointId } }
@@ -348,14 +357,81 @@ Describe 'Key Vault private endpoint deployment' {
         }
     }
 
-    It 'Stops explicitly when no existing subnet is available or Azure discovery is denied' {
+    It 'Creates a dedicated endpoint network when there are no subnet candidates and reuses it on retry' {
         $vault | Add-Member PublicNetworkAccess Disabled
         Mock Get-AzResource {} -ParameterFilter { $ResourceType -eq 'Microsoft.Network/virtualNetworks' }
+        $expectedSubnetId = '/subscriptions/sub-one/resourceGroups/credential-rg/providers/Microsoft.Network/virtualNetworks/kv-stage-vnet/subnets/private-endpoints'
+
+        (Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage).
+            PrivateEndpointSubnetId | Should -Be $expectedSubnetId
+
+        Mock Get-AzResource { [pscustomobject]@{ ResourceId = $expectedSubnetId -replace '/subnets/[^/]+$', '' } } `
+            -ParameterFilter { $ResourceType -eq 'Microsoft.Network/virtualNetworks' }
+        Mock Get-AzResource {
+            [pscustomobject]@{ Properties = @{ subnets = @(
+                @{ name = 'private-endpoints'; id = $expectedSubnetId; properties = @{} }
+            ) } }
+        } -ParameterFilter { $ResourceId -eq ($expectedSubnetId -replace '/subnets/[^/]+$', '') }
+        (Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage).
+            PrivateEndpointSubnetId | Should -Be $expectedSubnetId
+
+        Should -Invoke New-AzResourceGroupDeployment -Times 1 -Exactly -ParameterFilter {
+            $TemplateFile -like '*keyVaultNetwork.json' -and $ResourceGroupName -eq 'credential-rg' -and
+            $TemplateParameterObject.vnetName -eq 'kv-stage-vnet' -and
+            $TemplateParameterObject.vnetAddressPrefix -eq '10.41.0.0/24' -and
+            $TemplateParameterObject.subnetAddressPrefix -eq '10.41.0.0/27' -and $Mode -eq 'Incremental'
+        }
+    }
+
+    It 'Avoids overlapping existing VNet address ranges when allocating a dedicated network' {
+        $networks = @(
+            [pscustomobject]@{ ResourceId = 'existing-vnet'; Properties = @{ addressSpace = @{
+                addressPrefixes = @('10.41.0.0/16', '10.42.0.0/24', 'fd00::/64')
+            } } }
+        )
+
+        Initialize-M365DscKeyVaultSubnet -Vault $vault -EnvironmentName Stage -ExistingVirtualNetworks $networks
+
+        Should -Invoke New-AzResourceGroupDeployment -Times 1 -Exactly -ParameterFilter {
+            $TemplateParameterObject.vnetAddressPrefix -eq '10.42.1.0/24' -and
+            $TemplateParameterObject.subnetAddressPrefix -eq '10.42.1.0/27'
+        }
+    }
+
+    It 'Stops before endpoint creation when the dedicated network deployment fails' {
+        $vault | Add-Member PublicNetworkAccess Disabled
+        Mock Get-AzResource {} -ParameterFilter { $ResourceType -eq 'Microsoft.Network/virtualNetworks' }
+        Mock New-AzResourceGroupDeployment { [pscustomobject]@{ ProvisioningState = 'Failed' } }
+
         { Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage } |
-            Should -Throw '*Candidates: none*'
+            Should -Throw '*network deployment failed*'
+
+        Should -Invoke New-AzResourceGroupDeployment -Times 0 -Exactly -ParameterFilter { $TemplateFile -like '*keyVaultPrivateEndpoint.json' }
+        Should -Invoke Update-AzTag -Times 0 -Exactly
+    }
+
+    It 'Does not replace an existing managed VNet or allocate an overlapping address space when the pool is exhausted' {
+        $networks = @(
+            [pscustomobject]@{ ResourceId = '/subscriptions/sub-one/resourceGroups/credential-rg/providers/Microsoft.Network/virtualNetworks/kv-stage-vnet' }
+        )
+        { Initialize-M365DscKeyVaultSubnet -Vault $vault -EnvironmentName Stage -ExistingVirtualNetworks $networks } |
+            Should -Throw '*address space will not be replaced*'
+        $networks = @(
+            [pscustomobject]@{ ResourceId = 'occupied-vnet'; Properties = @{ addressSpace = @{ addressPrefixes = @('10.0.0.0/8') } } }
+        )
+        { Initialize-M365DscKeyVaultSubnet -Vault $vault -EnvironmentName Stage -ExistingVirtualNetworks $networks } |
+            Should -Throw '*no unused /24 remains*'
+
+        Should -Invoke New-AzResourceGroupDeployment -Times 0 -Exactly
+    }
+
+    It 'Stops on Azure discovery errors instead of treating denied inventory as a missing network' {
+        $vault | Add-Member PublicNetworkAccess Disabled
         Mock Get-AzResource { throw 'Azure network inventory denied' } -ParameterFilter { $ResourceType -eq 'Microsoft.Network/virtualNetworks' }
         { Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage } |
             Should -Throw '*Azure network inventory denied*'
+
+        Should -Invoke New-AzResourceGroupDeployment -Times 0 -Exactly
     }
 
     It 'Reuses an existing endpoint and its external DNS zone without redeploying either' {

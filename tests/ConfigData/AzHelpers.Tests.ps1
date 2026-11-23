@@ -591,6 +591,8 @@ Describe 'M365Dsc Key Vault initialization' {
                         ResourceId              = "/subscriptions/$subscriptionId/resourceGroups/DSC-Test-credentials-rg/providers/Microsoft.KeyVault/vaults/kv-dsc-test-7b72ba00"
                         EnableRbacAuthorization = $true
                         EnablePurgeProtection   = $true
+                        Location                = 'westus2'
+                        PublicNetworkAccess     = if ($PrivateNetworking) { 'Disabled' } else { 'Enabled' }
                     }
                 }
             }
@@ -600,10 +602,18 @@ Describe 'M365Dsc Key Vault initialization' {
             Mock -CommandName Update-AzKeyVault
             Mock -CommandName Update-AzTag
             Mock Initialize-M365DscKeyVaultPrivateEndpoint {}
+            $networkSubnetId = "/subscriptions/$subscriptionId/resourceGroups/DSC-Test-credentials-rg/providers/Microsoft.Network/virtualNetworks/$vaultName-vnet/subnets/private-endpoints"
+            Mock New-AzResourceGroupDeployment {
+                [pscustomobject]@{
+                    ProvisioningState = 'Succeeded'
+                    Outputs = @{ subnetResourceId = @{ Value = $networkSubnetId } }
+                }
+            }
             if ($PrivateNetworking)
             {
-                Mock Resolve-M365DscKeyVaultNetworkParameters {
-                    @{ PrivateEndpointSubnetId = "/subscriptions/$subscriptionId/resourceGroups/network-rg/providers/Microsoft.Network/virtualNetworks/vnet/subnets/endpoints" }
+                Mock Get-AzResource {
+                    param($ResourceType)
+                    if (-not $ResourceType) { [pscustomobject]@{ Properties = @{} } }
                 }
             }
 
@@ -627,7 +637,11 @@ Describe 'M365Dsc Key Vault initialization' {
             }
             Should -Invoke Initialize-M365DscKeyVaultPrivateEndpoint -Times ([int]$PrivateNetworking) -Exactly -ParameterFilter {
                 $EnvironmentName -eq 'Test' -and $ValidateLocalConnectivity -and
-                $PrivateEndpointSubnetId -like '*/vnet/subnets/endpoints'
+                $PrivateEndpointSubnetId -eq $networkSubnetId
+            }
+            Should -Invoke New-AzResourceGroupDeployment -Times ([int]$PrivateNetworking) -Exactly -ParameterFilter {
+                $TemplateFile -like '*keyVaultNetwork.json' -and
+                $TemplateParameterObject.subnetAddressPrefix -eq '10.41.0.0/27'
             }
         }
     }

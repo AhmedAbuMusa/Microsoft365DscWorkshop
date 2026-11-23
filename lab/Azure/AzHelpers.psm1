@@ -390,6 +390,111 @@ function Get-M365DscKeyVaultPrivateEndpoints
     }
 }
 
+function Initialize-M365DscNetworkProvider
+{
+    $provider = Get-AzResourceProvider -ProviderNamespace 'Microsoft.Network' -ErrorAction Stop
+    if ($provider.RegistrationState -ne 'Registered')
+    {
+        Register-AzResourceProvider -ProviderNamespace 'Microsoft.Network' -ErrorAction Stop | Out-Null
+        for ($attempt = 1; $attempt -le 60; $attempt++)
+        {
+            $provider = Get-AzResourceProvider -ProviderNamespace 'Microsoft.Network' -ErrorAction Stop
+            if ($provider.RegistrationState -eq 'Registered') { break }
+            if ($attempt -eq 60) { throw 'Microsoft.Network did not register in the active subscription.' }
+            Start-Sleep -Seconds 5
+        }
+    }
+}
+
+function Initialize-M365DscKeyVaultSubnet
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [object]$Vault,
+
+        [Parameter(Mandatory)]
+        [string]$EnvironmentName,
+
+        [Parameter()]
+        [object[]]$ExistingVirtualNetworks = @()
+    )
+
+    $vnetName = "$($Vault.VaultName)-vnet"
+    $subscriptionId = (Get-AzContext -ErrorAction Stop).Subscription.Id
+    $vnetId = "/subscriptions/$subscriptionId/resourceGroups/$($Vault.ResourceGroupName)/providers/Microsoft.Network/virtualNetworks/$vnetName"
+    if (@($ExistingVirtualNetworks | Where-Object ResourceId -EQ $vnetId).Count -gt 0)
+    {
+        throw "Environment '$EnvironmentName': managed VNet '$vnetName' already exists without an eligible endpoint subnet. Review its subnets or configure an explicit PrivateEndpointSubnetId; its address space will not be replaced."
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$Vault.Location))
+    {
+        throw "Environment '$EnvironmentName': cannot create a private endpoint network without the vault's Azure location."
+    }
+    $occupiedRanges = @(
+        foreach ($network in $ExistingVirtualNetworks)
+        {
+            if (@($network.Properties.addressSpace.addressPrefixes | Where-Object { $_ }).Count -eq 0)
+            {
+                throw "Environment '$EnvironmentName': cannot verify address-space overlap for VNet '$($network.ResourceId)'."
+            }
+            foreach ($prefix in $network.Properties.addressSpace.addressPrefixes)
+            {
+                if ($prefix -notmatch '^(.+)/(\d+)$')
+                {
+                    throw "Environment '$EnvironmentName': invalid VNet address prefix '$prefix'."
+                }
+                $prefixLength = [int]$Matches[2]
+                $bytes = [Net.IPAddress]::Parse($Matches[1]).GetAddressBytes()
+                if ($bytes.Length -ne 4) { continue }
+                if ($prefixLength -gt 32)
+                {
+                    throw "Environment '$EnvironmentName': invalid IPv4 VNet address prefix '$prefix'."
+                }
+                $address = [uint64]$bytes[0] * 16777216 + [uint64]$bytes[1] * 65536 + [uint64]$bytes[2] * 256 + $bytes[3]
+                $size = [uint64][Math]::Pow(2, 32 - $prefixLength)
+                $start = [uint64]([Math]::Floor($address / $size) * $size)
+                [pscustomobject]@{ Start = $start; End = $start + $size - 1 }
+            }
+        }
+    )
+    # Keep the default separate from the worker template's 10.40.0.0/16 network.
+    $candidate = [uint64]0x0A290000
+    foreach ($range in ($occupiedRanges | Sort-Object Start))
+    {
+        if ($range.End -lt $candidate) { continue }
+        if ($range.Start -gt $candidate + 255) { break }
+        $candidate = [uint64](([Math]::Floor($range.End / 256) + 1) * 256)
+    }
+    if ($candidate + 255 -gt [uint64]0x0AFFFFFF)
+    {
+        throw "Environment '$EnvironmentName': no unused /24 remains in the automatic 10.41.0.0-10.255.255.255 network pool. Configure an explicit endpoint subnet."
+    }
+    $addressText = '{0}.{1}.{2}.{3}' -f ([int][Math]::Floor($candidate / 16777216)),
+        ([int][Math]::Floor($candidate / 65536) % 256), ([int][Math]::Floor($candidate / 256) % 256), ($candidate % 256)
+    Initialize-M365DscNetworkProvider
+    Write-Host "[Environment: $EnvironmentName] Creating dedicated VNet '$vnetName' ($addressText/24) and private endpoint subnet ($addressText/27) in '$($Vault.ResourceGroupName)'."
+    Write-Warning "This private network does not establish provisioning-host VPN/routing or DNS forwarding. The chosen range was checked against this subscription's VNets, not external networks."
+    $deployment = New-AzResourceGroupDeployment -Name "$($Vault.VaultName)-network" -ResourceGroupName $Vault.ResourceGroupName `
+        -TemplateFile $PSScriptRoot\..\templates\keyVaultNetwork.json -TemplateParameterObject @{
+            location = $Vault.Location
+            vnetName = $vnetName
+            vnetAddressPrefix = "$addressText/24"
+            subnetAddressPrefix = "$addressText/27"
+            environmentName = $EnvironmentName
+        } -Mode Incremental -Force -ErrorAction Stop
+    if ($deployment.ProvisioningState -ne 'Succeeded')
+    {
+        throw "Environment '$EnvironmentName': private endpoint network deployment failed (state '$($deployment.ProvisioningState)')."
+    }
+    $subnetResourceId = [string]$deployment.Outputs.subnetResourceId.Value
+    if ($subnetResourceId -ne "$vnetId/subnets/private-endpoints")
+    {
+        throw "Environment '$EnvironmentName': private endpoint network deployment returned an unexpected subnet resource ID '$subnetResourceId'."
+    }
+    return $subnetResourceId
+}
+
 function Resolve-M365DscKeyVaultNetworkParameters
 {
     [CmdletBinding()]
@@ -435,6 +540,7 @@ function Resolve-M365DscKeyVaultNetworkParameters
         if ($subnetIds.Count -eq 0)
         {
             $vnetSummaries = @(Get-AzResource -ResourceType 'Microsoft.Network/virtualNetworks' -ErrorAction Stop)
+            $discoveredVnets = [Collections.Generic.List[object]]::new()
             $subnetIds = @(
                 foreach ($vnetSummary in $vnetSummaries)
                 {
@@ -448,6 +554,7 @@ function Resolve-M365DscKeyVaultNetworkParameters
                    {
                        throw "Environment '$EnvironmentName': could not read discovered VNet '$($vnetSummary.ResourceId)'."
                    }
+                    $discoveredVnets.Add($vnet)
                     foreach ($subnet in $vnet.Properties.subnets)
                     {
                         if ($subnet.name -notin @('GatewaySubnet', 'AzureFirewallSubnet', 'AzureFirewallManagementSubnet', 'AzureBastionSubnet', 'RouteServerSubnet') -and
@@ -461,6 +568,12 @@ function Resolve-M365DscKeyVaultNetworkParameters
             ) | Sort-Object -Unique
             $subnetIds = @($subnetIds)
             $source = 'the only eligible existing subnet in the subscription'
+            if ($subnetIds.Count -eq 0)
+            {
+                $subnetIds = @(Initialize-M365DscKeyVaultSubnet -Vault $Vault -EnvironmentName $EnvironmentName `
+                    -ExistingVirtualNetworks $discoveredVnets.ToArray())
+                $source = 'a newly provisioned dedicated private endpoint network'
+            }
         }
         if ($subnetIds.Count -ne 1)
         {
@@ -527,18 +640,7 @@ function Initialize-M365DscKeyVaultPrivateEndpoint
 
     $requiredVersions = Import-PowerShellDataFile -Path $PSScriptRoot\..\..\RequiredModules.psd1 -ErrorAction Stop
     Import-Module Az.Resources -RequiredVersion $requiredVersions['Az.Resources'] -ErrorAction Stop
-    $provider = Get-AzResourceProvider -ProviderNamespace 'Microsoft.Network' -ErrorAction Stop
-    if ($provider.RegistrationState -ne 'Registered')
-    {
-        Register-AzResourceProvider -ProviderNamespace 'Microsoft.Network' -ErrorAction Stop | Out-Null
-        for ($attempt = 1; $attempt -le 60; $attempt++)
-        {
-            $provider = Get-AzResourceProvider -ProviderNamespace 'Microsoft.Network' -ErrorAction Stop
-            if ($provider.RegistrationState -eq 'Registered') { break }
-            if ($attempt -eq 60) { throw "Microsoft.Network did not register in subscription '$subscriptionId'." }
-            Start-Sleep -Seconds 5
-        }
-    }
+    Initialize-M365DscNetworkProvider
 
     $subnet = Get-AzResource -ResourceId $PrivateEndpointSubnetId -ApiVersion '2023-09-01' -ExpandProperties -ErrorAction Stop
     if ($null -eq $subnet)
@@ -693,6 +795,7 @@ function Initialize-M365DscKeyVaultPrivateEndpoint
             throw "Environment '$EnvironmentName': the private endpoint has no allocated IP address."
         }
         $vaultHost = "$($Vault.VaultName).vault.azure.net"
+        Write-Host "[Environment: $EnvironmentName] Private endpoint VNet: '$endpointVnetId' | IP addresses: $($privateIps -join ', ') | Vault hostname: '$vaultHost'."
         $dnsReady = $false
         for ($attempt = 1; $attempt -le 12; $attempt++)
         {

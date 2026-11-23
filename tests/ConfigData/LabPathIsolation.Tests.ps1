@@ -1061,6 +1061,33 @@ Describe 'Azure bootstrap dependency restore' {
 }
 
 Describe 'Azure DevOps clone refresh approval' {
+    BeforeEach {
+        $previousSecretBackend = $env:M365DSC_SECRET_BACKEND
+        $env:M365DSC_SECRET_BACKEND = 'KeyVault'
+    }
+    AfterEach {
+        $env:M365DSC_SECRET_BACKEND = $previousSecretBackend
+    }
+    It 'Accepts the real <Backend> checkout and committed revision without parsing pipeline YAML as PowerShell' -TestCases @(
+        @{ Backend = 'KeyVault' }
+        @{ Backend = 'Kdbx' }
+    ) {
+        param($Backend)
+        $env:M365DSC_SECRET_BACKEND = $Backend
+        $repositoryRoot = (Resolve-Path "$PSScriptRoot\..\..").Path
+        $script:GitCommand = Get-Command git -ErrorAction Stop
+        Get-ImportedAzureScriptIssues -RepositoryPath $repositoryRoot | Should -BeNullOrEmpty
+        Get-ImportedAzureScriptIssues -RepositoryPath $repositoryRoot -Revision HEAD | Should -BeNullOrEmpty
+    }
+    It 'Still rejects a KDBX pipeline missing its required parameters' {
+        $env:M365DSC_SECRET_BACKEND = 'Kdbx'
+        $repositoryRoot = (Resolve-Path "$PSScriptRoot\..\..").Path
+        Mock Get-Content { 'trigger: none' } -ParameterFilter { $LiteralPath -like '*pipelines\Kdbx\build.yml' }
+        $issues = @(Get-ImportedAzureScriptIssues -RepositoryPath $repositoryRoot)
+        $issues.Count | Should -Be 1
+        $issues[0] | Should -Match 'KDBX pipeline parameters'
+        $issues[0] | Should -Not -Match 'PowerShell parse errors'
+    }
     It 'Detects when the imported checkout is missing the current Azure scripts' {
         $issues = @(Get-ImportedAzureScriptIssues -RepositoryPath $TestDrive)
 

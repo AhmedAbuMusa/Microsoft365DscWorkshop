@@ -45,6 +45,10 @@ Shared VM, agent installation, repository import, and lifecycle scripts call
 the neutral router. They do not duplicate the storage implementations.
 AutomatedLab remains on its existing path.
 
+Bootstrap verifies imported PowerShell scripts separately from pipeline/build
+YAML compatibility checks. Compatibility failures report the missing requirement
+before offering a clone refresh; pipeline YAML is not parsed as PowerShell.
+
 ## Key Vault mode
 
 Continue configuring the existing public project settings and

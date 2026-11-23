@@ -458,7 +458,6 @@ function Get-ImportedAzureScriptIssues
             @{ Path = 'lab\Secrets\SecretBackend.psm1'; RequiredPattern = 'function Get-M365DscProjectSecrets' }
             @{ Path = 'lab\Secrets\Kdbx\Store.psm1'; RequiredPattern = 'function Open-M365DscSecretStore' }
             @{ Path = 'lab\Secrets\Kdbx\Publish Pipeline Secrets.ps1'; Parameter = 'EnvironmentName' }
-            @{ Path = 'pipelines\Kdbx\build.yml'; RequiredPattern = 'parameters:' }
         )
     }
     $issues = [System.Collections.Generic.List[string]]::new()
@@ -513,7 +512,7 @@ function Get-ImportedAzureScriptIssues
         }
         if ($scriptAndParameter.RequiredPattern -and $scriptContent -notmatch $scriptAndParameter.RequiredPattern)
         {
-            $issues.Add("Imported script '$($scriptAndParameter.Path)' is outdated and does not implement the required project-credentials Key Vault support.")
+            $issues.Add("Imported script '$($scriptAndParameter.Path)' is outdated and does not implement the required secret-backend support.")
         }
     }
 
@@ -529,6 +528,14 @@ function Get-ImportedAzureScriptIssues
             Description = 'Invoke-Build failure propagation'
         }
     )
+    if ($env:M365DSC_SECRET_BACKEND -eq 'Kdbx')
+    {
+        $requiredBuildFiles += @{
+            Path        = 'pipelines\Kdbx\build.yml'
+            Pattern     = '(?m)^parameters:'
+            Description = 'KDBX pipeline parameters'
+        }
+    }
     foreach ($buildFile in $requiredBuildFiles)
     {
         $buildFilePath = Join-Path -Path $RepositoryPath -ChildPath $buildFile.Path
@@ -1291,6 +1298,7 @@ try
                 $scriptIssues = @(Get-ImportedAzureScriptIssues -RepositoryPath $resolvedLocalPath)
                 if ($scriptIssues.Count -gt 0)
                 {
+                    Write-Warning "Imported checkout compatibility checks failed: $($scriptIssues -join ' ')"
                     $refreshDatum = $null
                     $refreshProjectSettings = $null
                     $refreshPat = $null

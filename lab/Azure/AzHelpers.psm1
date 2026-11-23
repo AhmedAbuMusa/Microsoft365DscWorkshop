@@ -434,11 +434,20 @@ function Resolve-M365DscKeyVaultNetworkParameters
         $source = 'existing vault private endpoints'
         if ($subnetIds.Count -eq 0)
         {
-            $vnets = @(Get-AzResource -ResourceType 'Microsoft.Network/virtualNetworks' -ApiVersion '2023-09-01' `
-                -ExpandProperties -ErrorAction Stop)
+            $vnetSummaries = @(Get-AzResource -ResourceType 'Microsoft.Network/virtualNetworks' -ErrorAction Stop)
             $subnetIds = @(
-                foreach ($vnet in $vnets)
+                foreach ($vnetSummary in $vnetSummaries)
                 {
+                   if ([string]::IsNullOrWhiteSpace([string]$vnetSummary.ResourceId))
+                   {
+                       throw "Environment '$EnvironmentName': Azure returned a VNet without a resource ID during subnet discovery."
+                   }
+                   $vnet = Get-AzResource -ResourceId $vnetSummary.ResourceId -ApiVersion '2023-09-01' `
+                       -ExpandProperties -ErrorAction Stop
+                   if ($null -eq $vnet)
+                   {
+                       throw "Environment '$EnvironmentName': could not read discovered VNet '$($vnetSummary.ResourceId)'."
+                   }
                     foreach ($subnet in $vnet.Properties.subnets)
                     {
                         if ($subnet.name -notin @('GatewaySubnet', 'AzureFirewallSubnet', 'AzureFirewallManagementSubnet', 'AzureBastionSubnet', 'RouteServerSubnet') -and

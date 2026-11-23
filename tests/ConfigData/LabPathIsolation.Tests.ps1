@@ -289,13 +289,15 @@ Describe 'Key Vault private endpoint deployment' {
 
     It 'Discovers a unique existing subnet while excluding delegated and reserved subnets' {
         $vault | Add-Member PublicNetworkAccess Disabled
+        Mock Get-AzResource { [pscustomobject]@{ ResourceId = $vnetId } } `
+            -ParameterFilter { $ResourceType -eq 'Microsoft.Network/virtualNetworks' }
         Mock Get-AzResource {
             [pscustomobject]@{ Properties = @{ subnets = @(
                 @{ name = 'endpoints'; id = $subnetId; properties = @{} }
                 @{ name = 'GatewaySubnet'; id = "$vnetId/subnets/GatewaySubnet"; properties = @{} }
                 @{ name = 'app'; id = "$vnetId/subnets/app"; properties = @{ delegations = @(@{ name = 'app' }) } }
             ) } }
-        } -ParameterFilter { $ResourceType -eq 'Microsoft.Network/virtualNetworks' }
+        } -ParameterFilter { $ResourceId -eq $vnetId }
 
         (Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage).
             PrivateEndpointSubnetId | Should -Be $subnetId
@@ -303,18 +305,47 @@ Describe 'Key Vault private endpoint deployment' {
 
     It 'Lists ambiguous candidates instead of choosing an arbitrary subnet' {
         $vault | Add-Member PublicNetworkAccess Disabled
+        Mock Get-AzResource { [pscustomobject]@{ ResourceId = $vnetId } } `
+            -ParameterFilter { $ResourceType -eq 'Microsoft.Network/virtualNetworks' }
         Mock Get-AzResource {
             [pscustomobject]@{ Properties = @{ subnets = @(
                 @{ name = 'endpoints'; id = $subnetId; properties = @{} }
                 @{ name = 'other'; id = "$vnetId/subnets/other"; properties = @{} }
             ) } }
-        } -ParameterFilter { $ResourceType -eq 'Microsoft.Network/virtualNetworks' }
+        } -ParameterFilter { $ResourceId -eq $vnetId }
 
         { Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage } |
             Should -Throw '*Candidates: */subnets/endpoints, */subnets/other*'
 
         Should -Invoke New-AzResourceGroupDeployment -Times 0 -Exactly
         Should -Invoke Update-AzTag -Times 0 -Exactly
+    }
+
+    It 'Uses separate API versions for generic resource inventory and network detail queries' {
+        $vault | Add-Member PublicNetworkAccess Disabled
+        Mock Get-AzResource {
+            param($ApiVersion)
+            if ($ApiVersion -eq '2023-09-01')
+            {
+                throw "InvalidApiVersionParameter: Microsoft.Resources does not support the network API version."
+            }
+            [pscustomobject]@{ ResourceId = $vnetId }
+        } -ParameterFilter { $ResourceType -eq 'Microsoft.Network/virtualNetworks' }
+        Mock Get-AzResource {
+            [pscustomobject]@{ Properties = @{ subnets = @(
+                @{ name = 'endpoints'; id = $subnetId; properties = @{} }
+            ) } }
+        } -ParameterFilter { $ResourceId -eq $vnetId }
+
+        (Resolve-M365DscKeyVaultNetworkParameters -Vault $vault -EnvironmentName Stage).
+            PrivateEndpointSubnetId | Should -Be $subnetId
+
+        Should -Invoke Get-AzResource -Times 1 -Exactly -ParameterFilter {
+            $ResourceType -eq 'Microsoft.Network/virtualNetworks' -and -not $ApiVersion -and -not $ExpandProperties
+        }
+        Should -Invoke Get-AzResource -Times 1 -Exactly -ParameterFilter {
+            $ResourceId -eq $vnetId -and $ApiVersion -eq '2023-09-01' -and $ExpandProperties
+        }
     }
 
     It 'Stops explicitly when no existing subnet is available or Azure discovery is denied' {

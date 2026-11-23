@@ -103,6 +103,10 @@ function Assert-BuildAgentPassword
 }
 
 $datum = New-DatumStructure -DefinitionFile (Join-Path -Path $repositoryRoot -ChildPath 'source\Datum.yml')
+if ((Get-M365DscSecretBackend -Datum $datum) -eq 'Kdbx')
+{
+    throw 'KDBX is selected. Run lab\Secrets\Kdbx\Initialize Operator.ps1 instead; the Key Vault initializer will not access Azure resources.'
+}
 $projectSettings = $datum.Global.ProjectSettings
 $organizationName = [string]$projectSettings.OrganizationName
 if ([string]::IsNullOrWhiteSpace($organizationName) -or $organizationName -notmatch '^[A-Za-z0-9._-]+$')

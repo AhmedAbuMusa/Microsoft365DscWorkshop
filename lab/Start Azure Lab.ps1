@@ -23,12 +23,19 @@ param
     [switch]$Restart,
 
     [Parameter()]
-    [switch]$ForceDependencyRestore
+    [switch]$ForceDependencyRestore,
+
+    [ValidateSet('KeyVault', 'Kdbx')]
+    [string]$SecretBackend,
+
+    [string]$SecretStorePath
 )
 
 $ErrorActionPreference = 'Stop'
 $script:BootstrapPhase = 0
 $script:BootstrapPhaseCount = 13
+$previousSecretBackend = $env:M365DSC_SECRET_BACKEND
+$previousPublicOnly = $env:M365DSC_KEYVAULT_PUBLIC_ONLY
 
 function Write-BootstrapPhase
 {
@@ -445,6 +452,15 @@ function Get-ImportedAzureScriptIssues
             RequiredPattern = '(?m)^\s*function\s+Get-M365DscProjectSettingsFromKeyVault\b'
         }
     )
+    if ($env:M365DSC_SECRET_BACKEND -eq 'Kdbx')
+    {
+        $requiredScripts += @(
+            @{ Path = 'lab\Secrets\SecretBackend.psm1'; RequiredPattern = 'function Get-M365DscProjectSecrets' }
+            @{ Path = 'lab\Secrets\Kdbx\Store.psm1'; RequiredPattern = 'function Open-M365DscSecretStore' }
+            @{ Path = 'lab\Secrets\Kdbx\Publish Pipeline Secrets.ps1'; Parameter = 'EnvironmentName' }
+            @{ Path = 'pipelines\Kdbx\build.yml'; RequiredPattern = 'parameters:' }
+        )
+    }
     $issues = [System.Collections.Generic.List[string]]::new()
 
     foreach ($scriptAndParameter in $requiredScripts)
@@ -911,6 +927,13 @@ function Initialize-TargetDependencies
     {
         Write-Host "Using dependencies already present in '$targetModules'."
     }
+    if ($env:M365DSC_SECRET_BACKEND -eq 'Kdbx')
+    {
+        $sourceTools = Join-Path $SourceRoot 'output\Tools\Kdbx'
+        $targetTools = Join-Path $TargetRoot 'output\Tools\Kdbx'
+        $null = New-Item -ItemType Directory -Path $targetTools -Force
+        Copy-Item -Path (Join-Path $sourceTools '*') -Destination $targetTools -Recurse -Force
+    }
 }
 
 if ($PSVersionTable.PSVersion -lt [version]'7.6.10')
@@ -950,6 +973,12 @@ if (-not (Test-Path -LiteralPath $sourceSettingsPath -PathType Leaf) -or
 {
     throw 'Both source/Global/ProjectSettings.yml and source/Global/Azure.yml are required.'
 }
+
+Import-Module (Join-Path $repositoryRoot 'lab\Secrets\SecretBackend.psm1') -ErrorAction Stop
+$savedBackend = [regex]::Match((Get-Content -LiteralPath $sourceSettingsPath -Raw), '(?m)^SecretStorage:[ \t]*([^#\r\n]*)(?:#.*)?$')
+$selectionDatum = @{ Global = @{ ProjectSettings = @{ SecretStorage = $savedBackend.Groups[1].Value.Trim() } } }
+$SecretBackend = Select-M365DscSecretBackend -Backend $SecretBackend -Datum $selectionDatum
+$selectionDatum = $null
 
 $pwshCommand = Get-Command -Name pwsh -ErrorAction SilentlyContinue
 if (-not $pwshCommand)
@@ -1023,6 +1052,16 @@ try
     Import-Module -Name Datum.ProtectedData -ErrorAction Stop
 
     $sourceDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $repositoryRoot -ChildPath 'source\Datum.yml')
+    Import-Module (Join-Path $repositoryRoot 'lab\Secrets\SecretBackend.psm1') -ErrorAction Stop
+    $env:M365DSC_SECRET_BACKEND = $SecretBackend
+    $env:M365DSC_KEYVAULT_PUBLIC_ONLY = if ($SecretBackend -eq 'KeyVault') { '1' } else { $null }
+    Set-M365DscSecretBackendSetting -Path $sourceSettingsPath -Backend $SecretBackend
+    if ($SecretBackend -eq 'Kdbx')
+    {
+        if ($SecretStorePath) { $env:M365DSC_SECRET_STORE = $SecretStorePath }
+        Invoke-LabScript -Path (Join-Path $repositoryRoot 'lab\Secrets\Kdbx\Initialize Operator.ps1') -Arguments @{}
+        $sourceDatum = Get-M365DscProjectConfiguration -Datum $sourceDatum
+    }
     $sourceProjectSettings = $sourceDatum.Global.ProjectSettings
     $script:OrganizationName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'OrganizationName' -Path 'source/Global/ProjectSettings.yml: OrganizationName')
     $script:ProjectName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'ProjectName' -Path 'source/Global/ProjectSettings.yml: ProjectName')
@@ -1056,8 +1095,8 @@ try
 
     $script:EnvironmentNames = @(Get-EnvironmentNames -Datum $sourceDatum)
     $credentialVaultEnvironment = [string]$sourceProjectSettings.CredentialVaultEnvironment
-    if ([string]::IsNullOrWhiteSpace($credentialVaultEnvironment) -or
-        $credentialVaultEnvironment -notin $script:EnvironmentNames)
+    if ($SecretBackend -eq 'KeyVault' -and ([string]::IsNullOrWhiteSpace($credentialVaultEnvironment) -or
+        $credentialVaultEnvironment -notin $script:EnvironmentNames))
     {
         throw "Set 'CredentialVaultEnvironment' in 'source/Global/ProjectSettings.yml' to an environment defined in 'source/Global/Azure.yml'."
     }
@@ -1071,6 +1110,11 @@ try
         $sourceProjectSettings.KeyVaultNetworking
     }
     $resumeIdentity = [ordered]@{
+        SecretBackend        = $SecretBackend
+        SecretStoreIdentity  = $(if ($SecretBackend -eq 'Kdbx') {
+            Import-Module (Join-Path $repositoryRoot 'lab\Secrets\Kdbx\Store.psm1') -ErrorAction Stop
+            Get-M365DscDeploymentId
+        })
         RepositoryRoot       = $repositoryRoot
         OrganizationName     = $script:OrganizationName
         ProjectName          = $script:ProjectName
@@ -1175,6 +1219,13 @@ try
     $sourceProjectSettings = $null
     $phaseStatus = 'Completed'
 }
+catch
+{
+    if (Get-Command Close-M365DscSecretStore -ErrorAction SilentlyContinue) { Close-M365DscSecretStore }
+    $env:M365DSC_SECRET_BACKEND = $previousSecretBackend
+    $env:M365DSC_KEYVAULT_PUBLIC_ONLY = $previousPublicOnly
+    throw
+}
 finally
 {
     Complete-BootstrapPhase -Status $phaseStatus
@@ -1185,6 +1236,11 @@ try
     Invoke-BootstrapStage -Index 3 -Name 'bootstrap-project-settings' `
         -Description 'Create or reuse the credential Key Vault and securely collect project credentials' `
         -Action {
+            if ($SecretBackend -eq 'Kdbx')
+            {
+                Write-Host 'Using the unlocked KDBX operator database; Key Vault setup is skipped.'
+                return
+            }
             $projectSettingsKeyVaultScript = Join-Path -Path $repositoryRoot -ChildPath 'lab\Azure\04 Setup Project Settings Key Vault.ps1'
             Write-Host "Running file in a clean PowerShell process: '$projectSettingsKeyVaultScript'." -ForegroundColor Yellow
             & $pwshCommand.Source -NoLogo -NoProfile -File $projectSettingsKeyVaultScript
@@ -1202,6 +1258,11 @@ try
         -Description 'Synchronize GitHub, Azure DevOps, and the local checkout' `
         -Action {
             $repositoryImportScript = Join-Path -Path $repositoryRoot -ChildPath 'lab\Azure\05 Import GitHub Repository.ps1'
+            if ($SecretBackend -eq 'Kdbx')
+            {
+                Invoke-LabScript -Path $repositoryImportScript -Arguments @{}
+                return
+            }
             Write-Host "Running file in a clean PowerShell process: '$repositoryImportScript'." -ForegroundColor Yellow
             & $pwshCommand.Source -NoLogo -NoProfile -File $repositoryImportScript
             if ($LASTEXITCODE -ne 0)
@@ -1239,7 +1300,7 @@ try
                         $refreshDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $repositoryRoot -ChildPath 'source\Datum.yml')
                         $refreshProjectSettings = $refreshDatum.Global.ProjectSettings
                         Import-Module -Name (Join-Path -Path $repositoryRoot -ChildPath 'lab\Azure\AzHelpers.psm1') -Force -ErrorAction Stop
-                        $refreshProjectSettings = Get-M365DscProjectSettingsFromKeyVault -Datum $refreshDatum
+                        $refreshProjectSettings = Get-M365DscProjectSecrets -Datum $refreshDatum
                         $refreshPat = [string]$refreshProjectSettings.Global.ProjectSettings.PersonalAccessToken
                         $refreshAuthorizationHeader = "AUTHORIZATION: Basic $([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$refreshPat")))"
                         Update-OutdatedAzureDevOpsClone `
@@ -1328,7 +1389,7 @@ try
 
         $targetDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $resolvedLocalPath -ChildPath 'source\Datum.yml')
         Import-Module -Name (Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\AzHelpers.psm1') -Force -ErrorAction Stop
-        $targetDatum = Get-M365DscProjectSettingsFromKeyVault -Datum $targetDatum
+        $targetDatum = Get-M365DscProjectSecrets -Datum $targetDatum
         $targetProjectSettings = $targetDatum.Global.ProjectSettings
         if ([string]$targetProjectSettings.OrganizationName -ne $script:OrganizationName -or
             [string]$targetProjectSettings.ProjectName -ne $script:ProjectName -or
@@ -1368,6 +1429,11 @@ try
             -Action {
                 $projectSetupScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\20 Configure AzDo Project.ps1'
                 Invoke-LabScriptWithGitAuthorization -Path $projectSetupScript -Arguments @{}
+                if ($SecretBackend -eq 'Kdbx')
+                {
+                    Invoke-LabScript -Path (Join-Path $resolvedLocalPath 'lab\Secrets\Kdbx\Publish Pipeline Secrets.ps1') `
+                        -Arguments @{ EnvironmentName = $script:targetEnvironmentNames }
+                }
             }
 
         Invoke-BootstrapStage -Index 12 -Name 'create-vms' `
@@ -1447,6 +1513,9 @@ catch
 finally
 {
     Restore-GitAuthorizationHeader
+    if (Get-Command Close-M365DscSecretStore -ErrorAction SilentlyContinue) { Close-M365DscSecretStore }
+    $env:M365DSC_SECRET_BACKEND = $previousSecretBackend
+    $env:M365DSC_KEYVAULT_PUBLIC_ONLY = $previousPublicOnly
     if ($script:secureBuildAgentPassword)
     {
         $script:secureBuildAgentPassword.Dispose()

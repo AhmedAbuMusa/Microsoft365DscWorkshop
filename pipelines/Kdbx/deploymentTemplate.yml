@@ -1,0 +1,124 @@
+parameters:
+- name: poolName
+  type: string
+- name: environments
+  type: object
+- name: operation
+  type: string
+  values: [push, reapply, test]
+- name: installLcmCertificate
+  type: boolean
+  default: false
+stages:
+- stage: Deployment
+  ${{ if eq(parameters.operation, 'push') }}:
+    dependsOn: Build
+  jobs:
+  - ${{ if eq(length(parameters.environments), 0) }}:
+    - job: RequireEnvironmentSelection
+      pool:
+        vmImage: windows-latest
+      steps:
+      - task: PowerShell@2
+        inputs:
+          targetType: inline
+          pwsh: true
+          script: throw 'Select configured environments explicitly when queuing a Kdbx pipeline.'
+  - ${{ each environment in parameters.environments }}:
+    - job: Deployment_${{ environment }}
+      variables:
+      - group: M365DSC-${{ environment }}-Kdbx
+      - name: BuildEnvironment
+        value: ${{ environment }}
+      - name: M365DSC_SECRET_BACKEND
+        value: Kdbx
+      pool:
+        name: ${{ parameters.poolName }}
+        demands:
+        - buildEnvironment -equals ${{ environment }}
+      steps:
+      - download: none
+      - task: DownloadSecureFile@1
+        name: metadata
+        inputs:
+          secureFile: $(M365DSC_METADATA_FILE)
+      - template: initTemplate.yml
+        parameters:
+          metadataPath: $(metadata.secureFilePath)
+      - task: PowerShell@2
+        displayName: Validate selected native environment
+        inputs:
+          targetType: inline
+          pwsh: true
+          script: |
+            Import-Module .\lab\Secrets\Kdbx\PipelineSecrets.psm1 -Force
+            $metadata = ConvertFrom-M365DscPipelineMetadata -Path $env:M365DSC_METADATA_PATH
+            if ($metadata.environments.Count -ne 1 -or -not $metadata.environments.Contains($env:BuildEnvironment)) {
+              throw 'Downloaded metadata does not match the selected environment.'
+            }
+        env:
+          BuildEnvironment: ${{ environment }}
+          M365DSC_METADATA_PATH: $(metadata.secureFilePath)
+      - ${{ if parameters.installLcmCertificate }}:
+        - task: DownloadSecureFile@1
+          name: lcmCertificate
+          inputs:
+            secureFile: $(M365DSC_LCM_PFX_FILE)
+        - task: PowerShell@2
+          displayName: Install LCM certificate in machine store
+          inputs:
+            targetType: inline
+            pwsh: true
+            script: |
+              Import-Module .\lab\Secrets\Kdbx\PipelineSecrets.psm1 -Force
+              $metadata = ConvertFrom-M365DscPipelineMetadata -Path $env:M365DSC_METADATA_PATH
+              $identity = @($metadata.environments[$env:BuildEnvironment].Identities | Where-Object Name -EQ 'M365DscLcmApplication')[0]
+              if (-not $env:M365DSC_LCM_PFX_PASSWORD) { throw 'LCM PFX password is required.' }
+              Import-M365DscPipelineCertificate -Path $env:M365DSC_LCM_PFX_PATH `
+                -Password (ConvertTo-M365DscPipelineSecureString -Value $env:M365DSC_LCM_PFX_PASSWORD) `
+                -ExpectedThumbprint $identity.CertificateThumbprint -StoreLocation LocalMachine | Out-Null
+          env:
+            BuildEnvironment: ${{ environment }}
+            M365DSC_METADATA_PATH: $(metadata.secureFilePath)
+            M365DSC_LCM_PFX_PATH: $(lcmCertificate.secureFilePath)
+            M365DSC_LCM_PFX_PASSWORD: $(M365DSC_LCM_PFX_PASSWORD)
+      - ${{ if eq(parameters.operation, 'push') }}:
+        - task: DownloadPipelineArtifact@2
+          inputs:
+            buildType: current
+            artifactName: MOF_${{ environment }}
+            targetPath: $(System.DefaultWorkingDirectory)\output\MOF
+        - task: PowerShell@2
+          displayName: Apply compiled DSC configuration
+          inputs:
+            pwsh: false
+            filePath: .\build.ps1
+            arguments: -Tasks startConfiguration
+          env:
+            BuildEnvironment: ${{ environment }}
+        - task: PowerShell@2
+          displayName: Validate compiled DSC deployment
+          inputs:
+            pwsh: false
+            filePath: .\build.ps1
+            arguments: -Tasks TestDeploymentDscConfiguration
+          env:
+            BuildEnvironment: ${{ environment }}
+      - ${{ if eq(parameters.operation, 'reapply') }}:
+        - task: PowerShell@2
+          displayName: Reapply existing DSC configuration
+          inputs:
+            pwsh: false
+            filePath: .\build.ps1
+            arguments: -Tasks StartExistingDscConfiguration
+          env:
+            BuildEnvironment: ${{ environment }}
+      - ${{ if ne(parameters.operation, 'push') }}:
+        - task: PowerShell@2
+          displayName: Test current DSC configuration
+          inputs:
+            pwsh: false
+            filePath: .\build.ps1
+            arguments: -Tasks testConfiguration
+          env:
+            BuildEnvironment: ${{ environment }}

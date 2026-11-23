@@ -1,0 +1,56 @@
+parameters:
+- name: poolName
+  type: string
+- name: environments
+  type: object
+stages:
+- stage: Build
+  jobs:
+  - ${{ if eq(length(parameters.environments), 0) }}:
+    - job: RequireEnvironmentSelection
+      pool:
+        vmImage: windows-latest
+      steps:
+      - task: PowerShell@2
+        inputs:
+          targetType: inline
+          pwsh: true
+          script: throw 'Select configured environments explicitly when queuing a Kdbx pipeline.'
+  - ${{ each environment in parameters.environments }}:
+    - job: Build_${{ environment }}
+      variables:
+      - group: M365DSC-${{ environment }}-Kdbx
+      - name: BuildEnvironment
+        value: ${{ environment }}
+      - name: M365DSC_SECRET_BACKEND
+        value: Kdbx
+      pool:
+        name: ${{ parameters.poolName }}
+        demands:
+        - buildEnvironment -equals ${{ environment }}
+      steps:
+      - task: DownloadSecureFile@1
+        name: metadata
+        inputs:
+          secureFile: $(M365DSC_METADATA_FILE)
+      - template: initTemplate.yml
+        parameters:
+          metadataPath: $(metadata.secureFilePath)
+      - task: PowerShell@2
+        displayName: Build native Kdbx DSC artifacts
+        inputs:
+          targetType: inline
+          pwsh: true
+          script: |
+            .\build.ps1 -Tasks build -Filter { $_.Environment -eq $env:BuildEnvironment }
+        env:
+          BuildEnvironment: ${{ environment }}
+          M365DSC_METADATA_PATH: $(metadata.secureFilePath)
+      - task: PublishPipelineArtifact@1
+        inputs:
+          targetPath: $(buildFolderName)\MOF
+          artifact: MOF_${{ environment }}
+      - task: PublishPipelineArtifact@1
+        inputs:
+          targetPath: $(buildFolderName)\RSOP
+          artifact: RSOP_${{ environment }}

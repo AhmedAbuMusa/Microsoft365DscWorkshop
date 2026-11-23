@@ -495,7 +495,7 @@ if (-not (Test-Path -LiteralPath $sourceSettingsPath -PathType Leaf) -or
 }
 
 $datum = New-DatumStructure -DefinitionFile (Join-Path -Path $repositoryRoot -ChildPath 'source\Datum.yml')
-$datum = Get-M365DscProjectSettingsFromKeyVault -Datum $datum -CredentialType personal-access-token
+$datum = Get-M365DscProjectSecrets -Datum $datum -CredentialType personal-access-token
 $projectSettings = $datum.Global.ProjectSettings
 $script:OrganizationName = [string](Get-RequiredConfigurationValue -Configuration $projectSettings -Name 'OrganizationName' -Path 'source/Global/ProjectSettings.yml: OrganizationName')
 $script:ProjectName = [string](Get-RequiredConfigurationValue -Configuration $projectSettings -Name 'ProjectName' -Path 'source/Global/ProjectSettings.yml: ProjectName')

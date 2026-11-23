@@ -24,7 +24,7 @@ if ($EnvironmentName)
     Write-Host "Filtering environments to: $($EnvironmentName -join ', ')" -ForegroundColor Magenta
     $environments = $environments | Where-Object { $EnvironmentName -contains $_ }
 }
-Update-M365DscDatumFromKeyVault `
+Update-M365DscEnvironmentMetadata `
     -Datum $datum `
     -ProjectName $datum.Global.ProjectSettings.ProjectName `
     -EnvironmentName $environments `

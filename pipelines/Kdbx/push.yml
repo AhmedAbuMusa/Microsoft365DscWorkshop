@@ -1,0 +1,27 @@
+trigger: none
+parameters:
+- name: poolName
+  type: string
+  default: $(M365DSC_AGENT_POOL)
+- name: environments
+  type: stringList
+  default: []
+- name: installLcmCertificate
+  type: boolean
+  default: false
+variables:
+  buildFolderName: output
+  testResultFolderName: testResults
+  defaultBranch: main
+  Agent.Source.Git.ShallowFetchDepth: 0
+stages:
+- template: buildTemplate.yml
+  parameters:
+    poolName: ${{ parameters.poolName }}
+    environments: ${{ parameters.environments }}
+- template: deploymentTemplate.yml
+  parameters:
+    poolName: ${{ parameters.poolName }}
+    environments: ${{ parameters.environments }}
+    operation: push
+    installLcmCertificate: ${{ parameters.installLcmCertificate }}

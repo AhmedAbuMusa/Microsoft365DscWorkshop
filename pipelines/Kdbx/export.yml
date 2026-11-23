@@ -1,0 +1,17 @@
+trigger: none
+parameters:
+- name: poolName
+  type: string
+  default: $(M365DSC_AGENT_POOL)
+- name: environments
+  type: stringList
+  default: []
+variables:
+  buildFolderName: output
+  defaultBranch: main
+  Agent.Source.Git.ShallowFetchDepth: 0
+stages:
+- template: exportTemplate.yml
+  parameters:
+    poolName: ${{ parameters.poolName }}
+    environments: ${{ parameters.environments }}

@@ -1,4 +1,6 @@
 Import-Module -Name $PSScriptRoot\CertHelpers.psm1 -Force
+Import-Module -Name $PSScriptRoot\..\Secrets\SecretBackend.psm1 -ErrorAction Stop
+Import-Module -Name $PSScriptRoot\..\Secrets\KeyVault\PublicEndpoint.psm1 -ErrorAction Stop
 
 function Write-M365DscEnvironmentContext
 {
@@ -311,6 +313,11 @@ function Get-M365DscKeyVaultNetworkParameters
     )
 
     $settings = $Datum.Global.ProjectSettings
+    if ($settings.KeyVaultPublicOnly -eq $true -or $env:M365DSC_KEYVAULT_PUBLIC_ONLY -eq '1')
+    {
+        $env:M365DSC_KEYVAULT_PUBLIC_ONLY = '1'
+        return @{}
+    }
     $networking = if ($settings -is [System.Collections.IDictionary])
     {
         $settings['KeyVaultNetworking']
@@ -512,6 +519,15 @@ function Resolve-M365DscKeyVaultNetworkParameters
         [string[]]$DnsVirtualNetworkId
     )
 
+    if ($env:M365DSC_KEYVAULT_PUBLIC_ONLY -eq '1')
+    {
+        Assert-M365DscPublicKeyVault -Vault $Vault -EnvironmentName $EnvironmentName
+        if ($PrivateEndpointSubnetId -or $DnsVirtualNetworkId)
+        {
+            throw 'Public-only Key Vault mode cannot accept private endpoint networking parameters.'
+        }
+        return @{}
+    }
     if ($PrivateEndpointSubnetId)
     {
         return @{ PrivateEndpointSubnetId = $PrivateEndpointSubnetId; DnsVirtualNetworkId = @($DnsVirtualNetworkId) }
@@ -3278,6 +3294,9 @@ function Add-M365DscIdentityPermission
         [Parameter(ParameterSetName = 'ByAccessType')]
         [switch]$AddToGlobalAdminRole = $false,
 
+        [Parameter(ParameterSetName = 'ByAccessType')]
+        [switch]$SkipAzurePermissions,
+
         [Parameter(ParameterSetName = 'ByPermission')]
         [string[]]$Permissions
     )
@@ -3302,7 +3321,7 @@ function Add-M365DscIdentityPermission
         {
             Write-Host 'No Azure subscription available. Skipping Azure permissions.' -ForegroundColor Yellow
         }
-        else
+        elseif (-not $SkipAzurePermissions)
         {
             Write-Host 'Adding Azure permissions' -ForegroundColor Magenta
             if ($AccessType -eq 'Update')

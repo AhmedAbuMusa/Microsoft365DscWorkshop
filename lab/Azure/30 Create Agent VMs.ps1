@@ -16,6 +16,7 @@ if ($env:PSModulePath -notlike "*$requiredModulesPath*")
 Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force
 
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
+$datum = Get-M365DscProjectConfiguration -Datum $datum
 $environments = $datum.Global.Azure.Environments.Keys
 
 if ($BuildAgentPassword)
@@ -32,7 +33,7 @@ if ($BuildAgentPassword)
 }
 else
 {
-    $datum = Get-M365DscProjectSettingsFromKeyVault -Datum $datum -CredentialType build-agent-password
+    $datum = Get-M365DscProjectSecrets -Datum $datum -CredentialType build-agent-password
 }
 
 if ($EnvironmentName)
@@ -40,7 +41,7 @@ if ($EnvironmentName)
     Write-Host "Filtering environments to: $($EnvironmentName -join ', ')" -ForegroundColor Magenta
     $environments = $environments | Where-Object { $EnvironmentName -contains $_ }
 }
-Update-M365DscDatumFromKeyVault `
+Update-M365DscEnvironmentMetadata `
     -Datum $datum `
     -ProjectName $datum.Global.ProjectSettings.ProjectName `
     -EnvironmentName $environments | Out-Null

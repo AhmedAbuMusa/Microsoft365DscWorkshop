@@ -111,7 +111,7 @@ Import-Module -Name Microsoft.Graph.Applications -RequiredVersion '2.41.1' -Erro
 
 $datum = New-DatumStructure -DefinitionFile (Join-Path -Path $PSScriptRoot -ChildPath '..\..\source\Datum.yml')
 Import-Module -Name (Join-Path -Path $PSScriptRoot -ChildPath 'AzHelpers.psm1') -Force -ErrorAction Stop
-Update-M365DscDatumFromKeyVault `
+Update-M365DscEnvironmentMetadata `
     -Datum $datum `
     -ProjectName $datum.Global.ProjectSettings.ProjectName `
     -EnvironmentName $EnvironmentName `

@@ -52,7 +52,7 @@ if (-not $environmentNames)
 {
     throw "No Environments section was found in '$azureConfigPath'."
 }
-Update-M365DscDatumFromKeyVault `
+Update-M365DscEnvironmentMetadata `
     -Datum $datum `
     -ProjectName $datum.Global.ProjectSettings.ProjectName `
     -EnvironmentName $environmentNames | Out-Null

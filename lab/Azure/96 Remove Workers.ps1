@@ -57,11 +57,11 @@ $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
 $selectedEnvironmentNames = @($datum.Global.Azure.Environments.Keys | Where-Object {
         -not $EnvironmentName -or $_ -in $EnvironmentName
     })
-Update-M365DscDatumFromKeyVault `
+Update-M365DscEnvironmentMetadata `
     -Datum $datum `
     -ProjectName $datum.Global.ProjectSettings.ProjectName `
     -EnvironmentName $selectedEnvironmentNames | Out-Null
-$datum = Get-M365DscProjectSettingsFromKeyVault -Datum $datum -CredentialType personal-access-token
+$datum = Get-M365DscProjectSecrets -Datum $datum -CredentialType personal-access-token
 
 function Remove-M365DscAgentPoolAgents
 {

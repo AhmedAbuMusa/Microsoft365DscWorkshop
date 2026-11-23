@@ -18,10 +18,12 @@ if ($EnvironmentName)
 Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force
 $projectSettings = Get-Content $PSScriptRoot\..\..\source\Global\ProjectSettings.yml | ConvertFrom-Yaml -ErrorAction Stop
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
+$datum = Get-M365DscProjectConfiguration -Datum $datum
+$projectSettings = $datum.Global.ProjectSettings
 $selectedEnvironmentNames = @($datum.Global.Azure.Environments.Keys | Where-Object {
         -not $EnvironmentName -or $_ -in $EnvironmentName
     })
-Update-M365DscDatumFromKeyVault `
+Update-M365DscEnvironmentMetadata `
     -Datum $datum `
     -ProjectName $projectSettings.ProjectName `
     -EnvironmentName $selectedEnvironmentNames | Out-Null

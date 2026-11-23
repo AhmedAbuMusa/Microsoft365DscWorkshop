@@ -1,0 +1,63 @@
+trigger: none
+parameters:
+- name: environments
+  type: stringList
+  default: []
+- name: sourceTenant
+  type: string
+  default: '<SourceTenant>'
+- name: anonymizeTenantIdentifiers
+  type: boolean
+  default: false
+variables:
+  M365DSC_SECRET_BACKEND: Kdbx
+  buildFolderName: output
+  defaultBranch: main
+  Agent.Source.Git.ShallowFetchDepth: 0
+resources:
+  pipelines:
+  - pipeline: exportPipeline
+    source: M365DSC export
+    trigger: none
+pool:
+  vmImage: windows-latest
+steps:
+- ${{ if eq(length(parameters.environments), 0) }}:
+  - task: PowerShell@2
+    inputs:
+      targetType: inline
+      pwsh: true
+      script: throw 'Select configured environments explicitly when queuing a Kdbx pipeline.'
+- download: exportPipeline
+  patterns: '**'
+- ${{ each environment in parameters.environments }}:
+  - task: DownloadSecureFile@1
+    name: metadata_${{ environment }}
+    inputs:
+      secureFile: M365DSC-${{ environment }}-Kdbx.metadata.json
+- task: PowerShell@2
+  displayName: Initialize delta report modules
+  inputs:
+    pwsh: true
+    filePath: .\build.ps1
+    arguments: -ResolveDependency -Tasks InitializeModuleFolderForDeltaReport
+- task: PowerShell@2
+  displayName: Create native Kdbx delta report
+  inputs:
+    targetType: inline
+    pwsh: true
+    script: |
+      $paths = @(Get-ChildItem Env: | Where-Object Name -Like 'KDBX_METADATA_*' | ForEach-Object Value)
+      if ($paths.Count -eq 0) { throw 'No native metadata paths were downloaded.' }
+      $env:M365DSC_METADATA_PATHS = ConvertTo-Json -InputObject $paths -Compress
+      .\build.ps1 -Tasks deltaReport
+  env:
+    DeltaReportInputDirectory: $(Pipeline.Workspace)\exportPipeline
+    DeltaReportSourceTenant: ${{ parameters.sourceTenant }}
+    DeltaReportAnonymizeTenantIdentifiers: ${{ parameters.anonymizeTenantIdentifiers }}
+    ${{ each environment in parameters.environments }}:
+      KDBX_METADATA_${{ environment }}: $(metadata_${{ environment }}.secureFilePath)
+- task: PublishPipelineArtifact@1
+  inputs:
+    targetPath: $(buildFolderName)\DeltaReport
+    artifact: DeltaReport

@@ -1,0 +1,67 @@
+parameters:
+- name: poolName
+  type: string
+- name: environments
+  type: object
+stages:
+- stage: Export
+  jobs:
+  - ${{ if eq(length(parameters.environments), 0) }}:
+    - job: RequireEnvironmentSelection
+      pool:
+        vmImage: windows-latest
+      steps:
+      - task: PowerShell@2
+        inputs:
+          targetType: inline
+          pwsh: true
+          script: throw 'Select configured environments explicitly when queuing a Kdbx pipeline.'
+  - ${{ each environment in parameters.environments }}:
+    - job: Export_${{ environment }}
+      variables:
+      - group: M365DSC-${{ environment }}-Kdbx
+      - name: BuildEnvironment
+        value: ${{ environment }}
+      - name: M365DSC_SECRET_BACKEND
+        value: Kdbx
+      pool:
+        name: ${{ parameters.poolName }}
+        demands:
+        - buildEnvironment -equals ${{ environment }}
+      steps:
+      - task: DownloadSecureFile@1
+        name: metadata
+        inputs:
+          secureFile: $(M365DSC_METADATA_FILE)
+      - task: DownloadSecureFile@1
+        name: exportCertificate
+        inputs:
+          secureFile: $(M365DSC_EXPORT_PFX_FILE)
+      - template: initTemplate.yml
+        parameters:
+          metadataPath: $(metadata.secureFilePath)
+          includeExchange: true
+      - task: PowerShell@2
+        displayName: Export using certificate-only native delivery
+        inputs:
+          pwsh: true
+          filePath: .\build.ps1
+          arguments: -Tasks export
+        env:
+          BuildEnvironment: ${{ environment }}
+          M365DSC_METADATA_PATH: $(metadata.secureFilePath)
+          M365DSC_EXPORT_PFX_PATH: $(exportCertificate.secureFilePath)
+          M365DSC_EXPORT_PFX_PASSWORD: $(M365DSC_EXPORT_PFX_PASSWORD)
+      - task: PowerShell@2
+        displayName: Convert exported configuration
+        inputs:
+          pwsh: true
+          filePath: .\build.ps1
+          arguments: -Tasks exportConvert
+        env:
+          BuildEnvironment: ${{ environment }}
+          M365DSC_METADATA_PATH: $(metadata.secureFilePath)
+      - task: PublishPipelineArtifact@1
+        inputs:
+          targetPath: $(buildFolderName)\Export
+          artifact: TenantConfig-${{ environment }}

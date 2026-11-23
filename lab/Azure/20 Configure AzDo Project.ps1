@@ -25,6 +25,8 @@ Import-Module -Name VSTeam -RequiredVersion '7.15.2' -ErrorAction Stop
 Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force -ErrorAction Stop
 
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
+$datum = Get-M365DscProjectConfiguration -Datum $datum
+$secretBackend = Get-M365DscSecretBackend -Datum $datum
 
 # ----------------------------------------------------------
 #            Setting project parameters
@@ -65,7 +67,7 @@ if ($datum.Global.ProjectSettings.AgentPoolName -eq '<AgentPoolName>' -or $null 
     $datum.Global.ProjectSettings | ConvertTo-Yaml | Out-File $PSScriptRoot\..\..\source\Global\ProjectSettings.yml
 }
 
-if ((git status -s) -like '*source/Global/ProjectSettings.yml')
+if ($secretBackend -eq 'KeyVault' -and (git status -s) -like '*source/Global/ProjectSettings.yml')
 {
     git add $PSScriptRoot\..\..\source\Global\ProjectSettings.yml
     if ($LASTEXITCODE -ne 0)
@@ -86,7 +88,7 @@ if ((git status -s) -like '*source/Global/ProjectSettings.yml')
     }
 }
 
-Get-M365DscProjectSettingsFromKeyVault -Datum $datum -CredentialType personal-access-token | Out-Null
+Get-M365DscProjectSecrets -Datum $datum -CredentialType personal-access-token | Out-Null
 Set-VSTeamAccount -Account "https://dev.azure.com/$($datum.Global.ProjectSettings.OrganizationName)/" -PersonalAccessToken $datum.Global.ProjectSettings.PersonalAccessToken -ErrorAction Stop
 Write-Host "Connected to Azure DevOps organization '$($datum.Global.ProjectSettings.OrganizationName)' with PAT."
 
@@ -218,152 +220,156 @@ foreach ($environment in $environments)
 # ------------------------------------------------------------------
 Write-Host 'Changing build pipelines to use only the configured environments' -ForegroundColor Yellow
 
-$azureConfigurationPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\source\Global\Azure.yml'
-$azureConfiguration = Get-Content -Path $azureConfigurationPath -Raw | ConvertFrom-Yaml -Ordered -ErrorAction Stop
-$environments = @($azureConfiguration.Environments.Keys | ForEach-Object { [string]$_ })
-if (-not $environments)
+if ($secretBackend -eq 'KeyVault')
 {
-    throw "No environments were found in 'source\Global\Azure.yml'. Configure at least one environment before updating pipelines."
-}
-
-# deltaReport uses windows-latest and has no poolName parameter to adapt.
-$pipelinesToAdapt = 'build.yml', 'export.yml', 'pull.yml', 'push.yml', 'reapply.yml', 'test.yml'
-$pipelinesToAdapt = @(
-    Get-ChildItem -Path $PSScriptRoot\..\..\pipelines -File | Where-Object Name -In $pipelinesToAdapt
-    Get-Item -Path $PSScriptRoot\..\..\pipelines\Troubleshooting\winrmDiagnostics.yml -ErrorAction Stop
-)
-
-Write-Host "Known environments: $($environments -join ', ')"
-Write-Host 'Pipelines to adapt:'
-$pipelinesToAdapt | ForEach-Object { Write-Host "  - $($_.Name)" }
-Write-Host ''
-
-foreach ($pipeline in $pipelinesToAdapt)
-{
-    $pipelineChanged = $false
-    Write-Host "Adapting pipeline $($pipeline.FullName)"
-    $pipelineYaml = Get-Content $pipeline.FullName -Raw | ConvertFrom-Yaml -Ordered
-    $buildEnvironmentsParameter = @($pipelineYaml.parameters | Where-Object Name -EQ buildEnvironments)
-    if ($buildEnvironmentsParameter.Count -gt 1)
+    $azureConfigurationPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\source\Global\Azure.yml'
+    $azureConfiguration = Get-Content -Path $azureConfigurationPath -Raw | ConvertFrom-Yaml -Ordered -ErrorAction Stop
+    $environments = @($azureConfiguration.Environments.Keys | ForEach-Object { [string]$_ })
+    if (-not $environments)
     {
-        throw "Pipeline '$($pipeline.Name)' has more than one 'buildEnvironments' parameter."
+        throw "No environments were found in 'source\Global\Azure.yml'. Configure at least one environment before updating pipelines."
     }
 
-    if ($buildEnvironmentsParameter.Count -eq 1)
-    {
-        [void]$pipelineYaml.parameters.Remove($buildEnvironmentsParameter[0])
-        $pipelineChanged = $true
-    }
+    # deltaReport uses windows-latest and has no poolName parameter to adapt.
+    $pipelinesToAdapt = 'build.yml', 'export.yml', 'pull.yml', 'push.yml', 'reapply.yml', 'test.yml'
+    $pipelinesToAdapt = @(
+        Get-ChildItem -Path $PSScriptRoot\..\..\pipelines -File | Where-Object Name -In $pipelinesToAdapt
+        Get-Item -Path $PSScriptRoot\..\..\pipelines\Troubleshooting\winrmDiagnostics.yml -ErrorAction Stop
+    )
 
-    Write-Host "  Setting agent pool name to '$($datum.Global.ProjectSettings.AgentPoolName)' in pipeline '$($pipeline.Name)'."
-    if (($pipelineYaml.parameters | Where-Object name -EQ poolName).default -ne $datum.Global.ProjectSettings.AgentPoolName)
+    Write-Host "Known environments: $($environments -join ', ')"
+    Write-Host 'Pipelines to adapt:'
+    $pipelinesToAdapt | ForEach-Object { Write-Host "  - $($_.Name)" }
+    Write-Host ''
+
+    foreach ($pipeline in $pipelinesToAdapt)
     {
+        $pipelineChanged = $false
+        Write-Host "Adapting pipeline $($pipeline.FullName)"
+        $pipelineYaml = Get-Content $pipeline.FullName -Raw | ConvertFrom-Yaml -Ordered
+        $buildEnvironmentsParameter = @($pipelineYaml.parameters | Where-Object Name -EQ buildEnvironments)
+        if ($buildEnvironmentsParameter.Count -gt 1)
+        {
+            throw "Pipeline '$($pipeline.Name)' has more than one 'buildEnvironments' parameter."
+        }
+
+        if ($buildEnvironmentsParameter.Count -eq 1)
+        {
+            [void]$pipelineYaml.parameters.Remove($buildEnvironmentsParameter[0])
+            $pipelineChanged = $true
+        }
+
         Write-Host "  Setting agent pool name to '$($datum.Global.ProjectSettings.AgentPoolName)' in pipeline '$($pipeline.Name)'."
-        ($pipelineYaml.parameters | Where-Object name -EQ poolName).default = $datum.Global.ProjectSettings.AgentPoolName
-        $pipelineChanged = $true
+        if (($pipelineYaml.parameters | Where-Object name -EQ poolName).default -ne $datum.Global.ProjectSettings.AgentPoolName)
+        {
+            Write-Host "  Setting agent pool name to '$($datum.Global.ProjectSettings.AgentPoolName)' in pipeline '$($pipeline.Name)'."
+            ($pipelineYaml.parameters | Where-Object name -EQ poolName).default = $datum.Global.ProjectSettings.AgentPoolName
+            $pipelineChanged = $true
+        }
+        else
+        {
+            Write-Host "  Agent pool name is already set to '$($datum.Global.ProjectSettings.AgentPoolName)' in pipeline '$($pipeline.Name)'."
+        }
+
+        $configuredBuildEnvironments = [System.Collections.Generic.List[object]]::new()
+        for ($environmentIndex = 0; $environmentIndex -lt $environments.Count; $environmentIndex++)
+        {
+            $environmentDefinition = [ordered]@{
+                Name = [string]$environments[$environmentIndex]
+            }
+            if ($pipeline.Name -in @('build.yml', 'push.yml', 'reapply.yml') -and $environmentIndex -gt 0)
+            {
+                $environmentDefinition.DependsOn = [string]$environments[$environmentIndex - 1]
+            }
+
+            $configuredBuildEnvironments.Add($environmentDefinition)
+        }
+
+        $templateCallsUpdated = 0
+        $usesDynamicEnvironmentMatrix = @($pipelineYaml.stages | Where-Object {
+                $_.template -eq 'environmentMatrixTemplate.yml' -or
+                $_.template -match '[\\/]environmentMatrixTemplate\.yml$'
+            }).Count -gt 0
+
+        foreach ($stage in $pipelineYaml.stages)
+        {
+            if ($stage.parameters -and $stage.parameters.Contains('buildEnvironments'))
+            {
+                $templateCallsUpdated++
+
+                $currentBuildEnvironments = @($stage.parameters.buildEnvironments)
+                $environmentDefinitionsMatch = $currentBuildEnvironments.Count -eq $configuredBuildEnvironments.Count
+                for ($environmentIndex = 0; $environmentDefinitionsMatch -and $environmentIndex -lt $configuredBuildEnvironments.Count; $environmentIndex++)
+                {
+                    if ([string]$currentBuildEnvironments[$environmentIndex].Name -cne $configuredBuildEnvironments[$environmentIndex].Name -or
+                        [string]$currentBuildEnvironments[$environmentIndex].DependsOn -cne [string]$configuredBuildEnvironments[$environmentIndex].DependsOn)
+                    {
+                        $environmentDefinitionsMatch = $false
+                    }
+                }
+
+                if (-not $environmentDefinitionsMatch)
+                {
+                    $stage.parameters.buildEnvironments = $configuredBuildEnvironments
+                    $pipelineChanged = $true
+                }
+            }
+        }
+        if ($templateCallsUpdated -eq 0 -and -not $usesDynamicEnvironmentMatrix)
+        {
+            throw "Pipeline '$($pipeline.Name)' has neither a dynamic environment matrix template nor a stage template that accepts 'buildEnvironments'."
+        }
+
+        if ($usesDynamicEnvironmentMatrix)
+        {
+            Write-Host "  Environment matrix in '$($pipeline.Name)' uses the pipeline environment parameters synchronized from 'source\Global\Azure.yml'."
+        }
+
+        if ($templateCallsUpdated -gt 0)
+        {
+            Write-Host "  Set $templateCallsUpdated stage template(s) to configured environments: $($environments -join ', ')."
+        }
+
+        if ($pipelineChanged)
+        {
+            Write-Host "  Saving changes to pipeline '$($pipeline.Name)'."
+            $pipelineYaml | ConvertTo-Yaml | Out-File -FilePath $pipeline.FullName
+        }
+    }
+
+    $repositoryRoot = (Resolve-Path -Path $PSScriptRoot\..\..).Path
+
+    # 'git diff' reports paths relative to the repository root, so git must run there as well
+    $changedFiles = git -C $repositoryRoot diff --name-only | Where-Object { $_ -match '^pipelines/(?:[^/]+/)*[^/]+\.yml$' }
+    if ($changedFiles.Count -gt 0)
+    {
+        Write-Host 'Committing changes to pipelines.'
+        foreach ($changedFile in $changedFiles)
+        {
+            git -C $repositoryRoot add $changedFile
+            if ($LASTEXITCODE -ne 0)
+            {
+                throw "Failed to stage pipeline file '$changedFile'."
+            }
+        }
+
+        git -C $repositoryRoot commit --only -m 'Updated pipelines to use only the configured environments' -- $changedFiles | Out-Null
+        if ($LASTEXITCODE -ne 0)
+        {
+            throw 'Failed to commit pipeline changes.'
+        }
+
+        git -C $repositoryRoot push
+        if ($LASTEXITCODE -ne 0)
+        {
+            throw 'Failed to push pipeline changes. The commit remains local; synchronize the branch before rerunning this script.'
+        }
     }
     else
     {
-        Write-Host "  Agent pool name is already set to '$($datum.Global.ProjectSettings.AgentPoolName)' in pipeline '$($pipeline.Name)'."
+        Write-Host 'No changes to commit, no pipeline was changed.'
     }
 
-    $configuredBuildEnvironments = [System.Collections.Generic.List[object]]::new()
-    for ($environmentIndex = 0; $environmentIndex -lt $environments.Count; $environmentIndex++)
-    {
-        $environmentDefinition = [ordered]@{
-            Name = [string]$environments[$environmentIndex]
-        }
-        if ($pipeline.Name -in @('build.yml', 'push.yml', 'reapply.yml') -and $environmentIndex -gt 0)
-        {
-            $environmentDefinition.DependsOn = [string]$environments[$environmentIndex - 1]
-        }
-
-        $configuredBuildEnvironments.Add($environmentDefinition)
-    }
-
-    $templateCallsUpdated = 0
-    $usesDynamicEnvironmentMatrix = @($pipelineYaml.stages | Where-Object {
-            $_.template -eq 'environmentMatrixTemplate.yml' -or
-            $_.template -match '[\\/]environmentMatrixTemplate\.yml$'
-        }).Count -gt 0
-
-    foreach ($stage in $pipelineYaml.stages)
-    {
-        if ($stage.parameters -and $stage.parameters.Contains('buildEnvironments'))
-        {
-            $templateCallsUpdated++
-
-            $currentBuildEnvironments = @($stage.parameters.buildEnvironments)
-            $environmentDefinitionsMatch = $currentBuildEnvironments.Count -eq $configuredBuildEnvironments.Count
-            for ($environmentIndex = 0; $environmentDefinitionsMatch -and $environmentIndex -lt $configuredBuildEnvironments.Count; $environmentIndex++)
-            {
-                if ([string]$currentBuildEnvironments[$environmentIndex].Name -cne $configuredBuildEnvironments[$environmentIndex].Name -or
-                    [string]$currentBuildEnvironments[$environmentIndex].DependsOn -cne [string]$configuredBuildEnvironments[$environmentIndex].DependsOn)
-                {
-                    $environmentDefinitionsMatch = $false
-                }
-            }
-
-            if (-not $environmentDefinitionsMatch)
-            {
-                $stage.parameters.buildEnvironments = $configuredBuildEnvironments
-                $pipelineChanged = $true
-            }
-        }
-    }
-    if ($templateCallsUpdated -eq 0 -and -not $usesDynamicEnvironmentMatrix)
-    {
-        throw "Pipeline '$($pipeline.Name)' has neither a dynamic environment matrix template nor a stage template that accepts 'buildEnvironments'."
-    }
-
-    if ($usesDynamicEnvironmentMatrix)
-    {
-        Write-Host "  Environment matrix in '$($pipeline.Name)' uses the pipeline environment parameters synchronized from 'source\Global\Azure.yml'."
-    }
-
-    if ($templateCallsUpdated -gt 0)
-    {
-        Write-Host "  Set $templateCallsUpdated stage template(s) to configured environments: $($environments -join ', ')."
-    }
-
-    if ($pipelineChanged)
-    {
-        Write-Host "  Saving changes to pipeline '$($pipeline.Name)'."
-        $pipelineYaml | ConvertTo-Yaml | Out-File -FilePath $pipeline.FullName
-    }
-}
-
-$repositoryRoot = (Resolve-Path -Path $PSScriptRoot\..\..).Path
-
-# 'git diff' reports paths relative to the repository root, so git must run there as well
-$changedFiles = git -C $repositoryRoot diff --name-only | Where-Object { $_ -match '^pipelines/(?:[^/]+/)*[^/]+\.yml$' }
-if ($changedFiles.Count -gt 0)
-{
-    Write-Host 'Committing changes to pipelines.'
-    foreach ($changedFile in $changedFiles)
-    {
-        git -C $repositoryRoot add $changedFile
-        if ($LASTEXITCODE -ne 0)
-        {
-            throw "Failed to stage pipeline file '$changedFile'."
-        }
-    }
-
-    git -C $repositoryRoot commit --only -m 'Updated pipelines to use only the configured environments' -- $changedFiles | Out-Null
-    if ($LASTEXITCODE -ne 0)
-    {
-        throw 'Failed to commit pipeline changes.'
-    }
-
-    git -C $repositoryRoot push
-    if ($LASTEXITCODE -ne 0)
-    {
-        throw 'Failed to push pipeline changes. The commit remains local; synchronize the branch before rerunning this script.'
-    }
-}
-else
-{
-    Write-Host 'No changes to commit, no pipeline was changed.'
 }
 
 # ----------------------------------------------------------
@@ -372,17 +378,30 @@ else
 
 Write-Host 'Creating pipelines in project.'
 $pipelineNames = 'build', 'deltaReport', 'export', 'push', 'reapply', 'test', 'winrmDiagnostics'
+if ($secretBackend -eq 'Kdbx') { $pipelineNames = @($pipelineNames | Where-Object { $_ -ne 'winrmDiagnostics' }) }
 foreach ($pipelineName in $pipelineNames)
 {
     $displayName = if ($pipelineName -eq 'winrmDiagnostics') { 'M365DSC WinRM Diagnostics' } else { "M365DSC $pipelineName" }
-    if (Invoke-VSTeamRequest -Area pipelines -Version 7.1 -Method Get -ProjectName $datum.Global.ProjectSettings.ProjectName | Select-Object -ExpandProperty value | Where-Object { $_.name -eq $displayName })
+    $pipelinePath = if ($secretBackend -eq 'Kdbx') { "pipelines/Kdbx/$pipelineName.yml" }
+    elseif ($pipelineName -eq 'winrmDiagnostics') { 'pipelines/Troubleshooting/winrmDiagnostics.yml' }
+    else { "pipelines/$pipelineName.yml" }
+    $existingPipeline = @(Invoke-VSTeamRequest -Area pipelines -Version 7.1 -Method Get -ProjectName $datum.Global.ProjectSettings.ProjectName |
+            Select-Object -ExpandProperty value | Where-Object { $_.name -eq $displayName })
+    if ($existingPipeline.Count -gt 1) { throw "More than one pipeline named '$displayName' exists." }
+    if ($existingPipeline.Count -eq 1)
     {
+        $definition = Invoke-VSTeamRequest -Area pipelines -Id $existingPipeline[0].id -Version 7.1 -Method Get -ProjectName $datum.Global.ProjectSettings.ProjectName
+        if (-not $definition.configuration.path -or
+            ($definition.configuration.path -replace '\\', '/').TrimStart('/') -ne $pipelinePath)
+        {
+            throw "Pipeline '$displayName' belongs to a different backend or YAML path. Use a separate Azure DevOps project; no existing pipeline credentials will be switched automatically."
+        }
         Write-Host "Pipeline '$displayName' already exists in project '$($datum.Global.ProjectSettings.ProjectName)'."
         continue
     }
 
-    $repo = Get-VSTeamGitRepository -Name $datum.Global.ProjectSettings.ProjectName -ProjectName $datum.Global.ProjectSettings.ProjectName
-    $pipelinePath = if ($pipelineName -eq 'winrmDiagnostics') { 'pipelines/Troubleshooting/winrmDiagnostics.yml' } else { "pipelines/$pipelineName.yml" }
+    $repositoryName = if ($secretBackend -eq 'Kdbx') { $datum.Global.ProjectSettings.RepositoryName } else { $datum.Global.ProjectSettings.ProjectName }
+    $repo = Get-VSTeamGitRepository -Name $repositoryName -ProjectName $datum.Global.ProjectSettings.ProjectName
     $pipelineParams = @{
         configuration = @{
             path       = $pipelinePath

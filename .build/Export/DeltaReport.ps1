@@ -114,71 +114,105 @@ task NewM365DscDeltaReport {
     $tenantIdentifierMap = $null
     if ($env:DeltaReportAnonymizeTenantIdentifiers -eq 'true')
     {
-        if (-not $env:BuildEnvironment)
+        if ($env:M365DSC_METADATA_PATHS -or $env:M365DSC_METADATA_PATH)
         {
-            Write-Error "Set 'BuildEnvironment' so the build agent can load tenant IDs from Key Vault using its managed identity before anonymizing the delta report." -ErrorAction Stop
-        }
-
-        $azureConfigurationPath = Join-Path -Path $ProjectPath -ChildPath 'source\Global\Azure.yml'
-        if (-not (Test-Path -LiteralPath $azureConfigurationPath -PathType Leaf))
-        {
-            Write-Error "Azure configuration file '$azureConfigurationPath' was not found; tenant identifiers cannot be anonymized." -ErrorAction Stop
-        }
-
-        $azureConfiguration = Get-Content -LiteralPath $azureConfigurationPath -Raw -ErrorAction Stop | ConvertFrom-Yaml -ErrorAction Stop
-        if ($null -eq $azureConfiguration.Environments)
-        {
-            Write-Error "Azure configuration file '$azureConfigurationPath' does not define Environments; tenant identifiers cannot be anonymized." -ErrorAction Stop
-        }
-
-        $requiredModuleVersions = Import-PowerShellDataFile -Path (Join-Path -Path $ProjectPath -ChildPath 'RequiredModules.psd1')
-        Import-Module -Name Az.Accounts -RequiredVersion $requiredModuleVersions['Az.Accounts'] -ErrorAction Stop
-        Import-Module -Name Az.KeyVault -RequiredVersion $requiredModuleVersions['Az.KeyVault'] -ErrorAction Stop
-        Import-Module -Name (Join-Path -Path $ProjectPath -ChildPath 'lab\AutomatedLab\AzHelpers.psm1') -Force -ErrorAction Stop
-        $datum = New-DatumStructure -DefinitionFile (Join-Path -Path $ProjectPath -ChildPath 'source\Datum.yml')
-        Update-M365DscDatumFromKeyVault `
-            -Datum $datum `
-            -ProjectName $datum.Global.ProjectSettings.ProjectName `
-            -EnvironmentName ([string]$env:BuildEnvironment) `
-            -ManagedIdentity | Out-Null
-
-        $tenantIdentifierMap = [System.Collections.Hashtable]::new([System.StringComparer]::OrdinalIgnoreCase)
-        foreach ($environment in $datum.Global.Azure.Environments.GetEnumerator())
-        {
-            $tenantName = [string]$environment.Value.AzTenantName
-            $tenantId = [string]$environment.Value.AzTenantId
-            if ([string]::IsNullOrWhiteSpace($tenantName))
+            Import-Module -Name (Join-Path $ProjectPath 'lab\Secrets\Kdbx\PipelineSecrets.psm1') -Force -ErrorAction Stop
+            $metadataPaths = if ($env:M365DSC_METADATA_PATHS)
             {
-                Write-Error "Environment '$($environment.Name)' is missing its public tenant name; refusing to anonymize the delta report." -ErrorAction Stop
+                $paths = ConvertFrom-Json -InputObject $env:M365DSC_METADATA_PATHS -NoEnumerate -ErrorAction Stop
+                if ($paths -isnot [array] -or $paths.Count -eq 0 -or @($paths | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_) }).Count)
+                {
+                    throw 'M365DSC_METADATA_PATHS must be a non-empty JSON array of metadata file paths.'
+                }
+                $paths
+            }
+            else { @($env:M365DSC_METADATA_PATH) }
+            $tenantIdentifierMap = Get-M365DscPipelineTenantIdentifierMap -Path $metadataPaths
+            foreach ($tenantName in $mergedConfigurations.Keys)
+            {
+                if (-not $tenantIdentifierMap.Contains($tenantName))
+                {
+                    if ($tenantName -eq 'delta-report-test.onmicrosoft.com')
+                    {
+                        $tenantIdentifierMap[$tenantName] = 'Synthetic'
+                        continue
+                    }
+                    throw "Exported tenant '$tenantName' has no native metadata; refusing to publish an incompletely anonymized report."
+                }
+            }
+        }
+        elseif ($env:M365DSC_SECRET_BACKEND -eq 'Kdbx')
+        {
+            throw 'Kdbx delta anonymization requires M365DSC_METADATA_PATHS or M365DSC_METADATA_PATH; no Key Vault or database fallback is allowed.'
+        }
+        else
+        {
+            if (-not $env:BuildEnvironment)
+            {
+                Write-Error "Set 'BuildEnvironment' so the build agent can load tenant IDs from Key Vault using its managed identity before anonymizing the delta report." -ErrorAction Stop
             }
 
-            $tenantIdentifierMap[$tenantName] = [string]$environment.Name
-            if ($tenantId)
+            $azureConfigurationPath = Join-Path -Path $ProjectPath -ChildPath 'source\Global\Azure.yml'
+            if (-not (Test-Path -LiteralPath $azureConfigurationPath -PathType Leaf))
             {
-                if ($tenantIdentifierMap.Contains($tenantId) -and $tenantIdentifierMap[$tenantId] -ne $environment.Name)
+                Write-Error "Azure configuration file '$azureConfigurationPath' was not found; tenant identifiers cannot be anonymized." -ErrorAction Stop
+            }
+
+            $azureConfiguration = Get-Content -LiteralPath $azureConfigurationPath -Raw -ErrorAction Stop | ConvertFrom-Yaml -ErrorAction Stop
+            if ($null -eq $azureConfiguration.Environments)
+            {
+                Write-Error "Azure configuration file '$azureConfigurationPath' does not define Environments; tenant identifiers cannot be anonymized." -ErrorAction Stop
+            }
+
+            $requiredModuleVersions = Import-PowerShellDataFile -Path (Join-Path -Path $ProjectPath -ChildPath 'RequiredModules.psd1')
+            Import-Module -Name Az.Accounts -RequiredVersion $requiredModuleVersions['Az.Accounts'] -ErrorAction Stop
+            Import-Module -Name Az.KeyVault -RequiredVersion $requiredModuleVersions['Az.KeyVault'] -ErrorAction Stop
+            Import-Module -Name (Join-Path -Path $ProjectPath -ChildPath 'lab\AutomatedLab\AzHelpers.psm1') -Force -ErrorAction Stop
+            $datum = New-DatumStructure -DefinitionFile (Join-Path -Path $ProjectPath -ChildPath 'source\Datum.yml')
+            Update-M365DscDatumFromKeyVault `
+                -Datum $datum `
+                -ProjectName $datum.Global.ProjectSettings.ProjectName `
+                -EnvironmentName ([string]$env:BuildEnvironment) `
+                -ManagedIdentity | Out-Null
+
+            $tenantIdentifierMap = [System.Collections.Hashtable]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($environment in $datum.Global.Azure.Environments.GetEnumerator())
+            {
+                $tenantName = [string]$environment.Value.AzTenantName
+                $tenantId = [string]$environment.Value.AzTenantId
+                if ([string]::IsNullOrWhiteSpace($tenantName))
                 {
-                    Write-Error "Tenant identifier '$tenantId' maps to more than one environment." -ErrorAction Stop
+                    Write-Error "Environment '$($environment.Name)' is missing its public tenant name; refusing to anonymize the delta report." -ErrorAction Stop
                 }
 
-                $tenantIdentifierMap[$tenantId] = [string]$environment.Name
-            }
-        }
-
-        foreach ($tenantName in $mergedConfigurations.Keys)
-        {
-            if (-not $tenantIdentifierMap.Contains($tenantName))
-            {
-                if ($tenantName -eq 'delta-report-test.onmicrosoft.com')
+                $tenantIdentifierMap[$tenantName] = [string]$environment.Name
+                if ($tenantId)
                 {
-                    $tenantIdentifierMap[$tenantName] = 'Synthetic'
-                    continue
-                }
+                    if ($tenantIdentifierMap.Contains($tenantId) -and $tenantIdentifierMap[$tenantId] -ne $environment.Name)
+                    {
+                        Write-Error "Tenant identifier '$tenantId' maps to more than one environment." -ErrorAction Stop
+                    }
 
-                Write-Error "Exported tenant '$tenantName' is not configured in '$azureConfigurationPath'; refusing to publish an incompletely anonymized report." -ErrorAction Stop
+                    $tenantIdentifierMap[$tenantId] = [string]$environment.Name
+                }
             }
-            if ($tenantIdentifierMap[$tenantName] -ne $env:BuildEnvironment)
+
+            foreach ($tenantName in $mergedConfigurations.Keys)
             {
-                Write-Error "The build agent's managed identity can load Key Vault metadata only for '$($env:BuildEnvironment)'; refusing to publish a report containing tenant identifiers for '$tenantName'." -ErrorAction Stop
+                if (-not $tenantIdentifierMap.Contains($tenantName))
+                {
+                    if ($tenantName -eq 'delta-report-test.onmicrosoft.com')
+                    {
+                        $tenantIdentifierMap[$tenantName] = 'Synthetic'
+                        continue
+                    }
+
+                    Write-Error "Exported tenant '$tenantName' is not configured in '$azureConfigurationPath'; refusing to publish an incompletely anonymized report." -ErrorAction Stop
+                }
+                if ($tenantIdentifierMap[$tenantName] -ne $env:BuildEnvironment)
+                {
+                    Write-Error "The build agent's managed identity can load Key Vault metadata only for '$($env:BuildEnvironment)'; refusing to publish a report containing tenant identifiers for '$tenantName'." -ErrorAction Stop
+                }
             }
         }
     }
@@ -213,4 +247,12 @@ task NewM365DscDeltaReport {
         Write-Host "    Delta report written to '$reportPath'." -ForegroundColor Green
     }
 
+    if ($null -ne $tenantIdentifierMap -and ($env:M365DSC_METADATA_PATHS -or $env:M365DSC_METADATA_PATH))
+    {
+        # Native anonymized artifacts must not retain the unredacted merge inputs.
+        foreach ($configurationPath in $mergedConfigurations.Values)
+        {
+            Remove-Item -LiteralPath $configurationPath -Force -ErrorAction Stop
+        }
+    }
 }

@@ -31,15 +31,18 @@ if ($EnvironmentName)
 
 Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
+$datum = Get-M365DscProjectConfiguration -Datum $datum
+$secretBackend = Get-M365DscSecretBackend -Datum $datum
+if ($secretBackend -eq 'Kdbx') { Import-Module $PSScriptRoot\..\Secrets\Kdbx\Store.psm1 -ErrorAction Stop }
 $certificatesToInstall = 'M365DscLcmApplication', 'M365DscExportApplication'
 $selectedEnvironments = @($datum.Global.Azure.Environments.Keys | Where-Object {
         -not $EnvironmentName -or $_ -in $EnvironmentName
     })
-Update-M365DscDatumFromKeyVault `
+Update-M365DscEnvironmentMetadata `
     -Datum $datum `
     -ProjectName $datum.Global.ProjectSettings.ProjectName `
     -EnvironmentName $selectedEnvironments | Out-Null
-$datum = Get-M365DscProjectSettingsFromKeyVault -Datum $datum -CredentialType personal-access-token
+$datum = Get-M365DscProjectSecrets -Datum $datum -CredentialType personal-access-token
 
 foreach ($envKey in $datum.Global.Azure.Environments.Keys)
 {
@@ -50,10 +53,36 @@ foreach ($envKey in $datum.Global.Azure.Environments.Keys)
 
     $environment = $datum.Global.Azure.Environments[$envKey]
     $projectName = $datum.Global.ProjectSettings.ProjectName
+    if ($secretBackend -eq 'Kdbx')
+    {
+        Connect-M365DscEnvironmentContext -TenantName $environment.AzTenantName `
+            -SubscriptionId $environment.AzSubscriptionId | Out-Null
+    }
     $vm = Get-M365DscAgentVm -ProjectName $projectName -EnvironmentName $envKey -ErrorAction Stop
     if ($null -eq $vm)
     {
-        throw "Environment '$envKey': the agent VM must exist before configuring private vault connectivity."
+        throw "Environment '$envKey': the agent VM must exist before certificate and agent setup."
+    }
+    if ($secretBackend -eq 'Kdbx')
+    {
+        foreach ($role in $certificatesToInstall)
+        {
+            $stored = Get-M365DscStoredCertificate -EnvironmentName $envKey -IdentityName $role
+            try
+            {
+                $identity = @($environment.Identities | Where-Object Name -EQ $role)
+                if ($identity.Count -ne 1 -or $stored.Thumbprint -ne $identity[0].CertificateThumbprint)
+                {
+                    throw "Recovery certificate mismatch for '$envKey/$role'."
+                }
+            }
+            finally
+            {
+                $stored.Password.Dispose()
+                [Array]::Clear($stored.Pfx, 0, $stored.Pfx.Length)
+            }
+        }
+        continue
     }
     Initialize-M365DscAgentKeyVaultPrivateEndpoint -Datum $datum -EnvironmentName $envKey -VM $vm -ErrorAction Stop
     Write-M365DscEnvironmentContext -EnvironmentName $envKey -TenantName $environment.AzTenantName `
@@ -146,54 +175,68 @@ function Invoke-WorkerVmScript
     }
 
     $null = Set-AzVMRunCommand @runCommandParameters
-    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $timeout = [TimeSpan]::FromSeconds($TimeoutInSeconds)
-    $nextStatusReport = [TimeSpan]::FromSeconds(30)
-    Write-Host "Started Azure Run Command '$runCommandName' on VM '$($VM.Name)'; checking every 5 seconds."
-    do
+    try
     {
-        if ($stopwatch.Elapsed -gt $timeout)
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $timeout = [TimeSpan]::FromSeconds($TimeoutInSeconds)
+        $nextStatusReport = [TimeSpan]::FromSeconds(30)
+        Write-Host "Started Azure Run Command '$runCommandName' on VM '$($VM.Name)'; checking every 5 seconds."
+        do
         {
-            throw "Azure Run Command '$runCommandName' on VM '$($VM.Name)' did not complete within $TimeoutInSeconds seconds; the run command resource was retained for inspection."
+            if ($stopwatch.Elapsed -gt $timeout)
+            {
+                throw "Azure Run Command '$runCommandName' on VM '$($VM.Name)' did not complete within $TimeoutInSeconds seconds."
+            }
+
+            Start-Sleep -Seconds 5
+            $runCommand = Get-AzVMRunCommand `
+                -ResourceGroupName $VM.ResourceGroupName `
+                -VMName $VM.Name `
+                -RunCommandName $runCommandName `
+                -Expand InstanceView `
+                -ErrorAction Stop
+            $executionState = [string]$runCommand.InstanceView.ExecutionState
+            if ($executionState -notin 'Succeeded', 'Failed', 'TimedOut', 'Canceled' -and
+                $stopwatch.Elapsed -ge $nextStatusReport)
+            {
+                $elapsedMinutes = [int]$stopwatch.Elapsed.TotalMinutes
+                $elapsedSeconds = $stopwatch.Elapsed.Seconds
+                $reportedState = if ($executionState) { $executionState } else { 'not reported yet' }
+                Write-Host "Azure Run Command on VM '$($VM.Name)' is still $reportedState ($elapsedMinutes min $elapsedSeconds sec elapsed)."
+                $nextStatusReport = $nextStatusReport.Add([TimeSpan]::FromSeconds(30))
+            }
+        } while ($executionState -notin 'Succeeded', 'Failed', 'TimedOut', 'Canceled')
+
+        $instanceView = $runCommand.InstanceView
+        $output = [string]$instanceView.Output
+        $errorOutput = [string]$instanceView.Error
+        $exitCode = $instanceView.ExitCode
+        if ($secretBackend -ne 'Kdbx')
+        {
+            Remove-AzVMRunCommand `
+                -ResourceGroupName $VM.ResourceGroupName `
+                -VMName $VM.Name `
+                -RunCommandName $runCommandName `
+                -ErrorAction Stop | Out-Null
         }
 
-        Start-Sleep -Seconds 5
-        $runCommand = Get-AzVMRunCommand `
-            -ResourceGroupName $VM.ResourceGroupName `
-            -VMName $VM.Name `
-            -RunCommandName $runCommandName `
-            -Expand InstanceView `
-            -ErrorAction Stop
-        $executionState = [string]$runCommand.InstanceView.ExecutionState
-        if ($executionState -notin 'Succeeded', 'Failed', 'TimedOut', 'Canceled' -and
-            $stopwatch.Elapsed -ge $nextStatusReport)
+        if ($executionState -ne 'Succeeded' -or $exitCode -ne 0)
         {
-            $elapsedMinutes = [int]$stopwatch.Elapsed.TotalMinutes
-            $elapsedSeconds = $stopwatch.Elapsed.Seconds
-            $reportedState = if ($executionState) { $executionState } else { 'not reported yet' }
-            Write-Host "Azure Run Command on VM '$($VM.Name)' is still $reportedState ($elapsedMinutes min $elapsedSeconds sec elapsed)."
-            $nextStatusReport = $nextStatusReport.Add([TimeSpan]::FromSeconds(30))
+            throw "Azure Run Command failed on VM '$($VM.Name)' (state: '$executionState', exit code: '$exitCode'). $output $errorOutput"
         }
-    } while ($executionState -notin 'Succeeded', 'Failed', 'TimedOut', 'Canceled')
 
-    $instanceView = $runCommand.InstanceView
-    $output = [string]$instanceView.Output
-    $errorOutput = [string]$instanceView.Error
-    $exitCode = $instanceView.ExitCode
-    Remove-AzVMRunCommand `
-        -ResourceGroupName $VM.ResourceGroupName `
-        -VMName $VM.Name `
-        -RunCommandName $runCommandName `
-        -ErrorAction Stop | Out-Null
-
-    if ($executionState -ne 'Succeeded' -or $exitCode -ne 0)
-    {
-        throw "Azure Run Command failed on VM '$($VM.Name)' (state: '$executionState', exit code: '$exitCode'). $output $errorOutput"
+        if ($output)
+        {
+            Write-Host $output.TrimEnd()
+        }
     }
-
-    if ($output)
+    finally
     {
-        Write-Host $output.TrimEnd()
+        if ($secretBackend -eq 'Kdbx')
+        {
+            Remove-AzVMRunCommand -ResourceGroupName $VM.ResourceGroupName -VMName $VM.Name `
+                -RunCommandName $runCommandName -ErrorAction Stop | Out-Null
+        }
     }
 }
 
@@ -254,21 +297,24 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
         throw "Managed identity '$buildAgentIdentityName' is not assigned to VM '$vmName'. Run '30 Create Agent VMs.ps1' first."
     }
 
-    $vaultName = Resolve-M365DscKeyVaultName `
-        -ProjectName $projectName `
-        -EnvironmentName $envName `
-        -TenantId $environment.AzTenantId `
-        -SubscriptionId $environment.AzSubscriptionId
-    $vault = Get-AzKeyVault -ErrorAction Stop |
-        Where-Object VaultName -EQ $vaultName
-    if (-not $vault)
+    if ($secretBackend -eq 'KeyVault')
     {
-        throw "Key Vault '$vaultName' was not found. Run '10 Setup App Registrations.ps1' first."
+        $vaultName = Resolve-M365DscKeyVaultName `
+            -ProjectName $projectName `
+            -EnvironmentName $envName `
+            -TenantId $environment.AzTenantId `
+            -SubscriptionId $environment.AzSubscriptionId
+        $vault = Get-AzKeyVault -ErrorAction Stop |
+            Where-Object VaultName -EQ $vaultName
+        if (-not $vault)
+        {
+            throw "Key Vault '$vaultName' was not found. Run '10 Setup App Registrations.ps1' first."
+        }
+        Ensure-M365DscKeyVaultRoleAssignment `
+            -VaultResourceId $vault.ResourceId `
+            -PrincipalId $buildAgentIdentity.PrincipalId `
+            -RoleDefinitionName 'Key Vault Secrets User'
     }
-    Ensure-M365DscKeyVaultRoleAssignment `
-        -VaultResourceId $vault.ResourceId `
-        -PrincipalId $buildAgentIdentity.PrincipalId `
-        -RoleDefinitionName 'Key Vault Secrets User'
 
     $vmStatus = Get-AzVM -ResourceGroupName $resourceGroupName -Name $vmName -Status -ErrorAction Stop
     $isVmRunning = @($vmStatus.Statuses | Where-Object Code -EQ 'PowerState/running').Count -gt 0
@@ -285,7 +331,7 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
         $trustedHosts = @(
             (Get-Item -Path $trustedHostsPath -ErrorAction Stop).Value -split ',' |
                 ForEach-Object { $_.Trim() } |
-                    Where-Object { $_ }
+                Where-Object { $_ }
         )
 
         if ($DscNodeName -notin $trustedHosts)
@@ -452,20 +498,25 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
                 Write-Output "Installing AzDo Build Agent '$($env:COMPUTERNAME)-$AgentIndex'"
                 $null = New-Item -Path "C:\Agent$AgentIndex" -ItemType Directory -Force
                 Copy-Item -Path "$AgentPackagePath\*" -Destination "C:\Agent$AgentIndex" -Recurse -Force
-                & "C:\Agent$AgentIndex\config.cmd" `
-                    --unattended `
-                    --url "https://dev.azure.com/$OrganizationName" `
-                    --auth pat `
-                    --token $PersonalAccessToken `
-                    --pool $AgentPoolName `
-                    --agent "$($env:COMPUTERNAME)-$AgentIndex" `
-                    --runAsService `
-                    --windowsLogonAccount 'NT AUTHORITY\SYSTEM' `
-                    --acceptTeeEula
-                if ($LASTEXITCODE -ne 0)
+                $previousToken = $env:VSTS_AGENT_INPUT_TOKEN
+                try
                 {
-                    throw "Azure DevOps agent configuration failed with exit code $LASTEXITCODE."
+                    $env:VSTS_AGENT_INPUT_TOKEN = $PersonalAccessToken
+                    & "C:\Agent$AgentIndex\config.cmd" `
+                        --unattended `
+                        --url "https://dev.azure.com/$OrganizationName" `
+                        --auth pat `
+                        --pool $AgentPoolName `
+                        --agent "$($env:COMPUTERNAME)-$AgentIndex" `
+                        --runAsService `
+                        --windowsLogonAccount 'NT AUTHORITY\SYSTEM' `
+                        --acceptTeeEula
+                    if ($LASTEXITCODE -ne 0)
+                    {
+                        throw "Azure DevOps agent configuration failed with exit code $LASTEXITCODE."
+                    }
                 }
+                finally { $env:VSTS_AGENT_INPUT_TOKEN = $previousToken }
 
                 $vstsService = Get-CimInstance -ClassName Win32_Service -Filter "Name LIKE 'vstsagent%' AND PathName LIKE '%Agent$AgentIndex%'"
                 $vstsService | Invoke-CimMethod -Name Change -Arguments @{ StartName = 'LocalSystem' }
@@ -543,118 +594,126 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
     #   Upload M365DscLcmApplication certificate for authentication with Azure
     # ---------------------------------------------------------------------------
 
-    foreach ($certificateToInstall in $certificatesToInstall)
+    if ($secretBackend -eq 'Kdbx')
     {
-        $certificateThumbprint = ($environment.Identities | Where-Object Name -EQ $certificateToInstall).CertificateThumbprint
-        $pfxName = Get-M365DscKeyVaultSecretName -IdentityName $certificateToInstall -CredentialType pfx
-        $pfxPasswordName = Get-M365DscKeyVaultSecretName -IdentityName $certificateToInstall -CredentialType pfx-password
-        $managedIdentityClientId = $buildAgentIdentity.ClientId
+        & "$PSScriptRoot\..\Secrets\Kdbx\Worker Certificates.ps1" -VM $vm -Environment $environment `
+            -EnvironmentName $envName -InvokeCommand ${function:Invoke-WorkerVmScript}
+    }
+    else
+    {
+        foreach ($certificateToInstall in $certificatesToInstall)
+        {
+            $certificateThumbprint = ($environment.Identities | Where-Object Name -EQ $certificateToInstall).CertificateThumbprint
+            $pfxName = Get-M365DscKeyVaultSecretName -IdentityName $certificateToInstall -CredentialType pfx
+            $pfxPasswordName = Get-M365DscKeyVaultSecretName -IdentityName $certificateToInstall -CredentialType pfx-password
+            $managedIdentityClientId = $buildAgentIdentity.ClientId
 
-        Write-Host "Installing certificate '$certificateToInstall' on VM '$($vm.Name)'."
-        Invoke-WorkerVmScript -VM $vm -ScriptBlock {
-            param(
-                [string]$VaultName,
-                [string]$PfxName,
-                [string]$PfxPasswordName,
-                [string]$ManagedIdentityClientId,
-                [string]$CertificateThumbprint,
-                [string]$AzKeyVaultVersion
-            )
-            $ErrorActionPreference = 'Stop'
+            Write-Host "Installing certificate '$certificateToInstall' on VM '$($vm.Name)'."
+            Invoke-WorkerVmScript -VM $vm -ScriptBlock {
+                param(
+                    [string]$VaultName,
+                    [string]$PfxName,
+                    [string]$PfxPasswordName,
+                    [string]$ManagedIdentityClientId,
+                    [string]$CertificateThumbprint,
+                    [string]$AzKeyVaultVersion
+                )
+                $ErrorActionPreference = 'Stop'
 
-            $installedAzKeyVault = Get-Module -Name Az.KeyVault -ListAvailable |
-                Where-Object Version -EQ ([version]$AzKeyVaultVersion) |
-                Select-Object -First 1
-            if (-not $installedAzKeyVault)
-            {
-                Write-Output "Installing Az.KeyVault version $AzKeyVaultVersion from PSGallery."
-                Install-Module -Name Az.KeyVault -RequiredVersion $AzKeyVaultVersion -Repository PSGallery -Scope AllUsers -Force -AllowClobber -Confirm:$false -ErrorAction Stop
-            }
-            else
-            {
-                Write-Output "Az.KeyVault version $AzKeyVaultVersion is already installed."
-            }
+                $installedAzKeyVault = Get-Module -Name Az.KeyVault -ListAvailable |
+                    Where-Object Version -EQ ([version]$AzKeyVaultVersion) |
+                    Select-Object -First 1
+                if (-not $installedAzKeyVault)
+                {
+                    Write-Output "Installing Az.KeyVault version $AzKeyVaultVersion from PSGallery."
+                    Install-Module -Name Az.KeyVault -RequiredVersion $AzKeyVaultVersion -Repository PSGallery -Scope AllUsers -Force -AllowClobber -Confirm:$false -ErrorAction Stop
+                }
+                else
+                {
+                    Write-Output "Az.KeyVault version $AzKeyVaultVersion is already installed."
+                }
 
-            Import-Module -Name Az.KeyVault -RequiredVersion $AzKeyVaultVersion -ErrorAction Stop
-            [Environment]::SetEnvironmentVariable('AZURE_CLIENT_ID', $ManagedIdentityClientId, 'Machine')
-            Write-Output "Connecting to managed identity '$ManagedIdentityClientId' for Key Vault access."
-            Connect-AzAccount -Identity -AccountId $ManagedIdentityClientId -ErrorAction Stop | Out-Null
-            Write-Output 'Connected to the managed identity.'
+                Import-Module -Name Az.KeyVault -RequiredVersion $AzKeyVaultVersion -ErrorAction Stop
+                [Environment]::SetEnvironmentVariable('AZURE_CLIENT_ID', $ManagedIdentityClientId, 'Machine')
+                Write-Output "Connecting to managed identity '$ManagedIdentityClientId' for Key Vault access."
+                Connect-AzAccount -Identity -AccountId $ManagedIdentityClientId -ErrorAction Stop | Out-Null
+                Write-Output 'Connected to the managed identity.'
 
-            $pfxBase64 = $null
-            $pfxPassword = $null
-            for ($attempt = 1; $attempt -le 12; $attempt++)
-            {
+                $pfxBase64 = $null
+                $pfxPassword = $null
+                for ($attempt = 1; $attempt -le 12; $attempt++)
+                {
+                    try
+                    {
+                        Write-Output "Reading certificate secrets from Key Vault (attempt $attempt of 12)."
+                        $pfxBase64 = Get-AzKeyVaultSecret -VaultName $VaultName -Name $PfxName -AsPlainText -ErrorAction Stop
+                        $pfxPassword = Get-AzKeyVaultSecret -VaultName $VaultName -Name $PfxPasswordName -AsPlainText -ErrorAction Stop
+                        break
+                    }
+                    catch
+                    {
+                        if ($attempt -eq 12)
+                        {
+                            throw "The VM managed identity could not read certificate secrets from Key Vault '$VaultName'. $($_.Exception.Message)"
+                        }
+
+                        Write-Output 'Key Vault secret retrieval failed; retrying in 10 seconds.'
+                        Start-Sleep -Seconds 10
+                    }
+                }
+
+                if ([string]::IsNullOrWhiteSpace($pfxBase64) -or [string]::IsNullOrWhiteSpace($pfxPassword))
+                {
+                    throw "Key Vault certificate secrets for '$CertificateThumbprint' were empty."
+                }
+
+                $certificatePath = Join-Path -Path $env:TEMP -ChildPath "$CertificateThumbprint.pfx"
                 try
                 {
-                    Write-Output "Reading certificate secrets from Key Vault (attempt $attempt of 12)."
-                    $pfxBase64 = Get-AzKeyVaultSecret -VaultName $VaultName -Name $PfxName -AsPlainText -ErrorAction Stop
-                    $pfxPassword = Get-AzKeyVaultSecret -VaultName $VaultName -Name $PfxPasswordName -AsPlainText -ErrorAction Stop
-                    break
-                }
-                catch
-                {
-                    if ($attempt -eq 12)
+                    [System.IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($pfxBase64))
+                    Write-Output 'Importing the certificate into the LocalMachine certificate store.'
+                    $securePfxPassword = [securestring]::new()
+                    try
                     {
-                        throw "The VM managed identity could not read certificate secrets from Key Vault '$VaultName'. $($_.Exception.Message)"
+                        foreach ($character in $pfxPassword.ToCharArray())
+                        {
+                            $securePfxPassword.AppendChar($character)
+                        }
+                        $securePfxPassword.MakeReadOnly()
+                        Import-PfxCertificate `
+                            -FilePath $certificatePath `
+                            -Password $securePfxPassword `
+                            -CertStoreLocation Cert:\LocalMachine\My `
+                            -ErrorAction Stop | Out-Null
                     }
-
-                    Write-Output 'Key Vault secret retrieval failed; retrying in 10 seconds.'
-                    Start-Sleep -Seconds 10
-                }
-            }
-
-            if ([string]::IsNullOrWhiteSpace($pfxBase64) -or [string]::IsNullOrWhiteSpace($pfxPassword))
-            {
-                throw "Key Vault certificate secrets for '$CertificateThumbprint' were empty."
-            }
-
-            $certificatePath = Join-Path -Path $env:TEMP -ChildPath "$CertificateThumbprint.pfx"
-            try
-            {
-                [System.IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($pfxBase64))
-                Write-Output 'Importing the certificate into the LocalMachine certificate store.'
-                $securePfxPassword = [securestring]::new()
-                try
-                {
-                    foreach ($character in $pfxPassword.ToCharArray())
+                    finally
                     {
-                        $securePfxPassword.AppendChar($character)
+                        $securePfxPassword.Dispose()
                     }
-                    $securePfxPassword.MakeReadOnly()
-                    Import-PfxCertificate `
-                        -FilePath $certificatePath `
-                        -Password $securePfxPassword `
-                        -CertStoreLocation Cert:\LocalMachine\My `
-                        -ErrorAction Stop | Out-Null
                 }
                 finally
                 {
-                    $securePfxPassword.Dispose()
+                    Remove-Item -Path $certificatePath -Force -ErrorAction SilentlyContinue
                 }
-            }
-            finally
-            {
-                Remove-Item -Path $certificatePath -Force -ErrorAction SilentlyContinue
-            }
 
-            $installedCertificate = Get-Item -Path "Cert:\LocalMachine\My\$CertificateThumbprint" -ErrorAction Stop
-            if (-not $installedCertificate.HasPrivateKey)
-            {
-                throw "Certificate '$CertificateThumbprint' was imported without its private key."
-            }
-            Write-Output "Certificate '$CertificateThumbprint' is installed with its private key."
-        } -Parameters @{
-            VaultName             = $vaultName
-            PfxName               = $pfxName
-            PfxPasswordName       = $pfxPasswordName
-            ManagedIdentityClientId = $managedIdentityClientId
-            CertificateThumbprint = $certificateThumbprint
-            AzKeyVaultVersion     = [string]$requiredModuleVersions['Az.KeyVault']
-        } -TimeoutInSeconds 600
+                $installedCertificate = Get-Item -Path "Cert:\LocalMachine\My\$CertificateThumbprint" -ErrorAction Stop
+                if (-not $installedCertificate.HasPrivateKey)
+                {
+                    throw "Certificate '$CertificateThumbprint' was imported without its private key."
+                }
+                Write-Output "Certificate '$CertificateThumbprint' is installed with its private key."
+            } -Parameters @{
+                VaultName             = $vaultName
+                PfxName               = $pfxName
+                PfxPasswordName       = $pfxPasswordName
+                ManagedIdentityClientId = $managedIdentityClientId
+                CertificateThumbprint = $certificateThumbprint
+                AzKeyVaultVersion     = [string]$requiredModuleVersions['Az.KeyVault']
+            } -TimeoutInSeconds 600
+
+        }
 
     }
-
     Write-Host "Restarting VM '$($vm.Name)' after installing certificates."
     Restart-AzVM -ResourceGroupName $vm.ResourceGroupName -Name $vm.Name -ErrorAction Stop | Out-Null
 

@@ -1,0 +1,17 @@
+trigger: none
+parameters:
+- name: poolName
+  type: string
+  default: $(M365DSC_AGENT_POOL)
+- name: environments
+  type: stringList
+  default: []
+variables:
+  buildFolderName: output
+  defaultBranch: main
+stages:
+- template: deploymentTemplate.yml
+  parameters:
+    poolName: ${{ parameters.poolName }}
+    environments: ${{ parameters.environments }}
+    operation: test

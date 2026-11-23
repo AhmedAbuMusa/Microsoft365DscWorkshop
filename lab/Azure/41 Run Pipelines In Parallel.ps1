@@ -41,7 +41,7 @@ if ($env:PSModulePath -notlike "*$requiredModulesPath*")
 Import-Module -Name VSTeam -RequiredVersion '7.15.2' -ErrorAction Stop
 Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force -ErrorAction Stop
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml
-$datum = Get-M365DscProjectSettingsFromKeyVault -Datum $datum -CredentialType personal-access-token
+$datum = Get-M365DscProjectSecrets -Datum $datum -CredentialType personal-access-token
 $organizationName = $datum.Global.ProjectSettings.OrganizationName
 $projectName = $datum.Global.ProjectSettings.ProjectName
 $personalAccessToken = $datum.Global.ProjectSettings.PersonalAccessToken

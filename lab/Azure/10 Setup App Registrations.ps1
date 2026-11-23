@@ -16,6 +16,12 @@ if ($env:PSModulePath -notlike "*$requiredModulesPath*")
 
 Import-Module -Name $PSScriptRoot\AzHelpers.psm1 -Force -ErrorAction Stop
 $datum = New-DatumStructure -DefinitionFile $PSScriptRoot\..\..\source\Datum.yml -ErrorAction Stop
+if ((Get-M365DscSecretBackend -Datum $datum) -eq 'Kdbx')
+{
+    if ($RotateCredentials) { throw 'KDBX credential rotation requires a separate planned credential replacement; existing recovery records are not overwritten.' }
+    & "$PSScriptRoot\..\Secrets\Kdbx\Register Applications.ps1" -EnvironmentName $EnvironmentName
+    return
+}
 $environments = @($datum.Global.Azure.Environments.Keys)
 if ($EnvironmentName)
 {

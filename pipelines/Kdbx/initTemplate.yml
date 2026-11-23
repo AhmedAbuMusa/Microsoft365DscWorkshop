@@ -1,0 +1,22 @@
+parameters:
+- name: metadataPath
+  type: string
+- name: includeExchange
+  type: boolean
+  default: false
+steps:
+- task: PowerShell@2
+  displayName: Initialize patched modules
+  inputs:
+    pwsh: true
+    filePath: .\build.ps1
+    arguments: -ResolveDependency -Tasks InitializeModuleFolder
+  env:
+    M365DSC_METADATA_PATH: ${{ parameters.metadataPath }}
+- task: PowerShell@2
+  displayName: Verify runtime
+  inputs:
+    pwsh: true
+    filePath: .\pipelines\scripts\TestBuildRuntime.ps1
+    ${{ if parameters.includeExchange }}:
+      arguments: -IncludeExchangeOnlineManagement

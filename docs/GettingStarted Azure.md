@@ -14,7 +14,21 @@ The VM agents run the workshop pipelines and apply the DSC configuration to thei
 
 ## Automated bootstrap
 
-`lab/Start Azure Lab.ps1` is parameterless. It reads non-secret project settings from `source/Global/ProjectSettings.yml`, and reads tenant environments from `source/Global/Azure.yml`. Before contacting Azure DevOps, it signs in to the configured `CredentialVaultEnvironment`, creates or reuses that environment's Key Vault, and opens the PAT management page for `OrganizationName`. Enter the PAT at the secure prompt; the bootstrap validates it against that organization and stores it in Key Vault. The build-agent password is also collected securely and stored in the same vault. Neither credential is written to YAML. The bootstrap then imports the public GitHub repository into Azure DevOps, clones it locally, restores dependencies with PSResourceGet, and runs the Azure preparation, app registration, connection test, project configuration, VM creation, and agent setup scripts in order. Start it from a fresh elevated PowerShell 7 session; it stops before doing setup if Az.Accounts or its assembly is already loaded.
+`lab/Start Azure Lab.ps1` asks which secret backend to use during initial configuration. Choose **KeyVault** when public endpoint access is permitted for every configured environment, or **Kdbx** when you want portable password-encrypted operator storage without any Key Vault access. Use `-SecretBackend KeyVault` or `-SecretBackend Kdbx` to bypass the question. The non-secret choice is saved as `SecretStorage` in `source/Global/ProjectSettings.yml`. One backend applies to the whole deployment; failures never silently switch backends.
+
+Key Vault mode retains the existing application, credential, and managed-identity pipeline workflow. It signs in to `CredentialVaultEnvironment`, creates or reuses the project vault, validates the securely entered PAT, and stores the PAT and worker password there. The bootstrap now selects public-only networking: disabled or unverified public access stops with guidance to select KDBX explicitly. It does not create a private endpoint, enable public access on a restricted vault, or bypass Azure Policy. Public access still requires permitted firewall rules and RBAC.
+
+KDBX mode keeps private project settings, credentials, environment metadata, and portable PFX certificates in an external encrypted database. It uses separate application-registration/certificate-delivery code and separate native Azure DevOps pipelines. Jobs receive authorized Secure Files and secret variables, never the operator database or its passphrase. See [secret backend setup and recovery](SecretStorage.md).
+
+Both modes import the public GitHub repository into Azure DevOps, clone it locally, restore dependencies, and provision agents. Start from a fresh elevated PowerShell 7 session; loaded Az.Accounts assemblies are rejected before setup. Commit and push the implementation to your configured GitHub default branch before running the import.
+
+```powershell
+# Prompt for the backend:
+& '.\lab\Start Azure Lab.ps1'
+# Or select explicitly:
+& '.\lab\Start Azure Lab.ps1' -SecretBackend KeyVault
+& '.\lab\Start Azure Lab.ps1' -SecretBackend Kdbx -SecretStorePath 'C:\PrivateWorkshop\Secrets\operator.kdbx'
+```
 
 The credential bootstrap can also be run separately with `lab/Azure/04 Setup Project Settings Key Vault.ps1`. Run it before the import-and-clone step so the PAT and build-agent password are already in Key Vault. The import-and-clone stage can then be run with `lab/Azure/05 Import GitHub Repository.ps1`; it loads the PAT from Key Vault, imports the GitHub repository into Azure DevOps, and creates the configured local checkout without continuing to tenant or VM setup. Restore the source checkout dependencies first:
 
@@ -38,9 +52,11 @@ Updates to the lab's named Azure contexts do not require overwrite confirmation.
 
 After granting operator access to a credential Key Vault, both project-credential setup and tenant app registration verify secret-list access before proceeding. Azure RBAC changes are not immediately visible to the Key Vault data plane. The readiness check retries authorization failures every ten seconds for up to 61 probes (ten minutes of waits), showing the environment and vault on each retry. Other HTTP failures and explicit firewall/private-connection denials stop immediately. If access still fails, the error preserves Azure's original details and points to the role assignment, deny assignments, and network access for investigation; no additional roles or credentials are granted automatically.
 
-If Azure reports `Public network access is disabled`, waiting or signing in again will not fix it. Run the provisioning machine with connectivity to the vault's approved private endpoint (for example, inside its connected virtual network or over an approved VPN) and ensure the vault hostname resolves to that endpoint's private IP. Ask the subscription administrator to review Key Vault networking and Azure Policy if needed. The bootstrap does not enable public access, weaken firewall rules, or bypass policy; Azure's trusted-services option does not automatically admit a local PowerShell session.
+If Azure reports `Public network access is disabled`, waiting or signing in again will not fix it. For this bootstrap, select KDBX explicitly and use its independent deployment workflow. Existing private-vault workflows still require approved private routing/DNS administered separately, as described below. The bootstrap does not enable public access, weaken firewall rules, or bypass policy; Azure's trusted-services option does not automatically admit a local PowerShell session.
 
-### Automated Key Vault private endpoints
+### Legacy private endpoint workflow (not selected by the bootstrap)
+
+The helpers below remain available for separately administered legacy setups with `KeyVaultPublicOnly: false` and no `M365DSC_KEYVAULT_PUBLIC_ONLY` process flag. The interactive bootstrap deliberately selects public-only Key Vault or KDBX instead. The following network operations are not performed when either bootstrap option is selected.
 
 The bootstrap can discover networking during the environment's Azure sign-in; no Azure login is needed in the editor session. For a vault with public access disabled, it first reads a previously verified `M365DscPrivateEndpointSubnetId` vault tag, then queries the vault's existing private endpoints for their subnet IDs. If neither exists, it enumerates the active subscription's existing VNet subnets, excluding delegated subnets and reserved gateway/firewall/Bastion/Route Server subnets. It selects a subnet only when exactly one candidate exists. Multiple candidates are listed and require an explicit choice. If no candidate exists, it creates a dedicated `<vault-name>-vnet` in the credentials resource group, with a `private-endpoints` subnet and disabled private-endpoint network policies, then provisions the endpoint/DNS path. A unique or newly created subnet does not guarantee routing: local DNS and TCP connectivity must still pass.
 
@@ -100,7 +116,9 @@ Tenant administrator sign-in and consent remain interactive during app registrat
 
 The PAT is validated for the configured Azure DevOps organization and stored in Key Vault; Git authentication is scoped to the required clone/push operations, and credentials are not embedded in clone URLs. The build-agent password is retrieved from Key Vault only when needed. Tenant IDs, subscriptions, application credentials, the PAT, and the worker password are not written to the public YAML manifests.
 
-## Manual setup
+## Manual Key Vault setup
+
+The following steps describe the retained Key Vault path. For KDBX, initialize/unlock its operator database first and follow [the separate backend instructions](SecretStorage.md#kdbx-mode); common Azure scripts then route to the selected backend. Native pipeline publishing is required after project setup for KDBX.
 
 The following steps remain available when you prefer to run each stage yourself.
 

@@ -273,7 +273,7 @@ elseif ($projectSettings -match '(?m)^ProjectName:\s*<ProjectName>\s*$')
     Split-Path -Path (git rev-parse --show-toplevel) -Leaf
 }
 
-if ($resolvedProjectName)
+if ($resolvedProjectName -and $env:M365DSC_SECRET_BACKEND -ne 'Kdbx' -and $projectSettings -notmatch '(?m)^SecretStorage:\s*Kdbx\s*$')
 {
     Write-Host "Updating the project name in the 'ProjectSettings.yml' file"
     $quotedProjectName = $resolvedProjectName.Replace("'", "''").Replace('$', '$$')

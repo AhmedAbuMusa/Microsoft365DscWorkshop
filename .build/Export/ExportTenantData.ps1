@@ -3,103 +3,135 @@ task ExportTenantData {
     $configPath = "$ProjectPath\export\ExportConfiguration.yml"
     $exportConfig = Get-Content -Path $configPath -Raw | ConvertFrom-Yaml
 
-    Import-Module -Name (Join-Path -Path $ProjectPath -ChildPath 'lab\AutomatedLab\AzHelpers.psm1') -Force -ErrorAction Stop
-    $selectedEnvironmentNames = if ($env:BuildEnvironment)
+    $pipelineCertificate = $null
+    if ($env:M365DSC_METADATA_PATH)
     {
-        @([string]$env:BuildEnvironment)
+        if (-not $env:BuildEnvironment -or -not $env:M365DSC_EXPORT_PFX_PATH -or -not $env:M365DSC_EXPORT_PFX_PASSWORD)
+        {
+            throw 'Kdbx export requires BuildEnvironment, M365DSC_EXPORT_PFX_PATH and M365DSC_EXPORT_PFX_PASSWORD; no Key Vault fallback is allowed.'
+        }
+        Import-Module -Name (Join-Path $ProjectPath 'lab\Secrets\Kdbx\PipelineSecrets.psm1') -Force -ErrorAction Stop
+        $datum = Update-M365DscDatumFromPipelineMetadata -Datum $datum -Path $env:M365DSC_METADATA_PATH -EnvironmentName $env:BuildEnvironment
+        $exportIdentity = @($datum.Global.Azure.Environments[$env:BuildEnvironment].Identities |
+            Where-Object Name -EQ 'M365DscExportApplication')[0]
+        $pipelineCertificate = Import-M365DscPipelineCertificate -Path $env:M365DSC_EXPORT_PFX_PATH `
+            -Password (ConvertTo-M365DscPipelineSecureString -Value $env:M365DSC_EXPORT_PFX_PASSWORD) `
+            -ExpectedThumbprint $exportIdentity.CertificateThumbprint
+    }
+    elseif ($env:M365DSC_SECRET_BACKEND -eq 'Kdbx')
+    {
+        throw 'Kdbx export requires M365DSC_METADATA_PATH; no Key Vault or database fallback is allowed.'
     }
     else
     {
-        @($datum.Global.Azure.Environments.Keys)
+        Import-Module -Name (Join-Path -Path $ProjectPath -ChildPath 'lab\AutomatedLab\AzHelpers.psm1') -Force -ErrorAction Stop
+        $selectedEnvironmentNames = if ($env:BuildEnvironment)
+        {
+            @([string]$env:BuildEnvironment)
+        }
+        else
+        {
+            @($datum.Global.Azure.Environments.Keys)
+        }
+        $datum = Update-M365DscDatumFromKeyVault `
+            -Datum $datum `
+            -ProjectName $datum.Global.ProjectSettings.ProjectName `
+            -EnvironmentName $selectedEnvironmentNames `
+            -ManagedIdentity:([bool]$env:BuildEnvironment) `
+            -IncludeCredentials `
+            -CredentialIdentityName 'M365DscExportApplication'
     }
-    $datum = Update-M365DscDatumFromKeyVault `
-        -Datum $datum `
-        -ProjectName $datum.Global.ProjectSettings.ProjectName `
-        -EnvironmentName $selectedEnvironmentNames `
-        -ManagedIdentity:([bool]$env:BuildEnvironment) `
-        -IncludeCredentials `
-        -CredentialIdentityName 'M365DscExportApplication'
 
-    $environments = if ($env:BuildEnvironment)
+    try
     {
-        $datum.Global.Azure.Environments.GetEnumerator().Where({ $_.Name -eq $env:BuildEnvironment })
+        $environments = if ($env:BuildEnvironment)
+        {
+            $datum.Global.Azure.Environments.GetEnumerator().Where({ $_.Name -eq $env:BuildEnvironment })
+        }
+        else
+        {
+            $datum.Global.Azure.Environments.GetEnumerator()
+        }
+
+        foreach ($env in $environments)
+        {
+            Write-Host "Exporting configuration for environment '$($env.Name)'" -ForegroundColor Yellow
+            if (-not $env.Value.AzTenantId)
+            {
+                Write-Error "AzTenantId is not defined for environment $($env.Name)" -ErrorAction Stop
+            }
+
+            $exportApp = @($env.Value.Identities |
+                    Where-Object { $_.Name -notmatch '^<.+>$' } |
+                    Where-Object { $_.Name -EQ 'M365DscExportApplication' -or $_.IsExportApplication -eq $true })
+            if ($exportApp.Count -gt 1)
+            {
+                Write-Error "Multiple export applications defined for environment '$($env.Name)'. Please ensure only one application has the name 'M365DscExportApplication' and / or is defined with 'IsExportApplication' set to true." -ErrorAction Stop
+            }
+            if ($exportApp.Count -eq 0)
+            {
+                Write-Error "Export application 'M365DscExportApplication' is not defined for environment '$($env.Name)' and is no application with 'IsExportApplication' set to true" -ErrorAction Stop
+            }
+
+            foreach ($dscresource in $exportConfig.DscResources)
+            {
+                if ($env.Value.HasExchangeOnline -eq $false -and $dscresource -like 'EXO*')
+                {
+                    Write-Host "Skipping the component '$dscresource'. The tenant of environment '$($env.Name)' is not licensed for Exchange Online." -ForegroundColor Yellow
+                    continue
+                }
+
+                if ($env.Value.HasSharePointOnline -eq $false -and $dscresource -like 'SPO*')
+                {
+                    Write-Host "Skipping the component '$dscresource'. The tenant of environment '$($env.Name)' is not licensed for SharePoint Online." -ForegroundColor Yellow
+                    continue
+                }
+
+                $exportParams = @{
+                    Components    = $dscresource
+                    ApplicationId = $exportApp.ApplicationId
+                    TenantId      = $env.Value.AzTenantName
+                    Path          = "$OutputDirectory\Export\$($env.Value.AzTenantName)\$dscresource"
+                }
+
+                if ($null -ne $exportApp.CertificateThumbprint)
+                {
+                    $exportParams.CertificateThumbprint = $exportApp.CertificateThumbprint
+                }
+                elseif ($null -ne $exportApp.ApplicationSecret)
+                {
+                    $exportParams.ApplicationSecret = $exportApp.applicationSecret
+                }
+                elseif ($exportApp.IsManagedIdentity)
+                {
+                    $exportParams.ManagedIdentity = $true
+                    $exportParams.Remove('ApplicationId')
+                }
+                else
+                {
+                    Write-Error "Export application '$($exportApp.Name)' does not have a certificate thumbprint or application secret defined for environment '$($env.Name)'" -ErrorAction Stop
+                }
+
+                Write-Host '------------------ Export Parameters ------------------' -ForegroundColor Yellow
+                $loggedExportParameters = $exportParams.Clone()
+                if ($loggedExportParameters.ContainsKey('ApplicationSecret'))
+                {
+                    $loggedExportParameters.ApplicationSecret = '[REDACTED]'
+                }
+                $loggedExportParameters | Out-String | Write-Host -ForegroundColor DarkGray
+                Write-Host '-------------------------------------------------------' -ForegroundColor Yellow
+
+                Export-M365DSCConfiguration @exportParams
+            }
+
+        }
     }
-    else
+    finally
     {
-        $datum.Global.Azure.Environments.GetEnumerator()
-    }
-
-    foreach ($env in $environments)
-    {
-        Write-Host "Exporting configuration for environment '$($env.Name)'" -ForegroundColor Yellow
-        if (-not $env.Value.AzTenantId)
+        if ($pipelineCertificate)
         {
-            Write-Error "AzTenantId is not defined for environment $($env.Name)" -ErrorAction Stop
+            Remove-M365DscPipelineCertificate -Certificate $pipelineCertificate
         }
-
-        $exportApp = @($env.Value.Identities |
-                Where-Object { $_.Name -notmatch '^<.+>$' } |
-                Where-Object { $_.Name -EQ 'M365DscExportApplication' -or $_.IsExportApplication -eq $true })
-        if ($exportApp.Count -gt 1)
-        {
-            Write-Error "Multiple export applications defined for environment '$($env.Name)'. Please ensure only one application has the name 'M365DscExportApplication' and / or is defined with 'IsExportApplication' set to true." -ErrorAction Stop
-        }
-        if ($exportApp.Count -eq 0)
-        {
-            Write-Error "Export application 'M365DscExportApplication' is not defined for environment '$($env.Name)' and is no application with 'IsExportApplication' set to true" -ErrorAction Stop
-        }
-
-        foreach ($dscresource in $exportConfig.DscResources)
-        {
-            if ($env.Value.HasExchangeOnline -eq $false -and $dscresource -like 'EXO*')
-            {
-                Write-Host "Skipping the component '$dscresource'. The tenant of environment '$($env.Name)' is not licensed for Exchange Online." -ForegroundColor Yellow
-                continue
-            }
-
-            if ($env.Value.HasSharePointOnline -eq $false -and $dscresource -like 'SPO*')
-            {
-                Write-Host "Skipping the component '$dscresource'. The tenant of environment '$($env.Name)' is not licensed for SharePoint Online." -ForegroundColor Yellow
-                continue
-            }
-
-            $exportParams = @{
-                Components    = $dscresource
-                ApplicationId = $exportApp.ApplicationId
-                TenantId      = $env.Value.AzTenantName
-                Path          = "$OutputDirectory\Export\$($env.Value.AzTenantName)\$dscresource"
-            }
-
-            if ($null -ne $exportApp.CertificateThumbprint)
-            {
-                $exportParams.CertificateThumbprint = $exportApp.CertificateThumbprint
-            }
-            elseif ($null -ne $exportApp.ApplicationSecret)
-            {
-                $exportParams.ApplicationSecret = $exportApp.applicationSecret
-            }
-            elseif ($exportApp.IsManagedIdentity)
-            {
-                $exportParams.ManagedIdentity = $true
-                $exportParams.Remove('ApplicationId')
-            }
-            else
-            {
-                Write-Error "Export application '$($exportApp.Name)' does not have a certificate thumbprint or application secret defined for environment '$($env.Name)'" -ErrorAction Stop
-            }
-
-            Write-Host '------------------ Export Parameters ------------------' -ForegroundColor Yellow
-            $loggedExportParameters = $exportParams.Clone()
-            if ($loggedExportParameters.ContainsKey('ApplicationSecret'))
-            {
-                $loggedExportParameters.ApplicationSecret = '[REDACTED]'
-            }
-            $loggedExportParameters | Out-String | Write-Host -ForegroundColor DarkGray
-            Write-Host '-------------------------------------------------------' -ForegroundColor Yellow
-
-            Export-M365DSCConfiguration @exportParams
-        }
-
     }
 
 }

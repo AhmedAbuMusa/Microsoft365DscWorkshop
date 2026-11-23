@@ -1,3 +1,5 @@
+SecretStorage: Kdbx
+KeyVaultPublicOnly: true
 OrganizationName: LibreDynamics
 PersonalAccessToken: <StoredInKeyVault>
 CredentialVaultEnvironment: Dev

@@ -15,8 +15,9 @@ Before dependency restoration, choose:
 - **2 / Kdbx**: use a portable password-encrypted operator/recovery database and
   native Azure DevOps secret variables/Secure Files, without Key Vault.
 
-Enter keeps the saved `SecretStorage` choice; the default for older configuration
-is KeyVault. `-SecretBackend KeyVault` or `-SecretBackend Kdbx` avoids the prompt.
+Bootstrap asks on every run, including resumes. Enter always selects KDBX,
+regardless of saved configuration. The legacy `-SecretBackend` argument is
+accepted for compatibility but no longer bypasses the question.
 The selector alone is written to public YAML, not KDBX private settings.
 
 The backend is deployment-wide, not an automatic per-environment fallback.
@@ -68,7 +69,8 @@ workflows, not invoked automatically by this selection.
 ## KDBX mode
 
 ```powershell
-& '.\lab\Start Azure Lab.ps1' -SecretBackend Kdbx
+& '.\lab\Start Azure Lab.ps1'
+# Press Enter at the backend prompt to select KDBX.
 ```
 
 The default database path is:

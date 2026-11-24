@@ -22,12 +22,35 @@ Describe 'Explicit side-by-side backend routing' {
         Select-M365DscSecretBackend -Backend KeyVault -Datum $datum | Should -Be 'KeyVault'
         Should -Invoke -ModuleName SecretBackend Read-Host -Times 1 -Exactly
     }
-    It 'Keeps the saved choice when Enter is pressed and rejects invalid choices' {
-        $datum.Global.ProjectSettings.SecretStorage = 'Kdbx'
+    It 'Defaults to KDBX on every prompt regardless of saved settings or process overrides and rejects invalid choices' {
+        $datum.Global.ProjectSettings.SecretStorage = 'KeyVault'
+        $env:M365DSC_SECRET_BACKEND = 'KeyVault'
         Mock -ModuleName SecretBackend Read-Host { '' }
         Select-M365DscSecretBackend -Datum $datum | Should -Be 'Kdbx'
+        Select-M365DscSecretBackend -Datum $datum | Should -Be 'Kdbx'
+        Should -Invoke -ModuleName SecretBackend Read-Host -Times 2 -Exactly -ParameterFilter { $Prompt -like '*Default: Kdbx*' }
         Mock -ModuleName SecretBackend Read-Host { 'invalid' }
         { Select-M365DscSecretBackend -Datum $datum } | Should -Throw '*No backend was selected*'
+    }
+    It 'Always prompts at bootstrap startup even when the legacy SecretBackend argument is supplied' {
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile(
+            "$PSScriptRoot\..\..\lab\Start Azure Lab.ps1", [ref]$tokens, [ref]$errors)
+        $errors | Should -BeNullOrEmpty
+        $selection = $ast.EndBlock.Statements | Where-Object {
+            $_ -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $_.Extent.Text -match '^\$SecretBackend = Select-M365DscSecretBackend'
+        }
+        $selection | Should -Not -BeNullOrEmpty
+        $SecretBackend = 'KeyVault'
+        Mock Select-M365DscSecretBackend {
+            $PSBoundParameters.ContainsKey('Backend') | Should -BeFalse
+            'Kdbx'
+        }
+        . ([scriptblock]::Create($selection.Extent.Text))
+        $SecretBackend | Should -Be 'Kdbx'
+        Should -Invoke Select-M365DscSecretBackend -Times 1 -Exactly
     }
     It 'Preserves legacy Key Vault routing and never falls back to KDBX on access failure' {
         Mock -ModuleName SecretBackend Get-M365DscProjectSettingsFromKeyVault { throw 'Synthetic vault access denied' }

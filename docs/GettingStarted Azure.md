@@ -14,7 +14,7 @@ The VM agents run the workshop pipelines and apply the DSC configuration to thei
 
 ## Automated bootstrap
 
-`lab/Start Azure Lab.ps1` asks which secret backend to use during initial configuration. Choose **KeyVault** when public endpoint access is permitted for every configured environment, or **Kdbx** when you want portable password-encrypted operator storage without any Key Vault access. Use `-SecretBackend KeyVault` or `-SecretBackend Kdbx` to bypass the question. The non-secret choice is saved as `SecretStorage` in `source/Global/ProjectSettings.yml`. One backend applies to the whole deployment; failures never silently switch backends.
+`lab/Start Azure Lab.ps1` asks which secret backend to use on every run, including resumes. Press **Enter** for **Kdbx**, or select **KeyVault** when public endpoint access is permitted for every configured environment. The default is always KDBX, regardless of the previously saved choice. The legacy `-SecretBackend` argument is accepted for compatibility but does not bypass or answer the question. The non-secret selection is saved as `SecretStorage` in `source/Global/ProjectSettings.yml` for standalone scripts. One backend applies to the whole deployment; failures never silently switch backends.
 
 Key Vault mode retains the existing application, credential, and managed-identity pipeline workflow. It signs in to `CredentialVaultEnvironment`, creates or reuses the project vault, validates the securely entered PAT, and stores the PAT and worker password there. The bootstrap now selects public-only networking: disabled or unverified public access stops with guidance to select KDBX explicitly. It does not create a private endpoint, enable public access on a restricted vault, or bypass Azure Policy. Public access still requires permitted firewall rules and RBAC.
 
@@ -23,11 +23,10 @@ KDBX mode keeps private project settings, credentials, environment metadata, and
 Both modes import the public GitHub repository into Azure DevOps, clone it locally, restore dependencies, and provision agents. Start from a fresh elevated PowerShell 7 session; loaded Az.Accounts assemblies are rejected before setup. Commit and push the implementation to your configured GitHub default branch before running the import.
 
 ```powershell
-# Prompt for the backend:
+# Prompt every time; Enter selects KDBX:
 & '.\lab\Start Azure Lab.ps1'
-# Or select explicitly:
-& '.\lab\Start Azure Lab.ps1' -SecretBackend KeyVault
-& '.\lab\Start Azure Lab.ps1' -SecretBackend Kdbx -SecretStorePath 'C:\PrivateWorkshop\Secrets\operator.kdbx'
+# Optional custom KDBX location:
+& '.\lab\Start Azure Lab.ps1' -SecretStorePath 'C:\PrivateWorkshop\Secrets\operator.kdbx'
 ```
 
 The credential bootstrap can also be run separately with `lab/Azure/04 Setup Project Settings Key Vault.ps1`. Run it before the import-and-clone step so the PAT and build-agent password are already in Key Vault. The import-and-clone stage can then be run with `lab/Azure/05 Import GitHub Repository.ps1`; it loads the PAT from Key Vault, imports the GitHub repository into Azure DevOps, and creates the configured local checkout without continuing to tenant or VM setup. Restore the source checkout dependencies first:

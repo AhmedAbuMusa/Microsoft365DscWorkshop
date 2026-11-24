@@ -65,7 +65,7 @@ function Select-M365DscSecretBackend
 {
     param([ValidateSet('KeyVault','Kdbx')][string]$Backend, [object]$Datum)
     if ($Backend) { return $Backend }
-    $default = Get-M365DscSecretBackend -Datum $Datum
+    $default = 'Kdbx'
     $answer = Read-Host "Secret storage: [1] Azure Key Vault (public endpoint permitted) [2] KDBX (portable, no vault). Default: $default"
     switch ($answer.Trim())
     {

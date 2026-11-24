@@ -1060,10 +1060,11 @@ if (-not (Test-Path -LiteralPath $sourceSettingsPath -PathType Leaf) -or
 }
 
 Import-Module (Join-Path $repositoryRoot 'lab\Secrets\SecretBackend.psm1') -ErrorAction Stop
-$savedBackend = [regex]::Match((Get-Content -LiteralPath $sourceSettingsPath -Raw), '(?m)^SecretStorage:[ \t]*([^#\r\n]*)(?:#.*)?$')
-$selectionDatum = @{ Global = @{ ProjectSettings = @{ SecretStorage = $savedBackend.Groups[1].Value.Trim() } } }
-$SecretBackend = Select-M365DscSecretBackend -Backend $SecretBackend -Datum $selectionDatum
-$selectionDatum = $null
+if ($PSBoundParameters.ContainsKey('SecretBackend'))
+{
+    Write-Warning '-SecretBackend no longer bypasses the startup question. Choose the backend at the prompt; Enter selects KDBX.'
+}
+$SecretBackend = Select-M365DscSecretBackend
 
 $script:pwshCommand = Get-Command -Name pwsh -ErrorAction SilentlyContinue
 if (-not $pwshCommand)

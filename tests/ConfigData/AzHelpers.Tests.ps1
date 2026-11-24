@@ -1643,11 +1643,11 @@ Describe 'Build agent software installation in the lab scripts' -Tag Integration
         $path = (Resolve-Path -Path "$PSScriptRoot\..\..\lab\Azure\31 Agent Setup.ps1").Path
         $content = Get-Content -Path $path -Raw
 
-        $content | Should -Match '(?s)AsyncExecution\s+= \$true.*?Set-AzVMRunCommand @runCommandParameters.*?Get-AzVMRunCommand.*?-Expand InstanceView.*?InstanceView\.ExecutionState'
-        $content | Should -Match 'runCommandParameters\.ProtectedParameter'
+        $content | Should -Match '(?s)asyncExecution\s+= \$true.*?Invoke-WorkerVmRunCommandRequest.*?-Method PUT.*?Invoke-WorkerVmRunCommandRequest.*?-Method GET.*?InstanceView\.ExecutionState'
+        $content | Should -Match 'runCommandParameters\.properties\.protectedParameters'
         $content | Should -Match 'checking every 5 seconds'
         $content | Should -Match 'still \$reportedState'
-        $content | Should -Match 'TimeoutInSecond\s+= \$TimeoutInSeconds'
+        $content | Should -Match 'timeoutInSeconds\s+= \$TimeoutInSeconds'
         $content | Should -Match 'TimeoutInSeconds 600'
     }
 

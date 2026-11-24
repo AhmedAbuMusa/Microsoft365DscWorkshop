@@ -133,6 +133,44 @@ foreach ($envKey in $datum.Global.Azure.Environments.Keys)
     }
 }
 
+function Invoke-WorkerVmRunCommandRequest
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$VM,
+        [Parameter(Mandatory)]
+        [string]$RunCommandName,
+        [Parameter(Mandatory)]
+        [ValidateSet('PUT', 'GET', 'DELETE')]
+        [string]$Method,
+        [hashtable]$Payload
+    )
+
+    $context = Get-AzContext -ErrorAction Stop
+    if ($VM.Id -notmatch '^/subscriptions/([^/]+)/resourceGroups/[^/]+/providers/Microsoft\.Compute/virtualMachines/[^/]+$' -or
+        $Matches[1] -ne $context.Subscription.Id)
+    {
+        throw "VM '$($VM.Name)' resource ID does not match the active Azure subscription. Run Command was not attempted."
+    }
+    $request = @{
+        Path = "$($VM.Id)/runCommands/$RunCommandName`?api-version=2024-03-01"
+        Method = $Method
+        ErrorAction = 'Stop'
+    }
+    if ($Method -eq 'GET') { $request.Path += '&$expand=instanceView' }
+    if ($Payload) { $request.Payload = $Payload | ConvertTo-Json -Depth 10 -Compress }
+    $response = Invoke-AzRestMethod @request
+    if ($response.StatusCode -notin 200, 201, 202, 204)
+    {
+        throw "Azure Run Command '$RunCommandName' on VM '$($VM.Name)' returned HTTP '$($response.StatusCode)' during $Method. Inspect the detailed Azure operation status."
+    }
+    if ($Method -eq 'GET')
+    {
+        return ($response.Content | ConvertFrom-Json -ErrorAction Stop).properties
+    }
+}
+
 function Invoke-WorkerVmScript
 {
     [CmdletBinding()]
@@ -152,18 +190,16 @@ function Invoke-WorkerVmScript
     $scriptText = $ScriptBlock.ToString()
     $runCommandName = "DSCLocal-$([Guid]::NewGuid().ToString('N'))"
     $runCommandParameters = @{
-        ResourceGroupName = $VM.ResourceGroupName
-        VMName            = $VM.Name
-        RunCommandName    = $runCommandName
-        Location          = $VM.Location
-        SourceScript      = $scriptText
-        AsyncExecution    = $true
-        TimeoutInSecond   = $TimeoutInSeconds
-        ErrorAction       = 'Stop'
+        location = $VM.Location
+        properties = @{
+            source = @{ script = $scriptText }
+            asyncExecution = $true
+            timeoutInSeconds = $TimeoutInSeconds
+        }
     }
     if ($Parameters.Count -gt 0)
     {
-        $runCommandParameters.ProtectedParameter = @(
+        $runCommandParameters.properties.protectedParameters = @(
             foreach ($parameter in $Parameters.GetEnumerator())
             {
                 @{
@@ -174,7 +210,7 @@ function Invoke-WorkerVmScript
         )
     }
 
-    $null = Set-AzVMRunCommand @runCommandParameters
+    Invoke-WorkerVmRunCommandRequest -VM $VM -RunCommandName $runCommandName -Method PUT -Payload $runCommandParameters
     try
     {
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -189,12 +225,7 @@ function Invoke-WorkerVmScript
             }
 
             Start-Sleep -Seconds 5
-            $runCommand = Get-AzVMRunCommand `
-                -ResourceGroupName $VM.ResourceGroupName `
-                -VMName $VM.Name `
-                -RunCommandName $runCommandName `
-                -Expand InstanceView `
-                -ErrorAction Stop
+            $runCommand = Invoke-WorkerVmRunCommandRequest -VM $VM -RunCommandName $runCommandName -Method GET
             $executionState = [string]$runCommand.InstanceView.ExecutionState
             if ($executionState -notin 'Succeeded', 'Failed', 'TimedOut', 'Canceled' -and
                 $stopwatch.Elapsed -ge $nextStatusReport)
@@ -213,11 +244,7 @@ function Invoke-WorkerVmScript
         $exitCode = $instanceView.ExitCode
         if ($secretBackend -ne 'Kdbx')
         {
-            Remove-AzVMRunCommand `
-                -ResourceGroupName $VM.ResourceGroupName `
-                -VMName $VM.Name `
-                -RunCommandName $runCommandName `
-                -ErrorAction Stop | Out-Null
+            Invoke-WorkerVmRunCommandRequest -VM $VM -RunCommandName $runCommandName -Method DELETE
         }
 
         if ($executionState -ne 'Succeeded' -or $exitCode -ne 0)
@@ -234,8 +261,7 @@ function Invoke-WorkerVmScript
     {
         if ($secretBackend -eq 'Kdbx')
         {
-            Remove-AzVMRunCommand -ResourceGroupName $VM.ResourceGroupName -VMName $VM.Name `
-                -RunCommandName $runCommandName -ErrorAction Stop | Out-Null
+            Invoke-WorkerVmRunCommandRequest -VM $VM -RunCommandName $runCommandName -Method DELETE
         }
     }
 }

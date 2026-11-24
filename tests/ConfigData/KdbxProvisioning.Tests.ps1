@@ -723,37 +723,76 @@ Describe 'Agent setup identity tenant isolation' {
 Describe 'KDBX protected worker delivery cleanup' {
     BeforeAll {
         $ast = Read-ProvisioningAst "$PSScriptRoot\..\..\lab\Azure\31 Agent Setup.ps1"
-        $function = $ast.EndBlock.Statements | Where-Object {
-            $_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -eq 'Invoke-WorkerVmScript'
+        $functions = $ast.EndBlock.Statements | Where-Object {
+            $_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -in 'Invoke-WorkerVmScript', 'Invoke-WorkerVmRunCommandRequest'
         }
-        . ([scriptblock]::Create($function.Extent.Text))
-        function Set-AzVMRunCommand {
-            [CmdletBinding()]param($ResourceGroupName, $VMName, $RunCommandName, $Location, $SourceScript,
-                $AsyncExecution, $TimeoutInSecond, $ProtectedParameter)
-        }
-        function Get-AzVMRunCommand { [CmdletBinding()]param($ResourceGroupName, $VMName, $RunCommandName, $Expand) }
-        function Remove-AzVMRunCommand { [CmdletBinding()]param($ResourceGroupName, $VMName, $RunCommandName) }
+        foreach ($function in $functions) { . ([scriptblock]::Create($function.Extent.Text)) }
+        function Get-AzContext { [CmdletBinding()]param() }
+        function Invoke-AzRestMethod { [CmdletBinding()]param($Path, $Method, $Payload) }
     }
     BeforeEach {
         $secretBackend = 'Kdbx'
-        $vm = @{ Name = 'synthetic-vm'; ResourceGroupName = 'synthetic-rg'; Location = 'westeurope' }
-        Mock Set-AzVMRunCommand {}
-        Mock Get-AzVMRunCommand { @{ InstanceView = @{ ExecutionState = 'Succeeded'; ExitCode = 0 } } }
-        Mock Remove-AzVMRunCommand {}
+        $vm = @{
+            Name = 'synthetic-vm'; ResourceGroupName = 'synthetic-rg'; Location = 'westeurope'
+            Id = '/subscriptions/subscription-dev/resourceGroups/synthetic-rg/providers/Microsoft.Compute/virtualMachines/synthetic-vm'
+        }
+        $context = @{ Subscription = @{ Id = 'subscription-dev' } }
+        Mock Get-AzContext { $context }
+        Mock Invoke-AzRestMethod {
+            if ($Method -eq 'GET') {
+                @{ StatusCode = 200; Content = '{"properties":{"instanceView":{"executionState":"Succeeded","exitCode":0}}}' }
+            }
+            else { @{ StatusCode = 200 } }
+        }
         Mock Start-Sleep {}
     }
     It 'Sends credential values only as protected parameters and removes successful command resources' {
         Invoke-WorkerVmScript -VM $vm -ScriptBlock { param($PfxPassword) } -Parameters @{ PfxPassword = 'synthetic-password' }
-        Should -Invoke Set-AzVMRunCommand -Times 1 -Exactly -ParameterFilter {
-            $ProtectedParameter[0].Name -eq 'PfxPassword' -and
-            $ProtectedParameter[0].Value -eq 'synthetic-password' -and $SourceScript -notlike '*synthetic-password*'
+        Should -Invoke Invoke-AzRestMethod -Times 1 -Exactly -ParameterFilter {
+            if ($Method -ne 'PUT') { return $false }
+            $body = $Payload | ConvertFrom-Json
+            $Method -eq 'PUT' -and $body.properties.protectedParameters[0].Name -eq 'PfxPassword' -and
+            $body.properties.protectedParameters[0].Value -eq 'synthetic-password' -and
+            $body.properties.source.script -notlike '*synthetic-password*' -and
+            $body.properties.asyncExecution -and $body.properties.timeoutInSeconds -eq 1800
         }
-        Should -Invoke Remove-AzVMRunCommand -Times 1 -Exactly
+        Should -Invoke Invoke-AzRestMethod -Times 1 -Exactly -ParameterFilter { $Method -eq 'DELETE' }
     }
     It 'Removes credential-bearing command resources on polling failure without hiding the failure' {
-        Mock Get-AzVMRunCommand { throw 'Synthetic polling failure' }
+        Mock Invoke-AzRestMethod { throw 'Synthetic polling failure' } -ParameterFilter { $Method -eq 'GET' }
         { Invoke-WorkerVmScript -VM $vm -ScriptBlock {} -Parameters @{ PersonalAccessToken = 'synthetic-token' } } |
             Should -Throw '*polling failure*'
-        Should -Invoke Remove-AzVMRunCommand -Times 1 -Exactly
+        Should -Invoke Invoke-AzRestMethod -Times 1 -Exactly -ParameterFilter { $Method -eq 'DELETE' }
+    }
+    It 'Binds create, poll and cleanup to the selected VM subscription after a tenant switch' {
+        Invoke-WorkerVmScript -VM $vm -ScriptBlock {}
+        $context.Subscription.Id = 'subscription-test'
+        $vm.Id = $vm.Id.Replace('subscription-dev', 'subscription-test')
+        Invoke-WorkerVmScript -VM $vm -ScriptBlock {}
+        Should -Invoke Invoke-AzRestMethod -Times 3 -Exactly -ParameterFilter { $Path -like '/subscriptions/subscription-test/*' }
+        Should -Invoke Invoke-AzRestMethod -Times 1 -Exactly -ParameterFilter {
+            $Method -eq 'GET' -and $Path -like '/subscriptions/subscription-test/*api-version=2024-03-01&$expand=instanceView'
+        }
+    }
+    It 'Rejects a VM from a different subscription before submitting protected values' {
+        $context.Subscription.Id = 'subscription-test'
+        { Invoke-WorkerVmScript -VM $vm -ScriptBlock {} } | Should -Throw '*does not match*'
+        Should -Invoke Invoke-AzRestMethod -Times 0
+    }
+    It 'Reports non-success HTTP responses and still cleans up protected parameters' {
+        Mock Invoke-AzRestMethod { @{ StatusCode = 403 } } -ParameterFilter { $Method -eq 'GET' }
+        { Invoke-WorkerVmScript -VM $vm -ScriptBlock {} } | Should -Throw '*HTTP*403*GET*'
+        Should -Invoke Invoke-AzRestMethod -Times 1 -Exactly -ParameterFilter { $Method -eq 'DELETE' }
+    }
+    It 'Preserves execution failures and cleans up in either backend' -TestCases @(
+        @{ Backend = 'Kdbx' }, @{ Backend = 'KeyVault' }
+    ) {
+        param($Backend)
+        $secretBackend = $Backend
+        Mock Invoke-AzRestMethod {
+            @{ StatusCode = 200; Content = '{"properties":{"instanceView":{"executionState":"Failed","exitCode":1,"error":"synthetic failure"}}}' }
+        } -ParameterFilter { $Method -eq 'GET' }
+        { Invoke-WorkerVmScript -VM $vm -ScriptBlock {} } | Should -Throw "*exit code: '1'*synthetic failure*"
+        Should -Invoke Invoke-AzRestMethod -Times 1 -Exactly -ParameterFilter { $Method -eq 'DELETE' }
     }
 }

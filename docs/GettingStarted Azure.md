@@ -256,6 +256,8 @@ Use Azure VM Run Command to install and configure the Azure DevOps agent on each
 
 Agent setup validates the environment's active tenant/subscription and reads the assigned identity through `Az.Resources`, avoiding the same AutoRest cross-tenant authentication path as VM provisioning. Resource-list discovery uses the cmdlet's default listing API; after verifying the identity resource ID, a separate resource-ID read uses the managed-identity API to retrieve expanded client/principal properties. Key Vault role assignment and worker `AZURE_CLIENT_ID` configuration use those verified values.
 
+Worker Run Command creation, polling, and cleanup use `Invoke-AzRestMethod` rather than the generated Run Command cmdlets. Every request checks the VM resource ID against the active subscription and uses the VM's full ARM path. Credential values remain protected parameters; asynchronous execution, bounded polling, failure reporting, and cleanup are preserved. `-Restart` only resets provisioning checkpoints; it does not fix cross-tenant token errors and unnecessarily repeats successful phases.
+
 ```powershell
 & '.\lab\Azure\31 Agent Setup.ps1'
 ```

@@ -119,6 +119,9 @@ Close-M365DscSecretStore
 Native pipeline publishing follows project/pipeline setup. Bootstrap publishes
 each selected environment separately; a publication failure stops the
 stage and is retried on resume.
+The publisher reuses an already loaded Datum module rather than importing another
+installed version. If an earlier run loaded multiple Datum versions, restart
+PowerShell before resuming; the KDBX database and checkpoints are retained.
 Only explicitly
 trusted workshop pipeline IDs are authorized to use per-environment metadata,
 PFX Secure Files and password variables. Secure Files have a 10 MB size limit.

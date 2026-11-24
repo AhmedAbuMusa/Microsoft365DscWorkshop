@@ -947,7 +947,7 @@ Describe 'Azure bootstrap dependency restore' {
         $bootstrapContent | Should -Match ([regex]::Escape('$dependencyRestoreArguments = @(''-UsePSResourceGet'')'))
         $bootstrapContent | Should -Match ([regex]::Escape('$dependencyRestoreArguments += ''-WithYAML'''))
         $bootstrapContent | Should -Match ([regex]::Escape('$dependencyRestoreArguments += ''-WithYAML:$false'''))
-        $bootstrapContent | Should -Match ([regex]::Escape('-File $sourceDependencyScript @dependencyRestoreArguments'))
+        $bootstrapContent | Should -Match ([regex]::Escape('Invoke-BootstrapChildScript -Path $sourceDependencyScript'))
         $bootstrapContent | Should -Not -Match ([regex]::Escape('-File $sourceBuildScript -UsePSResourceGet -ResolveDependency'))
     }
 
@@ -976,7 +976,7 @@ Describe 'Azure bootstrap dependency restore' {
         $buildConfigurationPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\build.yaml'
         $buildConfiguration = Get-Content -LiteralPath $buildConfigurationPath -Raw
 
-        $bootstrapContent | Should -Match ([regex]::Escape('-NoLogo -NoProfile -File $targetBuildScript -Tasks azureinit'))
+        $bootstrapContent | Should -Match ([regex]::Escape("Invoke-BootstrapChildScript -Path `$targetBuildScript -Arguments @{ Tasks = 'azureinit' }"))
         $buildConfiguration | Should -Match '(?ms)^\s+azureinit:\s*\r?\n\s+- test7\s*\r?\n\s+- LoadDatumConfigData\s*\r?\n\s+- ConfigDataPreparation'
         $bootstrapContent | Should -Not -Match ([regex]::Escape('-Tasks shellinit'))
         $bootstrapContent | Should -Not -Match ([regex]::Escape('-Tasks init'))

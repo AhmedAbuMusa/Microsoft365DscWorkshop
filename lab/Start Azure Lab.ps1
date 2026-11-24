@@ -14,6 +14,8 @@
     Use -ForceDependencyRestore only when dependency packages must also be refreshed.
     Every start synchronizes GitHub's default branch into Azure DevOps and its local
     checkout. A changed repository commit invalidates completed downstream stages.
+    Routine output is written to a private, timestamped log under
+    %LOCALAPPDATA%\Microsoft365DscWorkshop\AzureLabBootstrap\Logs.
 #>
 
 [CmdletBinding()]
@@ -37,6 +39,70 @@ $script:BootstrapPhaseCount = 13
 $previousSecretBackend = $env:M365DSC_SECRET_BACKEND
 $previousPublicOnly = $env:M365DSC_KEYVAULT_PUBLIC_ONLY
 
+Import-Module "$PSScriptRoot\BootstrapLogging.psm1" -ErrorAction Stop
+$script:BootstrapLogPath = Initialize-M365DscBootstrapLog
+Write-Host "Detailed bootstrap log: $script:BootstrapLogPath" -ForegroundColor DarkCyan
+
+function Get-BootstrapPhaseNarrative
+{
+    param([int]$Index)
+    switch ($Index)
+    {
+        1 { @{ Intent = 'Ensure the source checkout has all required dependency versions.'; Success = 'Source dependencies are ready.' } }
+        2 { @{ Intent = 'Read project settings, unlock the selected secret backend, and validate tenant configuration.'; Success = 'Project settings and tenant configuration are validated.' } }
+        3 {
+            if ($SecretBackend -eq 'Kdbx')
+            {
+                @{ Intent = 'Reuse the unlocked encrypted operator store without accessing Key Vault.'; Success = 'KDBX credentials are ready; Key Vault was not provisioned.' }
+            }
+            else
+            {
+                @{ Intent = 'Create or reuse a public-access Key Vault and securely collect project credentials.'; Success = 'Project credentials are available in Key Vault.' }
+            }
+        }
+        4 { @{ Intent = 'Synchronize GitHub, Azure DevOps, and the local clone while preserving local configuration.'; Success = 'All three repository revisions are synchronized.' } }
+        5 { @{ Intent = 'Verify imported scripts and build files support the selected workflow.'; Success = 'The imported checkout passed compatibility checks.' } }
+        6 { @{ Intent = 'Prepare machine-wide tooling and Git settings required by the Azure lab.'; Success = 'Machine preparation completed.' } }
+        7 { @{ Intent = 'Make required dependencies and secret-backend tools available in the imported checkout.'; Success = 'Imported checkout dependencies are ready.' } }
+        8 { @{ Intent = 'Run Azure build initialization to prepare configuration data and build artifacts.'; Success = 'Imported Azure build initialization completed.' } }
+        9 { @{ Intent = 'Register tenant applications, grant required permissions, and persist their credentials.'; Success = 'Application registration and credential storage completed for the selected tenants.' } }
+        10 { @{ Intent = 'Test tenant application authentication and confirm tenant/subscription context matches.'; Success = 'All selected tenant application connection tests passed.' } }
+        11 { @{ Intent = 'Configure Azure DevOps environments, agent pool, pipelines, and selected-backend secret delivery.'; Success = 'Azure DevOps configuration and required pipeline secret delivery completed.' } }
+        12 { @{ Intent = 'Create or reuse Azure worker VMs for each environment. Running VMs incur Azure charges.'; Success = 'Worker VM provisioning completed.' } }
+        13 { @{ Intent = 'Install and configure Azure DevOps agents on the worker VMs.'; Success = 'Worker agent configuration completed.' } }
+    }
+}
+
+function Write-BootstrapStatus
+{
+    param([string]$Message, [string]$Color = 'Cyan')
+    Write-M365DscBootstrapLog -LogPath $script:BootstrapLogPath -Message $Message -Level Phase
+    Write-Host $Message -ForegroundColor $Color
+}
+
+function Invoke-BootstrapChildScript
+{
+    param([Parameter(Mandatory)][string]$Path, [hashtable]$Arguments = @{})
+    $startInfo = [Diagnostics.ProcessStartInfo]::new($script:pwshCommand.Source)
+    $startInfo.UseShellExecute = $false
+    $startInfo.WorkingDirectory = (Get-Location).ProviderPath
+    $encodedArguments = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(
+        ($Arguments | ConvertTo-Json -Depth 5 -Compress)))
+    foreach ($argument in @('-NoLogo', '-NoProfile', '-File', "$PSScriptRoot\Invoke Bootstrap Child.ps1",
+            '-ScriptPath', $Path, '-EncodedArguments', $encodedArguments, '-LogPath', $script:BootstrapLogPath))
+    {
+        $startInfo.ArgumentList.Add($argument)
+    }
+    # Inherit the console so child Read-Host and authentication prompts stay interactive.
+    $process = [Diagnostics.Process]::Start($startInfo)
+    try
+    {
+        $process.WaitForExit()
+        $script:LASTEXITCODE = $process.ExitCode
+    }
+    finally { $process.Dispose() }
+}
+
 function Write-BootstrapPhase
 {
     param
@@ -52,11 +118,14 @@ function Write-BootstrapPhase
     $script:BootstrapPhase = $Index
     $script:BootstrapPhaseStartedAt = [DateTimeOffset]::Now
     $script:BootstrapPhaseTimer = [Diagnostics.Stopwatch]::StartNew()
+    $script:BootstrapPhaseFailureMessage = $null
+    $script:BootstrapPhaseNarrative = Get-BootstrapPhaseNarrative -Index $Index
     Write-Host ''
     Write-Host ('=' * 78) -ForegroundColor DarkCyan
-    Write-Host ('Phase {0:D2}/{1:D2}: {2}' -f $Index, $script:BootstrapPhaseCount, $Description) -ForegroundColor Cyan
+    Write-BootstrapStatus -Message ('Phase {0:D2}/{1:D2}: {2}' -f $Index, $script:BootstrapPhaseCount, $Description)
     Write-Host ('=' * 78) -ForegroundColor DarkCyan
-    Write-Host ('Started: {0}' -f $script:BootstrapPhaseStartedAt.ToString('yyyy-MM-dd HH:mm:ss.fff zzz')) -ForegroundColor Cyan
+    Write-BootstrapStatus -Message ('Started: {0}' -f $script:BootstrapPhaseStartedAt.ToString('yyyy-MM-dd HH:mm:ss.fff zzz'))
+    Write-BootstrapStatus -Message "Intent: $($script:BootstrapPhaseNarrative.Intent)"
 }
 
 function Complete-BootstrapPhase
@@ -71,9 +140,16 @@ function Complete-BootstrapPhase
     $script:BootstrapPhaseTimer.Stop()
     $finishedAt = [DateTimeOffset]::Now
     $color = if ($Status -eq 'Failed') { 'Red' } elseif ($Status -eq 'Skipped') { 'DarkGray' } else { 'Green' }
-    Write-Host ('Phase {0:D2}/{1:D2} finished: {2} | Status: {3} | Elapsed: {4:F3}s' -f
+    Write-BootstrapStatus -Message ('Phase {0:D2}/{1:D2} finished: {2} | Status: {3} | Elapsed: {4:F3}s' -f
         $script:BootstrapPhase, $script:BootstrapPhaseCount, $finishedAt.ToString('yyyy-MM-dd HH:mm:ss.fff zzz'),
-        $Status, $script:BootstrapPhaseTimer.Elapsed.TotalSeconds) -ForegroundColor $color
+        $Status, $script:BootstrapPhaseTimer.Elapsed.TotalSeconds) -Color $color
+    $summary = switch ($Status)
+    {
+        Completed { $script:BootstrapPhaseNarrative.Success }
+        Skipped { 'Previously satisfied; no work repeated.' }
+        Failed { "Not completed: $script:BootstrapPhaseFailureMessage Rerun bootstrap to retry; see the detailed log." }
+    }
+    Write-BootstrapStatus -Message "Result: $summary" -Color $color
 }
 
 function Assert-FreshAzureSession
@@ -197,7 +273,7 @@ function Invoke-BootstrapStage
         }
         $script:BootstrapCheckpoint.CurrentStage = $Name
         Save-BootstrapCheckpoint
-        & $Action
+        & $Action *>&1 | Write-M365DscBootstrapOutput -LogPath $script:BootstrapLogPath
         $script:BootstrapCheckpoint.CompletedStages = @(
             $script:BootstrapCheckpoint.CompletedStages
             $Name
@@ -208,7 +284,8 @@ function Invoke-BootstrapStage
     }
     catch
     {
-        Write-Host "Bootstrap failed during phase $($Index)/$($script:BootstrapPhaseCount): $($_.Exception.Message)" -ForegroundColor Red
+        $script:BootstrapPhaseFailureMessage = $_.Exception.Message
+        Write-M365DscBootstrapLog -LogPath $script:BootstrapLogPath -Message "$($_ | Out-String)`n$($_.Exception)`n$($_.ScriptStackTrace)" -Level Error
         throw
     }
     finally
@@ -920,10 +997,9 @@ function Initialize-TargetDependencies
     }
     elseif (-not (Test-Path -LiteralPath (Join-Path -Path $targetModules -ChildPath 'Datum')))
     {
-        $pwshCommand = Get-Command -Name pwsh -ErrorAction Stop
         $buildScript = Join-Path -Path $TargetRoot -ChildPath 'build.ps1'
         Write-Host "Running file: '$buildScript' -UsePSResourceGet -ResolveDependency."
-        & $pwshCommand.Source -NoLogo -NoProfile -File $buildScript -UsePSResourceGet -ResolveDependency
+        Invoke-BootstrapChildScript -Path $buildScript -Arguments @{ UsePSResourceGet = $true; ResolveDependency = $true }
         if ($LASTEXITCODE -ne 0)
         {
             throw "Dependency restore for the imported repository failed with exit code $LASTEXITCODE."
@@ -987,7 +1063,7 @@ $selectionDatum = @{ Global = @{ ProjectSettings = @{ SecretStorage = $savedBack
 $SecretBackend = Select-M365DscSecretBackend -Backend $SecretBackend -Datum $selectionDatum
 $selectionDatum = $null
 
-$pwshCommand = Get-Command -Name pwsh -ErrorAction SilentlyContinue
+$script:pwshCommand = Get-Command -Name pwsh -ErrorAction SilentlyContinue
 if (-not $pwshCommand)
 {
     throw 'PowerShell 7 (pwsh) is required to restore the repository dependencies in an isolated process.'
@@ -1001,49 +1077,55 @@ if ($env:PSModulePath -notlike "*$sourceRequiredModules*")
 }
 
 Write-BootstrapPhase -Index 1 -Description 'Restore dependencies for the source checkout'
-$phaseStatus = 'Failed'
+$script:phaseStatus = 'Failed'
 try
 {
-    $dependenciesAvailable = Test-SourceDependencyRestoreComplete `
-        -RepositoryRoot $repositoryRoot `
-        -RequiredModulesPath $sourceRequiredModules `
-        -ForceRestore:$ForceDependencyRestore
+    . {
+        $dependenciesAvailable = Test-SourceDependencyRestoreComplete `
+            -RepositoryRoot $repositoryRoot `
+            -RequiredModulesPath $sourceRequiredModules `
+            -ForceRestore:$ForceDependencyRestore
 
-    if ($dependenciesAvailable)
-    {
-        Write-Host ('Skipping phase 01/{0:D2}: all required dependency versions are already installed.' -f $script:BootstrapPhaseCount) -ForegroundColor DarkGray
-        $phaseStatus = 'Skipped'
-    }
-    else
-    {
-        $yamlModuleRoot = Join-Path -Path $sourceRequiredModules -ChildPath 'powershell-yaml'
-        $yamlModuleManifest = Get-ChildItem -LiteralPath $yamlModuleRoot -Filter 'powershell-yaml.psd1' -File -Recurse -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        $dependencyRestoreArguments = @('-UsePSResourceGet')
-        if (-not $yamlModuleManifest)
+        if ($dependenciesAvailable)
         {
-            $dependencyRestoreArguments += '-WithYAML'
+            Write-Host ('Skipping phase 01/{0:D2}: all required dependency versions are already installed.' -f $script:BootstrapPhaseCount) -ForegroundColor DarkGray
+            $script:phaseStatus = 'Skipped'
         }
         else
         {
-            $dependencyRestoreArguments += '-WithYAML:$false'
-            Write-Host "Using existing PowerShell-Yaml module at '$($yamlModuleManifest.FullName)'; it is excluded as a direct restore target, but another package may still request it as a transitive dependency." -ForegroundColor Yellow
-        }
+            $yamlModuleRoot = Join-Path -Path $sourceRequiredModules -ChildPath 'powershell-yaml'
+            $yamlModuleManifest = Get-ChildItem -LiteralPath $yamlModuleRoot -Filter 'powershell-yaml.psd1' -File -Recurse -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+                $dependencyRestoreArguments = @('-UsePSResourceGet')
+                if (-not $yamlModuleManifest)
+                {
+                    $dependencyRestoreArguments += '-WithYAML'
+                }
+                else
+                {
+                    $dependencyRestoreArguments += '-WithYAML:$false'
+                    Write-Host "Using existing PowerShell-Yaml module at '$($yamlModuleManifest.FullName)'; it is excluded as a direct restore target, but another package may still request it as a transitive dependency." -ForegroundColor Yellow
+                }
 
-        $sourceDependencyScript = Join-Path -Path $repositoryRoot -ChildPath 'Resolve-Dependency.ps1'
-        Write-Host "Running file: '$sourceDependencyScript' $($dependencyRestoreArguments -join ' ')."
-        & $pwshCommand.Source -NoLogo -NoProfile -File $sourceDependencyScript @dependencyRestoreArguments
-        if ($LASTEXITCODE -ne 0)
-        {
-            throw "Source dependency restore failed with exit code $LASTEXITCODE."
-        }
-        Write-Host 'Completed source checkout dependency restore.' -ForegroundColor Green
-        $phaseStatus = 'Completed'
-    }
+                $sourceDependencyScript = Join-Path -Path $repositoryRoot -ChildPath 'Resolve-Dependency.ps1'
+                Write-Host "Running file: '$sourceDependencyScript' $($dependencyRestoreArguments -join ' ')."
+                Invoke-BootstrapChildScript -Path $sourceDependencyScript -Arguments @{
+                    UsePSResourceGet = $true
+                    WithYAML = (-not $yamlModuleManifest)
+                }
+                if ($LASTEXITCODE -ne 0)
+                {
+                    throw "Source dependency restore failed with exit code $LASTEXITCODE."
+                }
+                Write-Host 'Completed source checkout dependency restore.' -ForegroundColor Green
+                $script:phaseStatus = 'Completed'
+            }
+        } *>&1 | Write-M365DscBootstrapOutput -LogPath $script:BootstrapLogPath
 }
 catch
 {
-    Write-Host "Bootstrap failed during phase $($script:BootstrapPhase)/$($script:BootstrapPhaseCount): $($_.Exception.Message)" -ForegroundColor Red
+    $script:BootstrapPhaseFailureMessage = $_.Exception.Message
+    Write-M365DscBootstrapLog -LogPath $script:BootstrapLogPath -Message "$($_ | Out-String)`n$($_.Exception)`n$($_.ScriptStackTrace)" -Level Error
     throw
 }
 finally
@@ -1055,179 +1137,183 @@ Write-BootstrapPhase -Index 2 -Description 'Read and validate project and tenant
 $phaseStatus = 'Failed'
 try
 {
-    Import-Module -Name Datum -ErrorAction Stop
-    Import-Module -Name Datum.ProtectedData -ErrorAction Stop
+        . {
+            Import-Module -Name Datum -ErrorAction Stop
+            Import-Module -Name Datum.ProtectedData -ErrorAction Stop
 
-    $sourceDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $repositoryRoot -ChildPath 'source\Datum.yml')
-    Import-Module (Join-Path $repositoryRoot 'lab\Secrets\SecretBackend.psm1') -ErrorAction Stop
-    $env:M365DSC_SECRET_BACKEND = $SecretBackend
-    $env:M365DSC_KEYVAULT_PUBLIC_ONLY = if ($SecretBackend -eq 'KeyVault') { '1' } else { $null }
-    Set-M365DscSecretBackendSetting -Path $sourceSettingsPath -Backend $SecretBackend
-    if ($SecretBackend -eq 'Kdbx')
-    {
-        if ($SecretStorePath) { $env:M365DSC_SECRET_STORE = $SecretStorePath }
-        Invoke-LabScript -Path (Join-Path $repositoryRoot 'lab\Secrets\Kdbx\Initialize Operator.ps1') -Arguments @{}
-        $sourceDatum = Get-M365DscProjectConfiguration -Datum $sourceDatum
-    }
-    $sourceProjectSettings = $sourceDatum.Global.ProjectSettings
-    $script:OrganizationName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'OrganizationName' -Path 'source/Global/ProjectSettings.yml: OrganizationName')
-    $script:ProjectName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'ProjectName' -Path 'source/Global/ProjectSettings.yml: ProjectName')
-    $script:RepositoryName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'RepositoryName' -Path 'source/Global/ProjectSettings.yml: RepositoryName')
-    $localPathValue = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'LocalPath' -Path 'source/Global/ProjectSettings.yml: LocalPath')
-    $null = Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'AgentPoolName' -Path 'source/Global/ProjectSettings.yml: AgentPoolName'
-    $buildAgentUserName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'UserName' -Path 'source/Global/ProjectSettings.yml: BuildAgents.UserName')
-    $null = Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'AzureLocation' -Path 'source/Global/ProjectSettings.yml: BuildAgents.AzureLocation'
-    $buildAgentVmSize = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'AzureRoleSize' -Path 'source/Global/ProjectSettings.yml: BuildAgents.AzureRoleSize')
-
-    if ($script:OrganizationName -notmatch '^[A-Za-z0-9._-]+$')
-    {
-        throw "Invalid OrganizationName in 'source/Global/ProjectSettings.yml'."
-    }
-    if ($script:ProjectName -notmatch '^[A-Za-z0-9._ -]+$' -or
-        $script:RepositoryName -notmatch '^[A-Za-z0-9._ -]+$')
-    {
-        throw 'ProjectName and RepositoryName in ProjectSettings.yml may contain only letters, digits, spaces, periods, underscores, and hyphens.'
-    }
-    if ($buildAgentUserName -notmatch '^[A-Za-z0-9._-]+$' -or $buildAgentVmSize -notmatch '^[A-Za-z0-9_]+$')
-    {
-        throw 'BuildAgents.UserName or BuildAgents.AzureRoleSize in ProjectSettings.yml contains unsupported characters.'
-    }
-    $resolvedLocalPath = [IO.Path]::GetFullPath($localPathValue)
-    $repositoryPrefix = $repositoryRoot.TrimEnd('\') + '\'
-    if ($resolvedLocalPath.Equals($repositoryRoot, [StringComparison]::OrdinalIgnoreCase) -or
-        $resolvedLocalPath.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase))
-    {
-        throw 'LocalPath must be outside the source checkout.'
-    }
-
-    $script:EnvironmentNames = @(Get-EnvironmentNames -Datum $sourceDatum)
-    $credentialVaultEnvironment = [string]$sourceProjectSettings.CredentialVaultEnvironment
-    if ($SecretBackend -eq 'KeyVault' -and ([string]::IsNullOrWhiteSpace($credentialVaultEnvironment) -or
-        $credentialVaultEnvironment -notin $script:EnvironmentNames))
-    {
-        throw "Set 'CredentialVaultEnvironment' in 'source/Global/ProjectSettings.yml' to an environment defined in 'source/Global/Azure.yml'."
-    }
-
-    $keyVaultNetworking = if ($sourceProjectSettings -is [System.Collections.IDictionary])
-    {
-        $sourceProjectSettings['KeyVaultNetworking']
-    }
-    elseif ($sourceProjectSettings.PSObject.Properties['KeyVaultNetworking'])
-    {
-        $sourceProjectSettings.KeyVaultNetworking
-    }
-    $resumeIdentity = [ordered]@{
-        SecretBackend        = $SecretBackend
-        SecretStoreIdentity  = $(if ($SecretBackend -eq 'Kdbx') {
-            Import-Module (Join-Path $repositoryRoot 'lab\Secrets\Kdbx\Store.psm1') -ErrorAction Stop
-            Get-M365DscDeploymentId
-        })
-        RepositoryRoot       = $repositoryRoot
-        OrganizationName     = $script:OrganizationName
-        ProjectName          = $script:ProjectName
-        RepositoryName       = $script:RepositoryName
-        CredentialVaultEnvironment = $credentialVaultEnvironment
-        GitHubRepositoryUrl  = [string]$sourceProjectSettings.GitHubRepositoryUrl
-        LocalPath            = $resolvedLocalPath
-        AgentPoolName        = [string]$sourceProjectSettings.AgentPoolName
-        NumberOfBuildAgents  = [string]$sourceProjectSettings.NumbertOfBuildAgents
-        GitUserName          = [string]$sourceProjectSettings.GitUserName
-        GitUserEmail         = [string]$sourceProjectSettings.GitUserEmail
-        BuildAgentUserName   = [string]$sourceProjectSettings.BuildAgents.UserName
-        BuildAgentLocation   = [string]$sourceProjectSettings.BuildAgents.AzureLocation
-        BuildAgentVmSize     = [string]$sourceProjectSettings.BuildAgents.AzureRoleSize
-        Environments         = @(
-            foreach ($environmentName in ($script:EnvironmentNames | Sort-Object))
+            $sourceDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $repositoryRoot -ChildPath 'source\Datum.yml')
+            Import-Module (Join-Path $repositoryRoot 'lab\Secrets\SecretBackend.psm1') -ErrorAction Stop
+            $env:M365DSC_SECRET_BACKEND = $SecretBackend
+            $env:M365DSC_KEYVAULT_PUBLIC_ONLY = if ($SecretBackend -eq 'KeyVault') { '1' } else { $null }
+            Set-M365DscSecretBackendSetting -Path $sourceSettingsPath -Backend $SecretBackend
+            if ($SecretBackend -eq 'Kdbx')
             {
-                $environment = $sourceDatum.Global.Azure.Environments[$environmentName]
-                [ordered]@{
-                    Name                = $environmentName
-                    TenantName          = [string]$environment.AzTenantName
-                    HasExchangeOnline   = [string]$environment.HasExchangeOnline
-                    HasSharePointOnline = [string]$environment.HasSharePointOnline
+                if ($SecretStorePath) { $env:M365DSC_SECRET_STORE = $SecretStorePath }
+                Invoke-LabScript -Path (Join-Path $repositoryRoot 'lab\Secrets\Kdbx\Initialize Operator.ps1') -Arguments @{}
+                $sourceDatum = Get-M365DscProjectConfiguration -Datum $sourceDatum
+            }
+            $sourceProjectSettings = $sourceDatum.Global.ProjectSettings
+            $script:OrganizationName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'OrganizationName' -Path 'source/Global/ProjectSettings.yml: OrganizationName')
+            $script:ProjectName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'ProjectName' -Path 'source/Global/ProjectSettings.yml: ProjectName')
+            $script:RepositoryName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'RepositoryName' -Path 'source/Global/ProjectSettings.yml: RepositoryName')
+            $localPathValue = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'LocalPath' -Path 'source/Global/ProjectSettings.yml: LocalPath')
+            $null = Get-RequiredConfigurationValue -Configuration $sourceProjectSettings -Name 'AgentPoolName' -Path 'source/Global/ProjectSettings.yml: AgentPoolName'
+            $buildAgentUserName = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'UserName' -Path 'source/Global/ProjectSettings.yml: BuildAgents.UserName')
+            $null = Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'AzureLocation' -Path 'source/Global/ProjectSettings.yml: BuildAgents.AzureLocation'
+            $buildAgentVmSize = [string](Get-RequiredConfigurationValue -Configuration $sourceProjectSettings.BuildAgents -Name 'AzureRoleSize' -Path 'source/Global/ProjectSettings.yml: BuildAgents.AzureRoleSize')
+
+            if ($script:OrganizationName -notmatch '^[A-Za-z0-9._-]+$')
+            {
+                throw "Invalid OrganizationName in 'source/Global/ProjectSettings.yml'."
+            }
+            if ($script:ProjectName -notmatch '^[A-Za-z0-9._ -]+$' -or
+                $script:RepositoryName -notmatch '^[A-Za-z0-9._ -]+$')
+            {
+                throw 'ProjectName and RepositoryName in ProjectSettings.yml may contain only letters, digits, spaces, periods, underscores, and hyphens.'
+            }
+            if ($buildAgentUserName -notmatch '^[A-Za-z0-9._-]+$' -or $buildAgentVmSize -notmatch '^[A-Za-z0-9_]+$')
+            {
+                throw 'BuildAgents.UserName or BuildAgents.AzureRoleSize in ProjectSettings.yml contains unsupported characters.'
+            }
+            $resolvedLocalPath = [IO.Path]::GetFullPath($localPathValue)
+            $repositoryPrefix = $repositoryRoot.TrimEnd('\') + '\'
+            if ($resolvedLocalPath.Equals($repositoryRoot, [StringComparison]::OrdinalIgnoreCase) -or
+                $resolvedLocalPath.StartsWith($repositoryPrefix, [StringComparison]::OrdinalIgnoreCase))
+            {
+                throw 'LocalPath must be outside the source checkout.'
+            }
+
+            $script:EnvironmentNames = @(Get-EnvironmentNames -Datum $sourceDatum)
+            $credentialVaultEnvironment = [string]$sourceProjectSettings.CredentialVaultEnvironment
+            if ($SecretBackend -eq 'KeyVault' -and ([string]::IsNullOrWhiteSpace($credentialVaultEnvironment) -or
+                    $credentialVaultEnvironment -notin $script:EnvironmentNames))
+            {
+                throw "Set 'CredentialVaultEnvironment' in 'source/Global/ProjectSettings.yml' to an environment defined in 'source/Global/Azure.yml'."
+            }
+
+            $keyVaultNetworking = if ($sourceProjectSettings -is [System.Collections.IDictionary])
+            {
+                $sourceProjectSettings['KeyVaultNetworking']
+            }
+            elseif ($sourceProjectSettings.PSObject.Properties['KeyVaultNetworking'])
+            {
+                $sourceProjectSettings.KeyVaultNetworking
+            }
+            $resumeIdentity = [ordered]@{
+                SecretBackend        = $SecretBackend
+                SecretStoreIdentity  = $(if ($SecretBackend -eq 'Kdbx') {
+                        Import-Module (Join-Path $repositoryRoot 'lab\Secrets\Kdbx\Store.psm1') -ErrorAction Stop
+                        Get-M365DscDeploymentId
+                    })
+                RepositoryRoot       = $repositoryRoot
+                OrganizationName     = $script:OrganizationName
+                ProjectName          = $script:ProjectName
+                RepositoryName       = $script:RepositoryName
+                CredentialVaultEnvironment = $credentialVaultEnvironment
+                GitHubRepositoryUrl  = [string]$sourceProjectSettings.GitHubRepositoryUrl
+                LocalPath            = $resolvedLocalPath
+                AgentPoolName        = [string]$sourceProjectSettings.AgentPoolName
+                NumberOfBuildAgents  = [string]$sourceProjectSettings.NumbertOfBuildAgents
+                GitUserName          = [string]$sourceProjectSettings.GitUserName
+                GitUserEmail         = [string]$sourceProjectSettings.GitUserEmail
+                BuildAgentUserName   = [string]$sourceProjectSettings.BuildAgents.UserName
+                BuildAgentLocation   = [string]$sourceProjectSettings.BuildAgents.AzureLocation
+                BuildAgentVmSize     = [string]$sourceProjectSettings.BuildAgents.AzureRoleSize
+                Environments         = @(
+                    foreach ($environmentName in ($script:EnvironmentNames | Sort-Object))
+                    {
+                        $environment = $sourceDatum.Global.Azure.Environments[$environmentName]
+                        [ordered]@{
+                            Name                = $environmentName
+                            TenantName          = [string]$environment.AzTenantName
+                            HasExchangeOnline   = [string]$environment.HasExchangeOnline
+                            HasSharePointOnline = [string]$environment.HasSharePointOnline
+                        }
+                    }
+                )
+            }
+            if ($null -ne $keyVaultNetworking)
+            {
+                $resumeIdentity.KeyVaultNetworking = $keyVaultNetworking
+            }
+            $identityJson = ConvertTo-Json -InputObject $resumeIdentity -Depth 10 -Compress
+            $identityBytes = [Text.Encoding]::UTF8.GetBytes($identityJson)
+            $identityHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($identityBytes)).ToLowerInvariant()
+            $checkpointDirectory = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Microsoft365DscWorkshop\AzureLabBootstrap'
+            $script:BootstrapCheckpointPath = Join-Path -Path $checkpointDirectory -ChildPath "$identityHash.json"
+            $allowedStages = @(
+                'bootstrap-project-settings'
+                'import-repository'
+                'verify-import'
+                'prepare-machine'
+                'restore-target-dependencies'
+                'initialize-target-build'
+                'register-applications'
+                'test-connections'
+                'configure-devops'
+                'create-vms'
+                'configure-agents'
+            )
+
+            if (-not $Restart -and (Test-Path -LiteralPath $script:BootstrapCheckpointPath -PathType Leaf))
+            {
+                try
+                {
+                    $script:BootstrapCheckpoint = Get-Content -LiteralPath $script:BootstrapCheckpointPath -Raw |
+                        ConvertFrom-Json -AsHashtable -ErrorAction Stop
+                        $checkpointMigrated = Update-BootstrapCheckpointSchema -Checkpoint $script:BootstrapCheckpoint
+                        $savedStages = @($script:BootstrapCheckpoint.CompletedStages)
+                        if ($script:BootstrapCheckpoint.Fingerprint -ne $identityHash -or
+                            @($savedStages | Where-Object { $_ -notin $allowedStages }).Count -gt 0 -or
+                            ($script:BootstrapCheckpoint.CurrentStage -and $script:BootstrapCheckpoint.CurrentStage -notin $allowedStages))
+                        {
+                            throw 'The checkpoint schema or contents are invalid.'
+                        }
+
+                        $script:BootstrapCheckpoint.CompletedStages = $savedStages
+                        if ($checkpointMigrated)
+                        {
+                            Save-BootstrapCheckpoint
+                            Write-Host 'Updated the saved checkpoint and will repeat machine preparation, which may have stopped early in a previous run.' -ForegroundColor Yellow
+                        }
+                        if ($script:BootstrapCheckpoint.CurrentStage)
+                        {
+                            Write-Host "Resuming by retrying the previously interrupted stage '$($script:BootstrapCheckpoint.CurrentStage)'." -ForegroundColor Yellow
+                        }
+                        else
+                        {
+                            Write-Host 'Resuming from the last successfully completed stage.' -ForegroundColor Yellow
+                        }
+                    }
+                    catch
+                    {
+                        throw "Could not load the Azure lab resume checkpoint '$script:BootstrapCheckpointPath'. Use -Restart to discard it and start over. $($_.Exception.Message)"
+                    }
                 }
-            }
-        )
-    }
-    if ($null -ne $keyVaultNetworking)
-    {
-        $resumeIdentity.KeyVaultNetworking = $keyVaultNetworking
-    }
-    $identityJson = ConvertTo-Json -InputObject $resumeIdentity -Depth 10 -Compress
-    $identityBytes = [Text.Encoding]::UTF8.GetBytes($identityJson)
-    $identityHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($identityBytes)).ToLowerInvariant()
-    $checkpointDirectory = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Microsoft365DscWorkshop\AzureLabBootstrap'
-    $script:BootstrapCheckpointPath = Join-Path -Path $checkpointDirectory -ChildPath "$identityHash.json"
-    $allowedStages = @(
-        'bootstrap-project-settings'
-        'import-repository'
-        'verify-import'
-        'prepare-machine'
-        'restore-target-dependencies'
-        'initialize-target-build'
-        'register-applications'
-        'test-connections'
-        'configure-devops'
-        'create-vms'
-        'configure-agents'
-    )
+                else
+                {
+                    if ($Restart -and (Test-Path -LiteralPath $script:BootstrapCheckpointPath -PathType Leaf))
+                    {
+                        Write-Host 'Discarding the saved Azure lab checkpoint and starting over.' -ForegroundColor Yellow
+                    }
 
-    if (-not $Restart -and (Test-Path -LiteralPath $script:BootstrapCheckpointPath -PathType Leaf))
-    {
-        try
-        {
-            $script:BootstrapCheckpoint = Get-Content -LiteralPath $script:BootstrapCheckpointPath -Raw |
-                ConvertFrom-Json -AsHashtable -ErrorAction Stop
-            $checkpointMigrated = Update-BootstrapCheckpointSchema -Checkpoint $script:BootstrapCheckpoint
-            $savedStages = @($script:BootstrapCheckpoint.CompletedStages)
-            if ($script:BootstrapCheckpoint.Fingerprint -ne $identityHash -or
-                @($savedStages | Where-Object { $_ -notin $allowedStages }).Count -gt 0 -or
-                ($script:BootstrapCheckpoint.CurrentStage -and $script:BootstrapCheckpoint.CurrentStage -notin $allowedStages))
-            {
-                throw 'The checkpoint schema or contents are invalid.'
-            }
+                    $script:BootstrapCheckpoint = @{
+                        SchemaVersion   = 3
+                        Fingerprint     = $identityHash
+                        CompletedStages = @()
+                        CurrentStage    = $null
+                    }
+                }
 
-            $script:BootstrapCheckpoint.CompletedStages = $savedStages
-            if ($checkpointMigrated)
-            {
-                Save-BootstrapCheckpoint
-                Write-Host 'Updated the saved checkpoint and will repeat machine preparation, which may have stopped early in a previous run.' -ForegroundColor Yellow
-            }
-            if ($script:BootstrapCheckpoint.CurrentStage)
-            {
-                Write-Host "Resuming by retrying the previously interrupted stage '$($script:BootstrapCheckpoint.CurrentStage)'." -ForegroundColor Yellow
-            }
-            else
-            {
-                Write-Host 'Resuming from the last successfully completed stage.' -ForegroundColor Yellow
-            }
-        }
-        catch
-        {
-            throw "Could not load the Azure lab resume checkpoint '$script:BootstrapCheckpointPath'. Use -Restart to discard it and start over. $($_.Exception.Message)"
-        }
-    }
-    else
-    {
-        if ($Restart -and (Test-Path -LiteralPath $script:BootstrapCheckpointPath -PathType Leaf))
-        {
-            Write-Host 'Discarding the saved Azure lab checkpoint and starting over.' -ForegroundColor Yellow
-        }
-
-        $script:BootstrapCheckpoint = @{
-            SchemaVersion   = 3
-            Fingerprint     = $identityHash
-            CompletedStages = @()
-            CurrentStage    = $null
-        }
-    }
-
-    $sourceDatum = $null
+                $sourceDatum = $null
+            } *>&1 | Write-M365DscBootstrapOutput -LogPath $script:BootstrapLogPath
     $sourceProjectSettings = $null
     $phaseStatus = 'Completed'
 }
 catch
 {
+    $script:BootstrapPhaseFailureMessage = $_.Exception.Message
+    Write-M365DscBootstrapLog -LogPath $script:BootstrapLogPath -Message "$($_ | Out-String)`n$($_.Exception)`n$($_.ScriptStackTrace)" -Level Error
     if (Get-Command Close-M365DscSecretStore -ErrorAction SilentlyContinue) { Close-M365DscSecretStore }
     $env:M365DSC_SECRET_BACKEND = $previousSecretBackend
     $env:M365DSC_KEYVAULT_PUBLIC_ONLY = $previousPublicOnly
@@ -1241,7 +1327,7 @@ finally
 try
 {
     Invoke-BootstrapStage -Index 3 -Name 'bootstrap-project-settings' `
-        -Description 'Create or reuse the credential Key Vault and securely collect project credentials' `
+        -Description 'Prepare project credential storage' `
         -Action {
             if ($SecretBackend -eq 'Kdbx')
             {
@@ -1250,7 +1336,7 @@ try
             }
             $projectSettingsKeyVaultScript = Join-Path -Path $repositoryRoot -ChildPath 'lab\Azure\04 Setup Project Settings Key Vault.ps1'
             Write-Host "Running file in a clean PowerShell process: '$projectSettingsKeyVaultScript'." -ForegroundColor Yellow
-            & $pwshCommand.Source -NoLogo -NoProfile -File $projectSettingsKeyVaultScript
+            Invoke-BootstrapChildScript -Path $projectSettingsKeyVaultScript
             if ($LASTEXITCODE -ne 0)
             {
                 throw "Project-settings Key Vault setup failed with exit code $LASTEXITCODE."
@@ -1271,7 +1357,7 @@ try
                 return
             }
             Write-Host "Running file in a clean PowerShell process: '$repositoryImportScript'." -ForegroundColor Yellow
-            & $pwshCommand.Source -NoLogo -NoProfile -File $repositoryImportScript
+            Invoke-BootstrapChildScript -Path $repositoryImportScript
             if ($LASTEXITCODE -ne 0)
             {
                 throw "Azure DevOps repository import failed with exit code $LASTEXITCODE."
@@ -1340,7 +1426,7 @@ try
             -Action {
                 $preparationScript = Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\00 Prep.ps1'
                 Write-Host "Running file in a clean PowerShell process: '$preparationScript'." -ForegroundColor Yellow
-                & $pwshCommand.Source -NoLogo -NoProfile -File $preparationScript -ProjectName $script:ProjectName
+                Invoke-BootstrapChildScript -Path $preparationScript -Arguments @{ ProjectName = $script:ProjectName }
                 if ($LASTEXITCODE -ne 0)
                 {
                     throw "Azure lab machine preparation failed with exit code $LASTEXITCODE."
@@ -1371,7 +1457,7 @@ try
 
                 $targetBuildScript = Join-Path -Path $resolvedLocalPath -ChildPath 'build.ps1'
                 Write-Host "Running file: '$targetBuildScript' -Tasks azureinit in a clean PowerShell process."
-                & $pwshCommand.Source -NoLogo -NoProfile -File $targetBuildScript -Tasks azureinit
+                Invoke-BootstrapChildScript -Path $targetBuildScript -Arguments @{ Tasks = 'azureinit' }
                 if ($LASTEXITCODE -ne 0)
                 {
                     throw "The imported Azure build initialization task failed with exit code $LASTEXITCODE."
@@ -1395,28 +1481,30 @@ try
                 Write-Host 'Completed imported Azure build initialization.' -ForegroundColor Green
             }
 
-        $targetDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $resolvedLocalPath -ChildPath 'source\Datum.yml')
-        Import-Module -Name (Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\AzHelpers.psm1') -Force -ErrorAction Stop
-        $targetDatum = Get-M365DscProjectSecrets -Datum $targetDatum
-        $targetProjectSettings = $targetDatum.Global.ProjectSettings
-        if ([string]$targetProjectSettings.OrganizationName -ne $script:OrganizationName -or
-            [string]$targetProjectSettings.ProjectName -ne $script:ProjectName -or
-            [string]$targetProjectSettings.RepositoryName -ne $script:RepositoryName)
-        {
-            throw 'The imported ProjectSettings.yml does not match the Azure DevOps organization, project, or repository used for this setup.'
-        }
-        $script:targetEnvironmentNames = @(Get-EnvironmentNames -Datum $targetDatum)
-        $targetPat = [string]$targetProjectSettings.PersonalAccessToken
-        $targetBuildPassword = [string]$targetProjectSettings.BuildAgents.Password
-        $script:secureBuildAgentPassword = ConvertTo-SecureStringFromKeyVault -Value $targetBuildPassword
-        Assert-BuildAgentPassword -Password $script:secureBuildAgentPassword
-        $script:GitAuthorizationHeader = "AUTHORIZATION: Basic $([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$targetPat")))"
-        $targetProjectSettings.PersonalAccessToken = $null
-        $targetProjectSettings.BuildAgents.Password = $null
-        $targetPat = $null
-        $targetBuildPassword = $null
-        $targetDatum = $null
-        $targetProjectSettings = $null
+                . {
+                    $targetDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $resolvedLocalPath -ChildPath 'source\Datum.yml')
+                    Import-Module -Name (Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\AzHelpers.psm1') -Force -ErrorAction Stop
+                    $targetDatum = Get-M365DscProjectSecrets -Datum $targetDatum
+                    $targetProjectSettings = $targetDatum.Global.ProjectSettings
+                    if ([string]$targetProjectSettings.OrganizationName -ne $script:OrganizationName -or
+                        [string]$targetProjectSettings.ProjectName -ne $script:ProjectName -or
+                        [string]$targetProjectSettings.RepositoryName -ne $script:RepositoryName)
+                    {
+                        throw 'The imported ProjectSettings.yml does not match the Azure DevOps organization, project, or repository used for this setup.'
+                    }
+                    $script:targetEnvironmentNames = @(Get-EnvironmentNames -Datum $targetDatum)
+                    $targetPat = [string]$targetProjectSettings.PersonalAccessToken
+                    $targetBuildPassword = [string]$targetProjectSettings.BuildAgents.Password
+                    $script:secureBuildAgentPassword = ConvertTo-SecureStringFromKeyVault -Value $targetBuildPassword
+                    Assert-BuildAgentPassword -Password $script:secureBuildAgentPassword
+                    $script:GitAuthorizationHeader = "AUTHORIZATION: Basic $([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$targetPat")))"
+                    $targetProjectSettings.PersonalAccessToken = $null
+                    $targetProjectSettings.BuildAgents.Password = $null
+                    $targetPat = $null
+                    $targetBuildPassword = $null
+                    $targetDatum = $null
+                    $targetProjectSettings = $null
+                } *>&1 | Write-M365DscBootstrapOutput -LogPath $script:BootstrapLogPath
 
         Invoke-BootstrapStage -Index 9 -Name 'register-applications' `
             -Description 'Register tenant applications and store credentials' `
@@ -1515,11 +1603,13 @@ try
 }
 catch
 {
-    Write-Host "Bootstrap failed during phase $($script:BootstrapPhase)/$($script:BootstrapPhaseCount): $($_.Exception.Message)" -ForegroundColor Red
+    Write-M365DscBootstrapLog -LogPath $script:BootstrapLogPath -Message ($_ | Out-String) -Level Error
+    Write-Host "Bootstrap stopped during phase $($script:BootstrapPhase)/$($script:BootstrapPhaseCount). Detailed log: $script:BootstrapLogPath" -ForegroundColor Red
     throw
 }
 finally
 {
+    Write-Host "Detailed bootstrap log: $script:BootstrapLogPath" -ForegroundColor DarkCyan
     Restore-GitAuthorizationHeader
     if (Get-Command Close-M365DscSecretStore -ErrorAction SilentlyContinue) { Close-M365DscSecretStore }
     $env:M365DSC_SECRET_BACKEND = $previousSecretBackend

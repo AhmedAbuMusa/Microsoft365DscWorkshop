@@ -11,7 +11,10 @@ Import-Module "$PSScriptRoot\Store.psm1" -Force -ErrorAction Stop
 Import-Module "$PSScriptRoot\PipelineSecrets.psm1" -Force -ErrorAction Stop
 if (-not $Datum)
 {
-    Import-Module Datum -ErrorAction Stop
+    if (-not (Get-Module -Name Datum))
+    {
+        Import-Module Datum -ErrorAction Stop
+    }
     $Datum = New-DatumStructure -DefinitionFile "$PSScriptRoot\..\..\..\source\Datum.yml"
 }
 foreach ($name in $EnvironmentName)

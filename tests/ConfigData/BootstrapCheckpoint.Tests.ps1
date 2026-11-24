@@ -1,4 +1,5 @@
 BeforeAll {
+    Import-Module "$PSScriptRoot\..\..\lab\BootstrapLogging.psm1" -Force
     $bootstrapPath = Join-Path -Path $PSScriptRoot -ChildPath '..\..\lab\Start Azure Lab.ps1'
     $tokens = $null
     $parseErrors = $null
@@ -14,6 +15,8 @@ BeforeAll {
             $_.Name -in @(
                 'Write-BootstrapPhase',
                 'Complete-BootstrapPhase',
+                'Get-BootstrapPhaseNarrative',
+                'Write-BootstrapStatus',
                 'Test-SourceDependencyRestoreComplete',
                 'Save-BootstrapCheckpoint',
                 'Update-BootstrapCheckpointSchema',
@@ -43,6 +46,7 @@ BeforeAll {
 Describe 'Azure lab bootstrap checkpoint' {
     BeforeEach {
         $script:BootstrapPhaseCount = 13
+        $script:BootstrapLogPath = Join-Path $TestDrive 'bootstrap.log'
         $script:BootstrapCheckpointPath = Join-Path -Path $TestDrive -ChildPath 'bootstrap-checkpoint.json'
         $script:BootstrapCheckpoint = @{
             SchemaVersion   = 3
@@ -219,6 +223,28 @@ Describe 'Azure lab bootstrap checkpoint' {
         $script:PhaseMessages | Where-Object { $_ -like '*finished:*' } |
             Should -Match 'Phase 09/13 finished: .*Status: Skipped.*Elapsed: [0-9.,]+s'
         $script:BootstrapPhaseTimer.IsRunning | Should -BeFalse
+    }
+    It 'Provides intended behavior and a closing result for every bootstrap phase' {
+        foreach ($phaseIndex in 1..13)
+        {
+            $script:PhaseMessages.Clear()
+            Write-BootstrapPhase -Index $phaseIndex -Description 'Phase description'
+            Complete-BootstrapPhase -Status Completed
+            @($script:PhaseMessages | Where-Object { $_ -match '^Intent: \S' }).Count | Should -Be 1
+            @($script:PhaseMessages | Where-Object { $_ -match '^Result: \S' }).Count | Should -Be 1
+        }
+    }
+    It 'Logs phase action details without losing checkpoint updates or the failure summary' {
+        { Invoke-BootstrapStage -Index 11 -Name 'logged-stage' -Description 'Logged stage' -Action {
+                Write-Information 'Synthetic detailed diagnostic' -InformationAction Continue
+                throw 'Synthetic phase failure'
+            } } | Should -Throw '*Synthetic phase failure*'
+        $script:PhaseMessages | Should -Contain 'Intent: Configure Azure DevOps environments, agent pool, pipelines, and selected-backend secret delivery.'
+        ($script:PhaseMessages -join "`n") | Should -Match 'Result: Not completed: Synthetic phase failure'
+        ($script:PhaseMessages -join "`n") | Should -Not -Match 'Synthetic detailed diagnostic'
+        (Get-Content -LiteralPath $script:BootstrapLogPath -Raw) | Should -Match 'Synthetic detailed diagnostic'
+        $script:BootstrapCheckpoint.CurrentStage | Should -Be 'logged-stage'
+        $script:BootstrapCheckpoint.CompletedStages | Should -Not -Contain 'logged-stage'
     }
 
     It 'Times phase 1 even when dependencies are already installed' {

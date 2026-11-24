@@ -4,7 +4,7 @@ Describe 'KDBX pipeline publisher script environment selection' {
         $publisherScript = "$PSScriptRoot\..\..\lab\Secrets\Kdbx\Publish Pipeline Secrets.ps1"
     }
     BeforeEach {
-        Mock Import-Module {}
+        Mock Import-Module {} -ParameterFilter { $Name -like '*Store.psm1' -or $Name -like '*PipelineSecrets.psm1' }
         Mock Publish-M365DscKdbxPipelineSecrets {}
         $datum = @{ Global = @{ Azure = @{ Environments = @{} } } }
     }
@@ -25,6 +25,34 @@ Describe 'KDBX pipeline publisher script environment selection' {
         & $publisherScript -Datum $datum -EnvironmentName Dev
         Should -Invoke Publish-M365DscKdbxPipelineSecrets -Times 1 -Exactly -ParameterFilter {
             $EnvironmentName -eq 'Dev' -and -not $TrustedPipelineId -and -not $IncludeLcmCertificate
+        }
+    }
+    It 'Reuses the loaded Datum version when creating configuration without an explicit Datum argument' {
+        $requiredModulesPath = (Resolve-Path "$PSScriptRoot\..\..\output\RequiredModules").Path
+        $previousModulePath = $env:PSModulePath
+        $previousDatumModules = @(Get-Module -Name Datum)
+        $env:PSModulePath += [IO.Path]::PathSeparator + $requiredModulesPath
+        $availableDatum = @(Get-Module -Name Datum -ListAvailable | Sort-Object Version)
+        $availableDatum.Count | Should -BeGreaterThan 0
+        $loadedDatum = $null
+        try
+        {
+            if (-not $previousDatumModules)
+            {
+                $loadedDatum = Import-Module -Name $availableDatum[0].Path -PassThru -ErrorAction Stop
+            }
+            $beforeVersions = @((Get-Module -Name Datum).Version)
+            & $publisherScript -EnvironmentName Dev
+            @((Get-Module -Name Datum).Version) | Should -Be $beforeVersions
+            Should -Invoke Import-Module -Times 0 -ParameterFilter { $Name -eq 'Datum' }
+            Should -Invoke Publish-M365DscKdbxPipelineSecrets -Times 1 -Exactly -ParameterFilter {
+                $EnvironmentName -eq 'Dev' -and $Datum.Global.ProjectSettings -is [Collections.IDictionary]
+            }
+        }
+        finally
+        {
+            if ($loadedDatum) { Remove-Module -ModuleInfo $loadedDatum -ErrorAction Stop }
+            $env:PSModulePath = $previousModulePath
         }
     }
     It 'Propagates a publication failure without publishing later environments' {

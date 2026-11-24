@@ -268,6 +268,11 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
     $param.SkipExchangeOnline = $environment.HasExchangeOnline -eq $false
     Connect-M365Dsc @param -ErrorAction Stop
     Set-AzContext -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -ErrorAction Stop | Out-Null
+    $azureContext = Get-AzContext -ErrorAction Stop
+    if ($azureContext.Tenant.Id -ne $environment.AzTenantId -or $azureContext.Subscription.Id -ne $environment.AzSubscriptionId)
+    {
+        throw "Azure context does not match tenant '$($environment.AzTenantId)' and subscription '$($environment.AzSubscriptionId)' for environment '$envName'. Agent setup was not attempted."
+    }
     Write-Host "Successfully connected to Azure environment '$envName'."
 
     $projectName = $datum.Global.ProjectSettings.ProjectName
@@ -283,7 +288,8 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
 
     $buildAgentIdentityName = Get-M365DscAgentIdentityName -ProjectName $projectName -EnvironmentName $envName
     $buildAgentIdentities = @(
-        Get-AzUserAssignedIdentity -ResourceGroupName $resourceGroupName -ErrorAction Stop |
+        Get-AzResource -ResourceGroupName $resourceGroupName -ResourceType 'Microsoft.ManagedIdentity/userAssignedIdentities' `
+            -ApiVersion '2023-01-31' -ExpandProperties -ErrorAction Stop |
             Where-Object Name -EQ $buildAgentIdentityName
     )
     if ($buildAgentIdentities.Count -ne 1)
@@ -291,8 +297,17 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
         throw "Expected one user-assigned managed identity named '$buildAgentIdentityName' in resource group '$resourceGroupName', found $($buildAgentIdentities.Count). Run '30 Create Agent VMs.ps1' first."
     }
     $buildAgentIdentity = $buildAgentIdentities[0]
+    $identityResourceId = "/subscriptions/$($environment.AzSubscriptionId)/resourceGroups/$resourceGroupName/providers/Microsoft.ManagedIdentity/userAssignedIdentities/$buildAgentIdentityName"
+    if (-not [string]::Equals([string]$buildAgentIdentity.ResourceId, $identityResourceId, [StringComparison]::OrdinalIgnoreCase))
+    {
+        throw "Managed identity '$buildAgentIdentityName' did not return the expected resource ID '$identityResourceId'. Agent setup was not attempted."
+    }
+    if (-not $buildAgentIdentity.Properties.clientId -or -not $buildAgentIdentity.Properties.principalId)
+    {
+        throw "Managed identity '$buildAgentIdentityName' did not return its client ID and principal ID. Agent setup was not attempted."
+    }
     $vmIdentityIds = @($vm.Identity.UserAssignedIdentities.Keys)
-    if ($buildAgentIdentity.Id -notin $vmIdentityIds)
+    if ($identityResourceId -notin $vmIdentityIds)
     {
         throw "Managed identity '$buildAgentIdentityName' is not assigned to VM '$vmName'. Run '30 Create Agent VMs.ps1' first."
     }
@@ -312,7 +327,7 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
         }
         Ensure-M365DscKeyVaultRoleAssignment `
             -VaultResourceId $vault.ResourceId `
-            -PrincipalId $buildAgentIdentity.PrincipalId `
+            -PrincipalId $buildAgentIdentity.Properties.principalId `
             -RoleDefinitionName 'Key Vault Secrets User'
     }
 
@@ -606,7 +621,7 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
             $certificateThumbprint = ($environment.Identities | Where-Object Name -EQ $certificateToInstall).CertificateThumbprint
             $pfxName = Get-M365DscKeyVaultSecretName -IdentityName $certificateToInstall -CredentialType pfx
             $pfxPasswordName = Get-M365DscKeyVaultSecretName -IdentityName $certificateToInstall -CredentialType pfx-password
-            $managedIdentityClientId = $buildAgentIdentity.ClientId
+            $managedIdentityClientId = $buildAgentIdentity.Properties.clientId
 
             Write-Host "Installing certificate '$certificateToInstall' on VM '$($vm.Name)'."
             Invoke-WorkerVmScript -VM $vm -ScriptBlock {

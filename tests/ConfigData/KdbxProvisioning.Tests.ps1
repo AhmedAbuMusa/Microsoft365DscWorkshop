@@ -581,6 +581,127 @@ Describe 'Worker managed identity tenant isolation' {
     }
 }
 
+Describe 'Agent setup identity tenant isolation' {
+    BeforeAll {
+        $ast = Read-ProvisioningAst "$PSScriptRoot\..\..\lab\Azure\31 Agent Setup.ps1"
+        $loop = $ast.EndBlock.Statements | Where-Object {
+            $_ -is [Management.Automation.Language.ForEachStatementAst] -and
+            $_.Extent.Text -like '*Configuring the Azure DevOps agent*'
+        }
+        $stop = $loop.Body.Statements | Where-Object {
+            $_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$vmStatus'
+        }
+        $prepareAgent = [scriptblock]::Create($loop.Extent.Text.Substring(0, $stop.Extent.StartOffset - $loop.Extent.StartOffset) + '}')
+        $clientIdAssignment = $loop.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$managedIdentityClientId'
+        }, $true) | Select-Object -First 1
+        $selectClientId = [scriptblock]::Create($clientIdAssignment.Extent.Text)
+        function Write-M365DscEnvironmentContext { param($EnvironmentName, $TenantName, $TenantId, $SubscriptionId, $KeyVaultName, $Operation) }
+        function Connect-M365Dsc { [CmdletBinding()]param($TenantId, $TenantName, $SubscriptionId, $SkipExchangeOnline) }
+        function Set-AzContext { [CmdletBinding()]param($TenantId, $SubscriptionId) }
+        function Get-AzContext { [CmdletBinding()]param() }
+        function Get-M365DscAgentVmName { param($ProjectName, $EnvironmentName) "vm-$EnvironmentName" }
+        function Get-M365DscAgentIdentityName { param($ProjectName, $EnvironmentName) "identity-$EnvironmentName" }
+        function Get-M365DscAgentVm { param($ProjectName, $EnvironmentName) @{ ResourceGroupName = "rg-$EnvironmentName" } }
+        function Get-AzVM { [CmdletBinding()]param($ResourceGroupName, $Name) }
+        function Get-AzResource { [CmdletBinding()]param($ResourceGroupName, $ResourceType, $ApiVersion, [switch]$ExpandProperties) }
+        function Get-AzUserAssignedIdentity { [CmdletBinding()]param($ResourceGroupName) }
+        function Resolve-M365DscKeyVaultName { param($ProjectName, $EnvironmentName, $TenantId, $SubscriptionId) 'synthetic-vault' }
+        function Get-AzKeyVault { [CmdletBinding()]param() }
+        function Ensure-M365DscKeyVaultRoleAssignment { param($VaultResourceId, $PrincipalId, $RoleDefinitionName) }
+    }
+    BeforeEach {
+        $EnvironmentName = $null
+        $secretBackend = 'Kdbx'
+        $datum = @{ Global = @{
+            ProjectSettings = @{ ProjectName = 'synthetic' }
+            Azure = @{ Environments = [ordered]@{
+                Dev = @{ AzTenantId = 'tenant-dev'; AzTenantName = 'dev.example'; AzSubscriptionId = 'subscription-dev'; HasExchangeOnline = $false }
+                Test = @{ AzTenantId = 'tenant-test'; AzTenantName = 'test.example'; AzSubscriptionId = 'subscription-test'; HasExchangeOnline = $false }
+            } }
+        } }
+        $activeContext = @{ Tenant = @{ Id = 'tenant-prod' }; Subscription = @{ Id = 'subscription-prod' } }
+        $identities = @{}
+        foreach ($name in 'Dev', 'Test') {
+            $identities[$name] = @{
+                Name = "identity-$name"
+                ResourceId = "/subscriptions/subscription-$($name.ToLowerInvariant())/resourceGroups/rg-$name/providers/Microsoft.ManagedIdentity/userAssignedIdentities/identity-$name"
+                Properties = @{ clientId = "client-$name"; principalId = "principal-$name" }
+            }
+        }
+        Mock Write-Host {}
+        Mock Write-M365DscEnvironmentContext {}
+        Mock Connect-M365Dsc {}
+        Mock Set-AzContext {
+            $activeContext.Tenant.Id = $TenantId
+            $activeContext.Subscription.Id = $SubscriptionId
+        }
+        Mock Get-AzContext { $activeContext }
+        Mock Get-AzVM {
+            $name = $ResourceGroupName.Replace('rg-', '')
+            @{ ResourceGroupName = $ResourceGroupName; Identity = @{ UserAssignedIdentities = @{ $identities[$name].ResourceId = @{} } } }
+        }
+        Mock Get-AzResource {
+            $name = $ResourceGroupName.Replace('rg-', '')
+            $activeContext.Tenant.Id | Should -Be $datum.Global.Azure.Environments[$name].AzTenantId
+            $activeContext.Subscription.Id | Should -Be $datum.Global.Azure.Environments[$name].AzSubscriptionId
+            $identities[$name]
+        }
+        Mock Get-AzUserAssignedIdentity { throw 'Unexpected stale AutoRest token path' }
+        Mock Get-AzKeyVault { @{ VaultName = 'synthetic-vault'; ResourceId = 'synthetic-vault-id' } }
+        Mock Ensure-M365DscKeyVaultRoleAssignment {}
+    }
+    It 'Switches from the previous Prod context and reads Dev and Test identities using expanded ARM properties' {
+        & $prepareAgent
+        Should -Invoke Get-AzResource -Times 2 -Exactly -ParameterFilter {
+            $ResourceType -eq 'Microsoft.ManagedIdentity/userAssignedIdentities' -and $ApiVersion -eq '2023-01-31' -and $ExpandProperties
+        }
+        Should -Invoke Get-AzUserAssignedIdentity -Times 0
+        Should -Invoke Ensure-M365DscKeyVaultRoleAssignment -Times 0
+    }
+    It 'Uses the ARM principal ID for Key Vault access and the ARM client ID for worker authentication' {
+        $secretBackend = 'KeyVault'
+        & $prepareAgent
+        Should -Invoke Ensure-M365DscKeyVaultRoleAssignment -Times 1 -Exactly -ParameterFilter {
+            $PrincipalId -eq 'principal-Test' -and $RoleDefinitionName -eq 'Key Vault Secrets User'
+        }
+        $buildAgentIdentity = $identities.Test
+        . $selectClientId
+        $managedIdentityClientId | Should -Be 'client-Test'
+    }
+    It 'Stops before resource lookup when the active tenant or subscription is wrong' -TestCases @(
+        @{ Tenant = 'tenant-prod'; Subscription = 'subscription-dev' },
+        @{ Tenant = 'tenant-dev'; Subscription = 'subscription-prod' }
+    ) {
+        param($Tenant, $Subscription)
+        Mock Set-AzContext {}
+        $activeContext.Tenant.Id = $Tenant
+        $activeContext.Subscription.Id = $Subscription
+        { & $prepareAgent } | Should -Throw '*Azure context does not match*'
+        Should -Invoke Get-AzResource -Times 0
+    }
+    It 'Rejects an identity in a different subscription before granting vault access' {
+        $secretBackend = 'KeyVault'
+        $identities.Dev.ResourceId = $identities.Dev.ResourceId.Replace('subscription-dev', 'subscription-prod')
+        { & $prepareAgent } | Should -Throw '*expected resource ID*'
+        Should -Invoke Ensure-M365DscKeyVaultRoleAssignment -Times 0
+    }
+    It 'Rejects missing ARM authentication properties rather than configuring an empty worker identity' -TestCases @(
+        @{ Property = 'clientId' }, @{ Property = 'principalId' }
+    ) {
+        param($Property)
+        $identities.Dev.Properties.Remove($Property)
+        { & $prepareAgent } | Should -Throw '*client ID and principal ID*'
+        Should -Invoke Ensure-M365DscKeyVaultRoleAssignment -Times 0
+    }
+    It 'Rejects an identity not assigned to the selected VM' {
+        Mock Get-AzVM { @{ Identity = @{ UserAssignedIdentities = @{} } } }
+        { & $prepareAgent } | Should -Throw '*not assigned to VM*'
+        Should -Invoke Ensure-M365DscKeyVaultRoleAssignment -Times 0
+    }
+}
+
 Describe 'KDBX protected worker delivery cleanup' {
     BeforeAll {
         $ast = Read-ProvisioningAst "$PSScriptRoot\..\..\lab\Azure\31 Agent Setup.ps1"

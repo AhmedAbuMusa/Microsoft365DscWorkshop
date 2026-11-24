@@ -89,6 +89,9 @@ VM administrator password. Missing or placeholder values are prompted for.
 Prefer keeping passwords out of YAML and entering them at the secure prompt.
 These values are saved in encrypted storage, not written back to YAML. Existing
 databases are unlocked, never overwritten or populated from Key Vault.
+An incorrect or empty passphrase at the existing-database prompt is retried in
+the same phase; press Ctrl+C to cancel. Lock, permission, and database-integrity
+errors still stop explicitly. Calls supplying `-Password` fail without prompting.
 For this mode, leave actual private values out of public project YAML; use
 placeholders. Tenant `*.onmicrosoft.com` domains remain public configuration.
 

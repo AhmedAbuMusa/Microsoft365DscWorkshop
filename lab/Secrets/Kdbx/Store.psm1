@@ -107,60 +107,79 @@ function Open-M365DscSecretStore
     if (-not $exists -and -not $Create) { throw 'Initialize a fresh KDBX database first; no Key Vault fallback is performed.' }
     Import-KdbxLibrary
     $ownsPassword = -not $Password
-    if ($ownsPassword) { $Password = Read-Host 'KDBX database passphrase' -AsSecureString }
-    $lock = $null
-    $database = $null
-    $bytes = $null
-    try
+    while ($true)
     {
-        if ($Password.Length -eq 0 -or ($Create -and $Password.Length -lt 16))
+        if ($ownsPassword) { $Password = Read-Host 'KDBX database passphrase' -AsSecureString }
+        $lock = $null
+        $database = $null
+        $bytes = $null
+        try
         {
-            throw 'A new KDBX database requires a passphrase of at least 16 characters.'
+            if ($ownsPassword -and -not $Create -and $Password.Length -eq 0)
+            {
+                Write-Warning 'The KDBX passphrase cannot be empty. Try again, or press Ctrl+C to cancel.'
+                continue
+            }
+            if ($Password.Length -eq 0 -or ($Create -and $Password.Length -lt 16))
+            {
+                throw 'A new KDBX database requires a passphrase of at least 16 characters.'
+            }
+            $directory = Split-Path $path -Parent
+            $null = New-Item -Path $directory -ItemType Directory -Force
+            $unexpectedFiles = @(Get-ChildItem -LiteralPath $directory -Force | Where-Object {
+                    $_.Name -notin @((Split-Path $path -Leaf), ((Split-Path $path -Leaf) + '.bak'), ((Split-Path $path -Leaf) + '.lock'))
+                })
+            if ($unexpectedFiles.Count) { throw 'Use a dedicated directory containing only this database, its backup and lock.' }
+            $acl = [Security.AccessControl.DirectorySecurity]::new()
+            $acl.SetAccessRuleProtection($true, $false)
+            foreach ($sid in @([Security.Principal.WindowsIdentity]::GetCurrent().User, [Security.Principal.SecurityIdentifier]::new('S-1-5-18')))
+            {
+                $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                        $sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+            }
+            Set-Acl -LiteralPath $directory -AclObject $acl
+            $lock = [IO.File]::Open("$path.lock", [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            $bytes = [Text.Encoding]::UTF8.GetBytes([Net.NetworkCredential]::new('', $Password).Password)
+            $key = [KeePassLib.Keys.CompositeKey]::new()
+            $key.AddUserKey([KeePassLib.Keys.KcpPassword]::new($bytes))
+            $database = [KeePassLib.PwDatabase]::new()
+            $connection = [KeePassLib.Serialization.IOConnectionInfo]::FromPath($path)
+            if ($Create)
+            {
+                $database.New($connection, $key)
+                $kdf = [KeePassLib.Cryptography.KeyDerivation.Argon2Kdf]::new([KeePassLib.Cryptography.KeyDerivation.Argon2Type]::ID)
+                $database.KdfParameters = $kdf.GetDefaultParameters()
+            }
+            else { $database.Open($connection, $key, $null) }
+            $global:M365DscKdbxStore = @{ Path = $path; Database = $database; Lock = $lock }
+            $env:M365DSC_SECRET_STORE = $path
+            if ($Create) { Set-M365DscSecretJson -Name '__manifest' -Value @{ SchemaVersion = 1; DeploymentId = [Guid]::NewGuid().ToString('N') } }
+            $manifest = Get-KdbxJson '__manifest'
+            if ($manifest.SchemaVersion -ne 1 -or -not $manifest.DeploymentId) { throw 'Unsupported or incomplete operator database manifest.' }
+            return
         }
-        $directory = Split-Path $path -Parent
-        $null = New-Item -Path $directory -ItemType Directory -Force
-        $unexpectedFiles = @(Get-ChildItem -LiteralPath $directory -Force | Where-Object {
-            $_.Name -notin @((Split-Path $path -Leaf), ((Split-Path $path -Leaf) + '.bak'), ((Split-Path $path -Leaf) + '.lock'))
-        })
-        if ($unexpectedFiles.Count) { throw 'Use a dedicated directory containing only this database, its backup and lock.' }
-        $acl = [Security.AccessControl.DirectorySecurity]::new()
-        $acl.SetAccessRuleProtection($true, $false)
-        foreach ($sid in @([Security.Principal.WindowsIdentity]::GetCurrent().User, [Security.Principal.SecurityIdentifier]::new('S-1-5-18')))
+        catch
         {
-            $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-                $sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+            Close-M365DscSecretStore
+            if ($database) { $database.Close() }
+            if ($lock) { $lock.Dispose() }
+            $exception = $_.Exception
+            while ($exception -and $exception -isnot [KeePassLib.Keys.InvalidCompositeKeyException])
+            {
+                $exception = $exception.InnerException
+            }
+            if ($ownsPassword -and -not $Create -and $exception)
+            {
+                Write-Warning 'The KDBX passphrase was not accepted. Try again, or press Ctrl+C to cancel.'
+                continue
+            }
+            throw [InvalidOperationException]::new('Could not open the KDBX database. Check its passphrase, integrity, permissions and lock.', $_.Exception)
         }
-        Set-Acl -LiteralPath $directory -AclObject $acl
-        $lock = [IO.File]::Open("$path.lock", [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-        $bytes = [Text.Encoding]::UTF8.GetBytes([Net.NetworkCredential]::new('', $Password).Password)
-        $key = [KeePassLib.Keys.CompositeKey]::new()
-        $key.AddUserKey([KeePassLib.Keys.KcpPassword]::new($bytes))
-        $database = [KeePassLib.PwDatabase]::new()
-        $connection = [KeePassLib.Serialization.IOConnectionInfo]::FromPath($path)
-        if ($Create)
+        finally
         {
-            $database.New($connection, $key)
-            $kdf = [KeePassLib.Cryptography.KeyDerivation.Argon2Kdf]::new([KeePassLib.Cryptography.KeyDerivation.Argon2Type]::ID)
-            $database.KdfParameters = $kdf.GetDefaultParameters()
+            if ($bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
+            if ($ownsPassword) { $Password.Dispose() }
         }
-        else { $database.Open($connection, $key, $null) }
-        $global:M365DscKdbxStore = @{ Path = $path; Database = $database; Lock = $lock }
-        $env:M365DSC_SECRET_STORE = $path
-        if ($Create) { Set-M365DscSecretJson -Name '__manifest' -Value @{ SchemaVersion = 1; DeploymentId = [Guid]::NewGuid().ToString('N') } }
-        $manifest = Get-KdbxJson '__manifest'
-        if ($manifest.SchemaVersion -ne 1 -or -not $manifest.DeploymentId) { throw 'Unsupported or incomplete operator database manifest.' }
-    }
-    catch
-    {
-        Close-M365DscSecretStore
-        if ($database) { $database.Close() }
-        if ($lock) { $lock.Dispose() }
-        throw [InvalidOperationException]::new('Could not open the KDBX database. Check its passphrase, integrity, permissions and lock.', $_.Exception)
-    }
-    finally
-    {
-        if ($bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
-        if ($ownsPassword) { $Password.Dispose() }
     }
 }
 

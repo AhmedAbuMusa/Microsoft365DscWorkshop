@@ -40,6 +40,36 @@ Describe 'Separate KDBX operator storage' {
         { Open-M365DscSecretStore -Path "$PSScriptRoot\operator.kdbx" -Password $password -Create } |
             Should -Throw '*outside every Git checkout*'
     }
+    It 'Retries incorrect and empty interactive passphrases without changing the saved database' {
+        Open-M365DscSecretStore -Path $path -Password $password -Create
+        $deploymentId = Get-M365DscDeploymentId
+        Close-M365DscSecretStore
+        $hash = (Get-FileHash -LiteralPath $path).Hash
+        $answers = [Collections.Generic.Queue[securestring]]::new()
+        $answers.Enqueue((ConvertTo-SecureString 'synthetic-incorrect' -AsPlainText -Force))
+        $answers.Enqueue([securestring]::new())
+        $answers.Enqueue($password.Copy())
+        Mock Read-Host -ModuleName Store { $answers.Dequeue() }
+        Mock Write-Warning -ModuleName Store {}
+        Open-M365DscSecretStore -Path $path
+        Get-M365DscDeploymentId | Should -Be $deploymentId
+        (Get-FileHash -LiteralPath $path).Hash | Should -Be $hash
+        Should -Invoke Read-Host -ModuleName Store -Times 3 -Exactly -ParameterFilter { $AsSecureString }
+        Should -Invoke Write-Warning -ModuleName Store -Times 2 -Exactly -ParameterFilter { $Message -like '*Ctrl+C*' }
+    }
+    It 'Does not prompt again for a locked database or an explicit incorrect password' {
+        Open-M365DscSecretStore -Path $path -Password $password -Create
+        Close-M365DscSecretStore
+        Mock Read-Host -ModuleName Store { $password.Copy() }
+        $lock = [IO.File]::Open("$path.lock", [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        try { { Open-M365DscSecretStore -Path $path } | Should -Throw '*Could not open*' }
+        finally { $lock.Dispose() }
+        Should -Invoke Read-Host -ModuleName Store -Times 1 -Exactly
+        $wrong = ConvertTo-SecureString 'synthetic-incorrect' -AsPlainText -Force
+        try { { Open-M365DscSecretStore -Path $path -Password $wrong } | Should -Throw '*Could not open*' }
+        finally { $wrong.Dispose() }
+        Should -Invoke Read-Host -ModuleName Store -Times 1 -Exactly
+    }
     It 'Hydrates private project and environment records through the common adapter without Key Vault access' {
         Import-Module $PSScriptRoot\..\..\lab\Secrets\SecretBackend.psm1 -Force
         Open-M365DscSecretStore -Path $path -Password $password -Create
@@ -110,6 +140,9 @@ Describe 'Separate KDBX operator storage' {
         $bytes[$bytes.Length - 20] = $bytes[$bytes.Length - 20] -bxor 1
         [IO.File]::WriteAllBytes($path, $bytes)
         { Open-M365DscSecretStore -Path $path -Password $password } | Should -Throw '*Could not open*'
+        Mock Read-Host -ModuleName Store { $password.Copy() }
+        { Open-M365DscSecretStore -Path $path } | Should -Throw '*Could not open*'
+        Should -Invoke Read-Host -ModuleName Store -Times 1 -Exactly
     }
     It 'Recovers the encrypted PFX attachment with its original private key' {
         Open-M365DscSecretStore -Path $path -Password $password -Create

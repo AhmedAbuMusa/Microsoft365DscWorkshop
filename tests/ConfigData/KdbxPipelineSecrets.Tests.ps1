@@ -1,3 +1,43 @@
+Describe 'KDBX pipeline publisher script environment selection' {
+    BeforeAll {
+        Import-Module "$PSScriptRoot\..\..\lab\Secrets\Kdbx\PipelineSecrets.psm1" -Force
+        $publisherScript = "$PSScriptRoot\..\..\lab\Secrets\Kdbx\Publish Pipeline Secrets.ps1"
+    }
+    BeforeEach {
+        Mock Import-Module {}
+        Mock Publish-M365DscKdbxPipelineSecrets {}
+        $datum = @{ Global = @{ Azure = @{ Environments = @{} } } }
+    }
+    It 'Publishes all bootstrap environments using individual scalar names and forwards delivery options' {
+        & $publisherScript -Datum $datum -EnvironmentName Dev,Test,Stage,Preprod,Prod `
+            -TrustedPipelineId 7,8 -IncludeLcmCertificate
+        Should -Invoke Publish-M365DscKdbxPipelineSecrets -Times 5 -Exactly
+        foreach ($name in 'Dev','Test','Stage','Preprod','Prod')
+        {
+            Should -Invoke Publish-M365DscKdbxPipelineSecrets -Times 1 -Exactly -ParameterFilter {
+                $EnvironmentName -is [string] -and $EnvironmentName -eq $name -and
+                $TrustedPipelineId.Count -eq 2 -and $TrustedPipelineId[0] -eq 7 -and
+                $TrustedPipelineId[1] -eq 8 -and $IncludeLcmCertificate -and $Datum -eq $datum
+            }
+        }
+    }
+    It 'Preserves single-environment publishing without requiring explicit pipeline IDs' {
+        & $publisherScript -Datum $datum -EnvironmentName Dev
+        Should -Invoke Publish-M365DscKdbxPipelineSecrets -Times 1 -Exactly -ParameterFilter {
+            $EnvironmentName -eq 'Dev' -and -not $TrustedPipelineId -and -not $IncludeLcmCertificate
+        }
+    }
+    It 'Propagates a publication failure without publishing later environments' {
+        Mock Publish-M365DscKdbxPipelineSecrets { throw 'Synthetic Stage publication failure' } `
+            -ParameterFilter { $EnvironmentName -eq 'Stage' }
+        { & $publisherScript -Datum $datum -EnvironmentName Dev,Test,Stage,Prod } |
+            Should -Throw '*Stage publication failure*'
+        Should -Invoke Publish-M365DscKdbxPipelineSecrets -Times 1 -Exactly -ParameterFilter { $EnvironmentName -eq 'Dev' }
+        Should -Invoke Publish-M365DscKdbxPipelineSecrets -Times 1 -Exactly -ParameterFilter { $EnvironmentName -eq 'Test' }
+        Should -Invoke Publish-M365DscKdbxPipelineSecrets -Times 0 -ParameterFilter { $EnvironmentName -eq 'Prod' }
+    }
+}
+
 Describe 'Explicit Kdbx native pipeline delivery' {
     BeforeAll {
         Import-Module "$PSScriptRoot\..\..\lab\Secrets\Kdbx\PipelineSecrets.psm1" -Force

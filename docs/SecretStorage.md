@@ -116,7 +116,10 @@ $env:M365DSC_SECRET_BACKEND = 'Kdbx'
 Close-M365DscSecretStore
 ```
 
-Native pipeline publishing follows project/pipeline setup. Only explicitly
+Native pipeline publishing follows project/pipeline setup. Bootstrap publishes
+each selected environment separately; a publication failure stops the
+stage and is retried on resume.
+Only explicitly
 trusted workshop pipeline IDs are authorized to use per-environment metadata,
 PFX Secure Files and password variables. Secure Files have a 10 MB size limit.
 Add production approvals/checks and restrict artifact retention/access.

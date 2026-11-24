@@ -172,7 +172,10 @@ foreach ($envName in $environments)
     }
 
     $vm = Get-AzVM -ResourceGroupName $resourceGroupName -Name $vmName -ErrorAction Stop
-    Initialize-M365DscAgentKeyVaultPrivateEndpoint -Datum $datum -EnvironmentName $envName -VM $vm -ErrorAction Stop
+    if ((Get-M365DscSecretBackend -Datum $datum) -eq 'KeyVault')
+    {
+        Initialize-M365DscAgentKeyVaultPrivateEndpoint -Datum $datum -EnvironmentName $envName -VM $vm -ErrorAction Stop
+    }
     $snapshotPrefix = $vmName
     if ($snapshotPrefix.Length -gt 55)
     {

@@ -94,6 +94,82 @@ Describe 'Isolated KDBX application registration' {
     }
 }
 
+Describe 'Worker VM provisioning backend isolation' {
+    BeforeAll {
+        $ast = Read-ProvisioningAst "$PSScriptRoot\..\..\lab\Azure\30 Create Agent VMs.ps1"
+        $loop = $ast.EndBlock.Statements | Where-Object {
+            $_ -is [Management.Automation.Language.ForEachStatementAst] -and
+            $_.Extent.Text -like '*Initialize-M365DscAgentKeyVaultPrivateEndpoint*'
+        }
+        $provision = [scriptblock]::Create($loop.Extent.Text)
+        function Write-M365DscEnvironmentContext { param($EnvironmentName, $TenantName, $TenantId, $SubscriptionId, $KeyVaultName, $Operation) }
+        function Connect-M365Dsc { [CmdletBinding()]param($TenantId, $TenantName, $SubscriptionId, $SkipExchangeOnline) }
+        function Set-AzContext { [CmdletBinding()]param($TenantId, $SubscriptionId) }
+        function Get-M365DscAgentVmName { param($ProjectName, $EnvironmentName) 'synthetic-vm' }
+        function Get-M365DscAgentIdentityName { param($ProjectName, $EnvironmentName) 'synthetic-identity' }
+        function Get-M365DscAgentResourceGroupName { param($ProjectName, $EnvironmentName) 'synthetic-rg' }
+        function Get-M365DscAgentVm { param($ProjectName, $EnvironmentName) }
+        function Get-M365DscSecretBackend { param($Datum) $Datum.Global.ProjectSettings.SecretStorage }
+        function Get-AzVM { [CmdletBinding()]param($ResourceGroupName, $Name, [switch]$Status) }
+        function Start-AzVM { [CmdletBinding()]param($ResourceGroupName, $Name) }
+        function Initialize-M365DscAgentKeyVaultPrivateEndpoint { [CmdletBinding()]param($Datum, $EnvironmentName, $VM) }
+        function Get-AzSnapshot { [CmdletBinding()]param($ResourceGroupName) }
+        function New-AzSnapshotConfig { [CmdletBinding()]param($SourceResourceId, $Location, $CreateOption, $SkuName, $Tag) }
+        function New-AzSnapshot { [CmdletBinding()]param($ResourceGroupName, $SnapshotName, $Snapshot) }
+    }
+    BeforeEach {
+        $datum = @{ Global = @{
+            ProjectSettings = @{ ProjectName = 'synthetic'; SecretStorage = 'Kdbx'; BuildAgents = @{ AzureLocation = 'westeurope' } }
+            Azure = @{ Environments = @{ Dev = @{
+                AzTenantName = 'synthetic.onmicrosoft.com'; AzTenantId = 'synthetic-tenant'
+                AzSubscriptionId = 'synthetic-subscription'; HasExchangeOnline = $false
+            } } }
+        } }
+        $environments = @('Dev')
+        $vmResourceGroupNames = @{}
+        $existingVm = @{
+            Name = 'synthetic-vm'; ResourceGroupName = 'synthetic-rg'; Location = 'westeurope'
+            Statuses = @(@{ Code = 'PowerState/running' })
+            StorageProfile = @{ OsDisk = @{ ManagedDisk = @{ Id = 'synthetic-disk' } }; DataDisks = @() }
+        }
+        Mock Write-Host {}
+        Mock Write-M365DscEnvironmentContext {}
+        Mock Connect-M365Dsc {}
+        Mock Set-AzContext {}
+        Mock Get-M365DscAgentVm { $existingVm }
+        Mock Get-AzVM { $existingVm }
+        Mock Start-AzVM {}
+        Mock Initialize-M365DscAgentKeyVaultPrivateEndpoint { throw 'Unexpected Key Vault access in KDBX provisioning.' }
+        Mock Get-AzSnapshot { @() }
+        Mock New-AzSnapshotConfig { @{ SourceResourceId = $SourceResourceId } }
+        Mock New-AzSnapshot { @{ Name = $SnapshotName } }
+    }
+    It 'Reuses the existing KDBX VM and reaches disk snapshot creation without any Key Vault name' {
+        & $provision
+        $vmResourceGroupNames.Dev | Should -Be 'synthetic-rg'
+        Should -Invoke Initialize-M365DscAgentKeyVaultPrivateEndpoint -Times 0
+        Should -Invoke New-AzSnapshot -Times 1 -Exactly -ParameterFilter {
+            $ResourceGroupName -eq 'synthetic-rg' -and $SnapshotName -eq 'synthetic-vm-AfterInstall'
+        }
+    }
+    It 'Keeps Key Vault network initialization for the Key Vault workflow' {
+        $datum.Global.ProjectSettings.SecretStorage = 'KeyVault'
+        $datum.Global.Azure.Environments.Dev.KeyVaultName = 'synthetic-vault'
+        Mock Initialize-M365DscAgentKeyVaultPrivateEndpoint {}
+        & $provision
+        Should -Invoke Initialize-M365DscAgentKeyVaultPrivateEndpoint -Times 1 -Exactly -ParameterFilter {
+            $EnvironmentName -eq 'Dev' -and $Datum.Global.Azure.Environments.Dev.KeyVaultName -eq 'synthetic-vault'
+        }
+        Should -Invoke New-AzSnapshot -Times 1 -Exactly
+    }
+    It 'Does not hide a genuine Key Vault networking failure or continue to snapshots' {
+        $datum.Global.ProjectSettings.SecretStorage = 'KeyVault'
+        Mock Initialize-M365DscAgentKeyVaultPrivateEndpoint { throw 'Synthetic vault networking failure' }
+        { & $provision } | Should -Throw '*vault networking failure*'
+        Should -Invoke New-AzSnapshot -Times 0
+    }
+}
+
 Describe 'KDBX protected worker delivery cleanup' {
     BeforeAll {
         $ast = Read-ProvisioningAst "$PSScriptRoot\..\..\lab\Azure\31 Agent Setup.ps1"

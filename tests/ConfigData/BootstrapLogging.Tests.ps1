@@ -137,6 +137,18 @@ Describe 'Bootstrap detailed output routing' {
         $console | Should -Contain $instruction
         (Get-Content -LiteralPath $logPath -Raw) | Should -Not -Match 'SYNTHETIC-CODE'
     }
+    It 'Logs all native stderr progress records without mislabeling them as errors' {
+        & (Get-Command pwsh).Source -NoLogo -NoProfile -Command '
+            [Console]::Error.WriteLine("Synthetic fetch progress");
+            [Console]::Error.WriteLine("Synthetic push progress");
+            exit 0
+        ' *>&1 | Write-M365DscBootstrapOutput -LogPath $logPath
+        $LASTEXITCODE | Should -Be 0
+        $log = Get-Content -LiteralPath $logPath -Raw
+        $log | Should -Match '\[Detail\] Synthetic fetch progress'
+        $log | Should -Match '\[Detail\] Synthetic push progress'
+        ($console -join "`n") | Should -Not -Match 'ERROR:|Synthetic fetch progress|Synthetic push progress'
+    }
     It 'Fails explicitly when detailed output cannot be persisted' {
         { 'routine detail' | Write-M365DscBootstrapOutput -LogPath (Join-Path $TestDrive 'missing\detail.log') } |
             Should -Throw

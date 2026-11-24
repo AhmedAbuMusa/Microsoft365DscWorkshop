@@ -96,6 +96,9 @@ Only one writer holds the database lock. KDBX uses Argon2id. Saves verify a
 temporary encrypted database before atomic replacement; the previous encrypted
 version is retained as `.bak`. Failed saves revert the in-memory record change.
 
+VM provisioning in KDBX mode does not query Key Vault or configure its private
+endpoints. A retry reuses any worker VM created before a later step failed.
+
 KDBX applications use deployment-specific names and certificates for Setup,
 LCM, and Export. PFX attachments and their passwords are encrypted together.
 Export gets read permissions; Setup/LCM get their required update permissions.

@@ -47,7 +47,7 @@ function Write-M365DscBootstrapOutput
             }
             else { ($InputObject | Out-String -Width 240).TrimEnd() }
             $isNativeError = $InputObject -is [Management.Automation.ErrorRecord] -and
-                $InputObject.FullyQualifiedErrorId -eq 'NativeCommandError'
+                $InputObject.FullyQualifiedErrorId -in @('NativeCommandError', 'NativeCommandErrorMessage')
             $level = if ($InputObject -is [Management.Automation.ErrorRecord] -and -not $isNativeError) { 'Error' }
                 elseif ($InputObject -is [Management.Automation.WarningRecord]) { 'Warning' }
                 else { 'Detail' }

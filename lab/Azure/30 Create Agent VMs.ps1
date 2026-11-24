@@ -90,6 +90,9 @@ foreach ($envName in $environments)
     Set-AzContext -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -ErrorAction Stop | Out-Null
     Write-Host "Successfully connected to Azure environment '$envName'."
 
+    Initialize-M365DscResourceProvider -SubscriptionId $environment.AzSubscriptionId `
+        -ProviderNamespace 'Microsoft.Compute', 'Microsoft.Network', 'Microsoft.ManagedIdentity' -ErrorAction Stop
+
     $projectName = $datum.Global.ProjectSettings.ProjectName
     $vmName = Get-M365DscAgentVmName -ProjectName $projectName -EnvironmentName $envName
     $identityName = Get-M365DscAgentIdentityName -ProjectName $projectName -EnvironmentName $envName

@@ -57,7 +57,7 @@ BeforeAll {
     . ([scriptblock]::Create($contextFunction.Extent.Text))
     foreach ($functionAst in $helperAst.EndBlock.Statements | Where-Object {
             $_ -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-            $_.Name -in @('Get-M365DscKeyVaultNetworkParameters', 'Get-M365DscKeyVaultPrivateEndpoints', 'Initialize-M365DscNetworkProvider', 'Initialize-M365DscKeyVaultSubnet', 'Resolve-M365DscKeyVaultNetworkParameters', 'Initialize-M365DscKeyVaultPrivateEndpoint', 'Initialize-M365DscAgentKeyVaultPrivateEndpoint')
+            $_.Name -in @('Get-M365DscKeyVaultNetworkParameters', 'Get-M365DscKeyVaultPrivateEndpoints', 'Initialize-M365DscResourceProvider', 'Initialize-M365DscNetworkProvider', 'Initialize-M365DscKeyVaultSubnet', 'Resolve-M365DscKeyVaultNetworkParameters', 'Initialize-M365DscKeyVaultPrivateEndpoint', 'Initialize-M365DscAgentKeyVaultPrivateEndpoint')
         })
     {
         . ([scriptblock]::Create($functionAst.Extent.Text))

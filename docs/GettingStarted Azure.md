@@ -97,7 +97,31 @@ Preparation errors are terminating: the bootstrapper will not mark the machine-p
 
 The imported Azure build initialization runs the dedicated `azureinit` workflow in a separate no-profile PowerShell process. It loads configuration and Azure build settings without reusing loaded YAML/Datum modules or running the shared `init` workflow, which also performs AutomatedLab-specific initialization. Before tenant or DevOps changes, the bootstrap validates that the imported checkout contains the Azure workflow and build-failure reporting, then imports its pinned Az.Compute module. A failed build or module import leaves initialization incomplete and prevents later stages from running.
 
-After a failure, rerun `lab/Start Azure Lab.ps1` to resume automatically. Repository synchronization and import verification run on every start, even when previously completed. If the synchronized GitHub commit is unchanged, other completed stages are skipped and the interrupted stage is retried. If the commit changes (or an older checkpoint has no recorded commit), completed downstream stages are invalidated so preparation, dependency restore, build initialization, and subsequent provisioning run using the updated code. Credential-vault setup remains completed. Dependency restore is skipped when every required package version is already present; otherwise it runs before the workflow resumes. Local configuration validation still runs on each start. Checkpoint data is stored under the current user's local application data and is bound to the checkout path and public project/environment settings; it does not contain tenant IDs, subscription IDs, or credentials. Use `-Restart` to discard saved progress and start over; it does not force package refresh. Use `-ForceDependencyRestore` only when installed dependency packages need to be refreshed. Restarting from scratch may repeat previously completed tenant or DevOps operations. A stage interrupted mid-operation is retried from its beginning, so its underlying operation may have partially completed before the failure.
+Before creating or adopting VM resources in each environment, VM provisioning verifies `Microsoft.Compute`, `Microsoft.Network`, and `Microsoft.ManagedIdentity` registration in that environment's subscription. Already registered providers are left unchanged; missing registrations are requested and polled every five seconds for up to 60 probes (about five minutes). Registration already in progress is awaited without another request. Progress and the subscription ID remain visible in the terminal. Permission errors or a registration timeout stop provisioning before VM resources are touched.
+
+Resource-provider registration and feature registration are distinct. An error naming `Microsoft.Network/AllowBringYourOwnPublicIpAddress` (`SubscriptionNotRegisteredForFeature`) is not proof that the `Microsoft.Network` provider itself is unregistered. This template requests ordinary Azure public IPs, not bring-your-own public IPs; the script does not automatically opt the subscription into that feature. If the feature error persists after provider readiness checks pass, inspect the failed Azure deployment operation for the exact resource and request.
+
+After a failure, rerun `lab/Start Azure Lab.ps1` to resume automatically. Successful checkpoints are retained even after a fully completed run. A new GitHub commit no longer repeats successful application registration or other cloud provisioning just because code changed.
+
+| Phase | Behavior on resume with the same deployment configuration |
+| --- | --- |
+| 01 - Source dependencies | Check required installed versions; skip restoration when satisfied (unless `-ForceDependencyRestore`). |
+| 02 - Configuration | Always validate settings and unlock the secret store; these are required in each new session. |
+| 03 - Credential storage | Skip if successful. |
+| 04 - Repository synchronization | Always synchronize, so pending fixes and updates reach the imported checkout. |
+| 05 - Import verification | Always run compatibility checks against the synchronized files. |
+| 06 - Machine preparation | Skip if successful; repeat after a repository revision change. |
+| 07 - Imported dependencies | Skip if successful; recheck after a repository revision change. |
+| 08 - Build initialization | Skip if successful; repeat after a repository revision change. Required module imports still occur in each new session. |
+| 09 - Tenant application registration | Skip if successful, including after a repository revision change. |
+| 10 - Application connection tests | Skip if successful, including after a repository revision change. Later operations still establish their own connections. |
+| 11 - Azure DevOps and pipeline secret delivery | Skip if successful, including after a repository revision change. |
+| 12 - VM provisioning | Skip if successful, including after a repository revision change. |
+| 13 - Agent configuration | Skip if successful, including after a repository revision change. |
+
+If an older checkpoint has no recorded commit, local setup (phases 06-08) is revalidated while successful cloud provisioning remains completed. Checkpoints are completion records, not continuous cloud drift or credential-expiration checks. To apply changed provisioning code to already completed cloud phases, deliberately use `-Restart`; ordinary bug-fix commits still reach failed or pending phases without repeating successful ones.
+
+Checkpoint data is stored under the current user's local application data and is bound to the checkout path and project/environment settings plus the selected backend/deployment identity; it does not contain tenant IDs, subscription IDs, or credentials. A change to these identity settings selects a separate checkpoint. Use `-Restart` to discard saved progress and start over; it does not force package refresh. Use `-ForceDependencyRestore` only when installed dependency packages need to be refreshed. Restarting from scratch may repeat previously completed tenant or DevOps operations. A stage interrupted mid-operation is retried from its beginning, so its underlying operation may have partially completed before the failure. Completion markers already discarded by an earlier bootstrap version cannot be recovered automatically.
 
 When resuming from an older checkpoint, stages that could have reported preparation or build failures as successes are revalidated and retried. Other completed stages, including tenant and DevOps setup, are preserved.
 

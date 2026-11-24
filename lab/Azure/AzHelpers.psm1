@@ -397,20 +397,60 @@ function Get-M365DscKeyVaultPrivateEndpoints
     }
 }
 
-function Initialize-M365DscNetworkProvider
+function Initialize-M365DscResourceProvider
 {
-    $provider = Get-AzResourceProvider -ProviderNamespace 'Microsoft.Network' -ErrorAction Stop
-    if ($provider.RegistrationState -ne 'Registered')
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string[]]$ProviderNamespace,
+        [string]$SubscriptionId
+    )
+
+    $context = Get-AzContext -ErrorAction Stop
+    if (-not $context.Subscription.Id)
     {
-        Register-AzResourceProvider -ProviderNamespace 'Microsoft.Network' -ErrorAction Stop | Out-Null
+        throw 'An active Azure subscription is required before checking resource providers.'
+    }
+    if ($SubscriptionId -and $context.Subscription.Id -ne $SubscriptionId)
+    {
+        throw "The active Azure subscription '$($context.Subscription.Id)' does not match the requested subscription '$SubscriptionId'."
+    }
+    $subscription = $context.Subscription.Id
+    foreach ($namespace in ($ProviderNamespace | Select-Object -Unique))
+    {
+        $provider = Get-AzResourceProvider -ProviderNamespace $namespace -ErrorAction Stop
+        if (-not $provider.RegistrationState)
+        {
+            throw "Azure did not return a registration state for provider '$namespace' in subscription '$subscription'."
+        }
+        if ($provider.RegistrationState -eq 'Registered') { continue }
+        Write-Host "[Subscription: $subscription] Registering required provider '$namespace' (state: '$($provider.RegistrationState)')."
+        if ($provider.RegistrationState -ne 'Registering')
+        {
+            Register-AzResourceProvider -ProviderNamespace $namespace -ErrorAction Stop | Out-Null
+        }
         for ($attempt = 1; $attempt -le 60; $attempt++)
         {
-            $provider = Get-AzResourceProvider -ProviderNamespace 'Microsoft.Network' -ErrorAction Stop
+            $provider = Get-AzResourceProvider -ProviderNamespace $namespace -ErrorAction Stop
             if ($provider.RegistrationState -eq 'Registered') { break }
-            if ($attempt -eq 60) { throw 'Microsoft.Network did not register in the active subscription.' }
+            if ($attempt -eq 60)
+            {
+                throw "Provider '$namespace' did not reach Registered in subscription '$subscription' after 60 probes (last state: '$($provider.RegistrationState)'). Check registration permissions and Azure provider status before retrying."
+            }
+            if ($attempt -eq 1 -or $attempt % 6 -eq 0)
+            {
+                Write-Host "[Subscription: $subscription] Waiting for provider '$namespace' to register (probe $attempt/60)."
+            }
             Start-Sleep -Seconds 5
         }
+        Write-Host "[Subscription: $subscription] Required provider '$namespace' is registered."
     }
+}
+
+function Initialize-M365DscNetworkProvider
+{
+    Initialize-M365DscResourceProvider -ProviderNamespace 'Microsoft.Network'
 }
 
 function Initialize-M365DscKeyVaultSubnet

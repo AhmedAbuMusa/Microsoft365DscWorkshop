@@ -13,7 +13,9 @@
     resume from the failed stage; use -Restart to discard its saved progress and start over.
     Use -ForceDependencyRestore only when dependency packages must also be refreshed.
     Every start synchronizes GitHub's default branch into Azure DevOps and its local
-    checkout. A changed repository commit invalidates completed downstream stages.
+    checkout. A changed repository commit repeats local preparation and build setup,
+    not successful tenant, DevOps, VM, or agent provisioning. Completed checkpoints
+    are retained until -Restart or a change to the deployment configuration.
     Routine output is written to a private, timestamped log under
     %LOCALAPPDATA%\Microsoft365DscWorkshop\AzureLabBootstrap\Logs.
 #>
@@ -308,11 +310,11 @@ function Update-BootstrapRepositoryCheckpoint
     }
 
     $script:BootstrapCheckpoint.CompletedStages = @($script:BootstrapCheckpoint.CompletedStages | Where-Object {
-            $_ -in @('bootstrap-project-settings', 'import-repository')
+            $_ -notin @('verify-import', 'prepare-machine', 'restore-target-dependencies', 'initialize-target-build')
         })
     $script:BootstrapCheckpoint['RepositoryCommit'] = $Commit
     Save-BootstrapCheckpoint
-    Write-Host 'Repository revision changed; completed downstream provisioning stages will run again.' -ForegroundColor Yellow
+    Write-Host 'Repository revision changed; local preparation, dependencies, and build initialization will be rechecked. Successful tenant, DevOps, VM, and agent phases remain completed; use -Restart to rerun them.' -ForegroundColor Yellow
 }
 
 function ConvertTo-SecureStringFromKeyVault
@@ -1463,25 +1465,24 @@ try
                     throw "The imported Azure build initialization task failed with exit code $LASTEXITCODE."
                 }
 
-                $targetRequiredModulesFile = Join-Path -Path $resolvedLocalPath -ChildPath 'RequiredModules.psd1'
-                $targetRequiredModulesManifest = Import-PowerShellDataFile -LiteralPath $targetRequiredModulesFile
-                $azComputeRequirement = $targetRequiredModulesManifest['Az.Compute']
-                $azComputeVersion = if ($azComputeRequirement -is [System.Collections.IDictionary]) {
-                    [string]$azComputeRequirement.Version
-                }
-                else {
-                    [string]$azComputeRequirement
-                }
-                if ([string]::IsNullOrWhiteSpace($azComputeVersion))
-                {
-                    throw "The imported repository does not pin an Az.Compute version in '$targetRequiredModulesFile'."
-                }
-
-                Import-Module -Name Az.Compute -RequiredVersion $azComputeVersion -ErrorAction Stop
                 Write-Host 'Completed imported Azure build initialization.' -ForegroundColor Green
             }
 
                 . {
+                    $targetRequiredModulesFile = Join-Path -Path $resolvedLocalPath -ChildPath 'RequiredModules.psd1'
+                    $targetRequiredModulesManifest = Import-PowerShellDataFile -LiteralPath $targetRequiredModulesFile
+                    $azComputeRequirement = $targetRequiredModulesManifest['Az.Compute']
+                    $azComputeVersion = if ($azComputeRequirement -is [System.Collections.IDictionary]) {
+                        [string]$azComputeRequirement.Version
+                    }
+                    else {
+                        [string]$azComputeRequirement
+                    }
+                    if ([string]::IsNullOrWhiteSpace($azComputeVersion))
+                    {
+                        throw "The imported repository does not pin an Az.Compute version in '$targetRequiredModulesFile'."
+                    }
+                    Import-Module -Name Az.Compute -RequiredVersion $azComputeVersion -ErrorAction Stop
                     $targetDatum = New-DatumStructure -DefinitionFile (Join-Path -Path $resolvedLocalPath -ChildPath 'source\Datum.yml')
                     Import-Module -Name (Join-Path -Path $resolvedLocalPath -ChildPath 'lab\Azure\AzHelpers.psm1') -Force -ErrorAction Stop
                     $targetDatum = Get-M365DscProjectSecrets -Datum $targetDatum
@@ -1597,8 +1598,9 @@ try
         Pop-Location
     }
 
-    Remove-Item -LiteralPath $script:BootstrapCheckpointPath -Force -ErrorAction Stop
+    Save-BootstrapCheckpoint
     Write-Host "Azure lab bootstrap completed for '$script:OrganizationName/$script:ProjectName'." -ForegroundColor Green
+    Write-Host 'Successful phase checkpoints are retained for subsequent runs. Use -Restart only to repeat completed provisioning.'
     Write-Host 'No DSC push pipeline was queued. Review and run tenant-changing pipelines explicitly.'
 }
 catch

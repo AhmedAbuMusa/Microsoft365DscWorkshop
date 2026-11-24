@@ -70,7 +70,7 @@ function Write-M365DscBootstrapOutput
                     Write-Host "WARNING: $text" -ForegroundColor Yellow
                 }
             }
-            elseif ($text -match '(?i)^\[Environment:|^\[\d+\]\s|^Select the Azure subscription|^Registering isolated|is still in progress \(elapsed:|Signing in to tenant|requires.*(authentication|sign-in)|Please select.*account|To sign in|devicelogin|microsoft\.com/link|enter (the )?code|^fatal:|^error:')
+            elseif ($text -match '(?i)^\[Environment:|^\[Subscription:|^\[\d+\]\s|^Select the Azure subscription|^Registering isolated|is still in progress \(elapsed:|Signing in to tenant|requires.*(authentication|sign-in)|Please select.*account|To sign in|devicelogin|microsoft\.com/link|enter (the )?code|^fatal:|^error:')
             {
                 Write-Host $text -ForegroundColor Cyan
             }

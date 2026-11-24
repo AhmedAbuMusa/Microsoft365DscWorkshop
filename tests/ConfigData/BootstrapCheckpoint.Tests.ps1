@@ -117,16 +117,20 @@ Describe 'Azure lab bootstrap checkpoint' {
             Should -Contain 'test-stage'
     }
 
-    It 'Invalidates downstream work when the synchronized GitHub revision changes' {
+    It 'Repeats only local setup when the GitHub revision changes, preserving all successful provisioning phases' {
         $script:BootstrapCheckpoint['RepositoryCommit'] = 'old-commit'
         $script:BootstrapCheckpoint.CompletedStages = @(
             'bootstrap-project-settings', 'import-repository', 'verify-import',
-            'restore-target-dependencies', 'register-applications', 'create-vms'
+            'prepare-machine', 'restore-target-dependencies', 'initialize-target-build',
+            'register-applications', 'test-connections', 'configure-devops', 'create-vms', 'configure-agents'
         )
 
         Update-BootstrapRepositoryCheckpoint -Commit 'new-commit'
 
-        $script:BootstrapCheckpoint.CompletedStages | Should -Be @('bootstrap-project-settings', 'import-repository')
+        $script:BootstrapCheckpoint.CompletedStages | Should -Be @(
+            'bootstrap-project-settings', 'import-repository', 'register-applications',
+            'test-connections', 'configure-devops', 'create-vms', 'configure-agents'
+        )
         (Get-Content -LiteralPath $script:BootstrapCheckpointPath -Raw | ConvertFrom-Json).RepositoryCommit |
             Should -Be 'new-commit'
     }
@@ -156,12 +160,62 @@ Describe 'Azure lab bootstrap checkpoint' {
         $script:BootstrapCheckpoint.CompletedStages | Should -Be @('import-repository', 'register-applications')
     }
 
-    It 'Revalidates downstream work from checkpoints without a repository revision' {
-        $script:BootstrapCheckpoint.CompletedStages = @('import-repository', 'initialize-target-build')
+    It 'Revalidates local setup without forgetting successful provisioning when an older checkpoint has no revision' {
+        $script:BootstrapCheckpoint.CompletedStages = @('import-repository', 'initialize-target-build', 'register-applications')
 
         Update-BootstrapRepositoryCheckpoint -Commit 'first-recorded-commit'
 
-        $script:BootstrapCheckpoint.CompletedStages | Should -Be @('import-repository')
+        $script:BootstrapCheckpoint.CompletedStages | Should -Be @('import-repository', 'register-applications')
+    }
+    It 'Skips persisted successful phase <Index> (<Name>) after loading the saved checkpoint' -ForEach @(
+        @{ Index = 3; Name = 'bootstrap-project-settings' }
+        @{ Index = 4; Name = 'import-repository' }
+        @{ Index = 5; Name = 'verify-import' }
+        @{ Index = 6; Name = 'prepare-machine' }
+        @{ Index = 7; Name = 'restore-target-dependencies' }
+        @{ Index = 8; Name = 'initialize-target-build' }
+        @{ Index = 9; Name = 'register-applications' }
+        @{ Index = 10; Name = 'test-connections' }
+        @{ Index = 11; Name = 'configure-devops' }
+        @{ Index = 12; Name = 'create-vms' }
+        @{ Index = 13; Name = 'configure-agents' }
+    ) {
+        Invoke-BootstrapStage -Index $Index -Name $Name -Description 'Successful stage' -Action { $script:StageActionCount++ }
+        $script:BootstrapCheckpoint = Get-Content -LiteralPath $script:BootstrapCheckpointPath -Raw | ConvertFrom-Json -AsHashtable
+        $script:PhaseMessages.Clear()
+        Invoke-BootstrapStage -Index $Index -Name $Name -Description 'Successful stage' -Action { throw 'Completed action must not run again.' }
+        $script:StageActionCount | Should -Be 1
+        ($script:PhaseMessages -join "`n") | Should -Match 'Status: Skipped'
+    }
+    It 'Does not repeat application registration after an unrelated code update and a later phase failure' {
+        $script:BootstrapCheckpoint.RepositoryCommit = 'old-commit'
+        Invoke-BootstrapStage -Index 9 -Name 'register-applications' -Description 'Register applications' `
+            -Action { $script:StageActionCount++ }
+        { Invoke-BootstrapStage -Index 12 -Name 'create-vms' -Description 'Create VMs' `
+                -Action { throw 'Synthetic VM provisioning failure' } } | Should -Throw '*VM provisioning failure*'
+        $script:BootstrapCheckpoint = Get-Content -LiteralPath $script:BootstrapCheckpointPath -Raw | ConvertFrom-Json -AsHashtable
+        Update-BootstrapRepositoryCheckpoint -Commit 'new-commit'
+        Invoke-BootstrapStage -Index 9 -Name 'register-applications' -Description 'Register applications' `
+            -Action { throw 'Application registration must stay completed.' }
+        Invoke-BootstrapStage -Index 12 -Name 'create-vms' -Description 'Create VMs' -Action { $script:StageActionCount++ }
+        $script:StageActionCount | Should -Be 2
+        $script:BootstrapCheckpoint.CompletedStages | Should -Contain 'register-applications'
+        $script:BootstrapCheckpoint.CompletedStages | Should -Contain 'create-vms'
+    }
+    It 'Retains the successful-run checkpoint rather than deleting it at completion' {
+        $mainTry = $bootstrapAst.EndBlock.Statements | Where-Object {
+            $_ -is [Management.Automation.Language.TryStatementAst] -and
+            $_.Body.Extent.Text -like '*Azure lab bootstrap completed for*'
+        }
+        $completion = @($mainTry.Body.Statements | Where-Object {
+            $_ -is [Management.Automation.Language.PipelineAst]
+        })
+        $finalization = [scriptblock]::Create(($completion | Select-Object -Last 4 | ForEach-Object { $_.Extent.Text }) -join "`n")
+        $script:BootstrapCheckpoint.CompletedStages = @('register-applications', 'configure-agents')
+        & $finalization
+        Test-Path -LiteralPath $script:BootstrapCheckpointPath | Should -BeTrue
+        $saved = Get-Content -LiteralPath $script:BootstrapCheckpointPath -Raw | ConvertFrom-Json -AsHashtable
+        $saved.CompletedStages | Should -Be @('register-applications', 'configure-agents')
     }
 
     It 'Retries an interrupted stage and clears its current-stage marker after success' {

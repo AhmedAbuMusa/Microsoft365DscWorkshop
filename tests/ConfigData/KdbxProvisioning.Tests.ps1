@@ -443,6 +443,144 @@ Describe 'Worker VM provisioning backend isolation' {
     }
 }
 
+Describe 'Worker managed identity tenant isolation' {
+    BeforeAll {
+        $ast = Read-ProvisioningAst "$PSScriptRoot\..\..\lab\Azure\30 Create Agent VMs.ps1"
+        $loop = $ast.EndBlock.Statements | Where-Object {
+            $_ -is [Management.Automation.Language.ForEachStatementAst] -and
+            $_.Extent.Text -like '*Assigning VM managed identities and permissions*'
+        }
+        $assignIdentities = [scriptblock]::Create($loop.Extent.Text)
+        function Write-M365DscEnvironmentContext { param($EnvironmentName, $TenantName, $TenantId, $SubscriptionId, $KeyVaultName, $Operation) }
+        function Connect-M365Dsc { [CmdletBinding()]param($TenantId, $TenantName, $SubscriptionId, $SkipExchangeOnline) }
+        function Set-AzContext { [CmdletBinding()]param($TenantId, $SubscriptionId) }
+        function Get-AzContext { [CmdletBinding()]param() }
+        function Get-M365DscAgentVmName { param($ProjectName, $EnvironmentName) "vm-$EnvironmentName" }
+        function Get-M365DscAgentIdentityName { param($ProjectName, $EnvironmentName) "identity-$EnvironmentName" }
+        function Get-AzVM { [CmdletBinding()]param($ResourceGroupName, $Name, [switch]$Status) }
+        function Get-AzResource { [CmdletBinding()]param($ResourceGroupName, $ResourceType) }
+        function New-AzResource { [CmdletBinding()]param($ResourceName, $ResourceGroupName, $ResourceType, $ApiVersion, $Location, $PropertyObject, [switch]$Force) }
+        function Get-AzUserAssignedIdentity { [CmdletBinding()]param($ResourceGroupName) }
+        function New-AzUserAssignedIdentity { [CmdletBinding()]param($Name, $ResourceGroupName, $Location) }
+        function Update-AzVM { [CmdletBinding()]param($ResourceGroupName, $VM, $IdentityType, $IdentityId) }
+        function New-M365DscIdentity { param($Name, [switch]$OnlyServicePrincipals, [switch]$PassThru) }
+        function Add-M365DscIdentityPermission { param($Identity, $AccessType) }
+        function Invoke-AzVMRunCommand { [CmdletBinding()]param($ResourceGroupName, $VMName, $CommandId, $ScriptString) }
+    }
+    BeforeEach {
+        $environments = @('Dev', 'Test')
+        $EnvironmentName = $null
+        $datum = @{ Global = @{
+            ProjectSettings = @{ ProjectName = 'synthetic' }
+            Azure = @{ Environments = @{
+                Dev = @{ AzTenantId = 'tenant-dev'; AzTenantName = 'dev.example'; AzSubscriptionId = 'subscription-dev'; HasExchangeOnline = $false }
+                Test = @{ AzTenantId = 'tenant-test'; AzTenantName = 'test.example'; AzSubscriptionId = 'subscription-test'; HasExchangeOnline = $false }
+            } }
+        } }
+        $vmResourceGroupNames = @{ Dev = 'rg-Dev'; Test = 'rg-Test' }
+        $activeContext = @{ Tenant = @{ Id = 'tenant-dev' }; Subscription = @{ Id = 'subscription-dev' } }
+        $identities = @{
+            Dev = @{ Name = 'identity-Dev'; ResourceId = '/subscriptions/subscription-dev/resourceGroups/rg-Dev/providers/Microsoft.ManagedIdentity/userAssignedIdentities/identity-Dev' }
+            Test = @{ Name = 'identity-Test'; ResourceId = '/subscriptions/subscription-test/resourceGroups/rg-Test/providers/Microsoft.ManagedIdentity/userAssignedIdentities/identity-Test' }
+        }
+        Mock Write-Host {}
+        Mock Write-M365DscEnvironmentContext {}
+        Mock Connect-M365Dsc {}
+        Mock Set-AzContext {
+            $activeContext.Tenant.Id = $TenantId
+            $activeContext.Subscription.Id = $SubscriptionId
+        }
+        Mock Get-AzContext { $activeContext }
+        Mock Get-AzVM {
+            @{ Name = $Name; Location = 'westeurope'; Identity = @{
+                Type = 'SystemAssigned'; UserAssignedIdentities = @{ '/subscriptions/other/identities/preserved' = @{} }
+            } }
+        }
+        Mock Get-AzResource {
+            $environmentName = $ResourceGroupName.Replace('rg-', '')
+            $activeContext.Tenant.Id | Should -Be $datum.Global.Azure.Environments[$environmentName].AzTenantId
+            $activeContext.Subscription.Id | Should -Be $datum.Global.Azure.Environments[$environmentName].AzSubscriptionId
+            $identities[$environmentName]
+        }
+        Mock New-AzResource { $identities[$ResourceGroupName.Replace('rg-', '')] }
+        Mock Get-AzUserAssignedIdentity { throw 'Unexpected AutoRest identity authentication path' }
+        Mock New-AzUserAssignedIdentity { throw 'Unexpected AutoRest identity authentication path' }
+        Mock Update-AzVM {}
+        Mock New-M365DscIdentity { @{ Name = $Name } }
+        Mock Add-M365DscIdentityPermission {}
+        Mock Invoke-AzVMRunCommand { @{ Status = 'Succeeded' } }
+    }
+    It 'Switches Dev to Test and reuses each subscription identity without the stale AutoRest token path' {
+        & $assignIdentities
+        Should -Invoke Get-AzResource -Times 2 -Exactly -ParameterFilter {
+            $ResourceType -eq 'Microsoft.ManagedIdentity/userAssignedIdentities'
+        }
+        Should -Invoke Update-AzVM -Times 1 -Exactly -ParameterFilter {
+            $ResourceGroupName -eq 'rg-Test' -and $IdentityType -eq 'SystemAssignedUserAssigned' -and
+            $IdentityId -contains $identities.Test.ResourceId -and
+            $IdentityId -contains '/subscriptions/other/identities/preserved'
+        }
+        Should -Invoke New-AzResource -Times 0
+        Should -Invoke Get-AzUserAssignedIdentity -Times 0
+        Should -Invoke New-AzUserAssignedIdentity -Times 0
+        Should -Invoke Invoke-AzVMRunCommand -Times 2 -Exactly
+    }
+    It 'Creates a missing identity through ARM in the selected Test context before assignment' {
+        $environments = @('Test')
+        Mock Get-AzResource { $null }
+        Mock New-AzResource {
+            $activeContext.Tenant.Id | Should -Be 'tenant-test'
+            $activeContext.Subscription.Id | Should -Be 'subscription-test'
+            $identities.Test
+        }
+        & $assignIdentities
+        Should -Invoke New-AzResource -Times 1 -Exactly -ParameterFilter {
+            $ResourceName -eq 'identity-Test' -and $ResourceGroupName -eq 'rg-Test' -and
+            $ResourceType -eq 'Microsoft.ManagedIdentity/userAssignedIdentities' -and
+            $ApiVersion -eq '2023-01-31' -and $Location -eq 'westeurope' -and $Force -and
+            $PropertyObject.Count -eq 0
+        }
+        Should -Invoke Update-AzVM -Times 1 -Exactly -ParameterFilter { $IdentityId -contains $identities.Test.ResourceId }
+    }
+    It 'Stops before resource access if tenant or subscription switching failed' -TestCases @(
+        @{ TenantId = 'tenant-dev'; SubscriptionId = 'subscription-test' },
+        @{ TenantId = 'tenant-test'; SubscriptionId = 'subscription-dev' }
+    ) {
+        param($TenantId, $SubscriptionId)
+        $environments = @('Test')
+        Mock Set-AzContext {}
+        $activeContext.Tenant.Id = $TenantId
+        $activeContext.Subscription.Id = $SubscriptionId
+        { & $assignIdentities } | Should -Throw '*Azure context does not match*'
+        Should -Invoke Get-AzVM -Times 0
+        Should -Invoke Get-AzResource -Times 0
+        Should -Invoke New-AzResource -Times 0
+        Should -Invoke Update-AzVM -Times 0
+    }
+    It 'Rejects an identity from the wrong subscription before assigning it or granting permissions' {
+        $environments = @('Test')
+        Mock Get-AzResource { @{ Name = 'identity-Test'; ResourceId = $identities.Test.ResourceId.Replace('subscription-test', 'subscription-dev') } }
+        { & $assignIdentities } | Should -Throw '*expected resource ID*'
+        Should -Invoke Update-AzVM -Times 0
+        Should -Invoke Add-M365DscIdentityPermission -Times 0
+    }
+    It 'Preserves an existing identity assignment without updating the VM again' {
+        $environments = @('Test')
+        Mock Get-AzVM {
+            @{ Name = 'vm-Test'; Identity = @{ UserAssignedIdentities = @{ $identities.Test.ResourceId.ToUpperInvariant() = @{} } } }
+        }
+        & $assignIdentities
+        Should -Invoke Update-AzVM -Times 0
+        Should -Invoke Add-M365DscIdentityPermission -Times 1 -Exactly
+    }
+    It 'Propagates identity lookup authorization failures without creating or assigning a replacement' {
+        Mock Get-AzResource { throw 'Synthetic AuthorizationFailed' }
+        { & $assignIdentities } | Should -Throw '*AuthorizationFailed*'
+        Should -Invoke New-AzResource -Times 0
+        Should -Invoke Update-AzVM -Times 0
+    }
+}
+
 Describe 'KDBX protected worker delivery cleanup' {
     BeforeAll {
         $ast = Read-ProvisioningAst "$PSScriptRoot\..\..\lab\Azure\31 Agent Setup.ps1"

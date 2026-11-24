@@ -274,6 +274,11 @@ foreach ($envName in $environments)
     $param.SkipExchangeOnline = $environment.HasExchangeOnline -eq $false
     Connect-M365Dsc @param -ErrorAction Stop
     Set-AzContext -TenantId $environment.AzTenantId -SubscriptionId $environment.AzSubscriptionId -ErrorAction Stop | Out-Null
+    $azureContext = Get-AzContext -ErrorAction Stop
+    if ($azureContext.Tenant.Id -ne $environment.AzTenantId -or $azureContext.Subscription.Id -ne $environment.AzSubscriptionId)
+    {
+        throw "Azure context does not match tenant '$($environment.AzTenantId)' and subscription '$($environment.AzSubscriptionId)' for environment '$envName'. No managed identity changes were made."
+    }
     Write-Host "Successfully connected to Azure environment '$envName'."
 
     $vmName = Get-M365DscAgentVmName -ProjectName $datum.Global.ProjectSettings.ProjectName -EnvironmentName $envName
@@ -292,22 +297,32 @@ foreach ($envName in $environments)
     Write-Host "Working with VM '$vmName' in resource group '$resourceGroupName'."
 
     $identityName = Get-M365DscAgentIdentityName -ProjectName $datum.Global.ProjectSettings.ProjectName -EnvironmentName $envName
-    if (-not ($id = Get-AzUserAssignedIdentity -ResourceGroupName $resourceGroupName -ErrorAction Stop | Where-Object Name -EQ $identityName))
+    # Use Az.Resources rather than the AutoRest identity cmdlets, which do not honor DefaultProfile.
+    $id = Get-AzResource -ResourceGroupName $resourceGroupName -ResourceType 'Microsoft.ManagedIdentity/userAssignedIdentities' `
+        -ErrorAction Stop | Where-Object Name -EQ $identityName
+    if (-not $id)
     {
         Write-Host "Managed identity '$identityName' was not found; creating it."
-        $id = New-AzUserAssignedIdentity -Name $identityName -ResourceGroupName $resourceGroupName -Location $vm.Location -ErrorAction Stop
+        $id = New-AzResource -ResourceName $identityName -ResourceGroupName $resourceGroupName `
+            -ResourceType 'Microsoft.ManagedIdentity/userAssignedIdentities' -ApiVersion '2023-01-31' `
+            -Location $vm.Location -PropertyObject @{} -Force -ErrorAction Stop
+    }
+    $identityResourceId = "/subscriptions/$($environment.AzSubscriptionId)/resourceGroups/$resourceGroupName/providers/Microsoft.ManagedIdentity/userAssignedIdentities/$identityName"
+    if (-not [string]::Equals([string]$id.ResourceId, $identityResourceId, [StringComparison]::OrdinalIgnoreCase))
+    {
+        throw "Managed identity '$identityName' did not return the expected resource ID '$identityResourceId'. VM assignment was not attempted."
     }
 
     $assignedIdentityIds = @($vm.Identity.UserAssignedIdentities.Keys)
     $identityAlreadyAssigned = @(
         $assignedIdentityIds | Where-Object {
-            [string]::Equals([string]$_, [string]$id.Id, [StringComparison]::OrdinalIgnoreCase)
+            [string]::Equals([string]$_, $identityResourceId, [StringComparison]::OrdinalIgnoreCase)
         }
     ).Count -gt 0
     if (-not $identityAlreadyAssigned)
     {
         Write-Host "Assigning managed identity '$identityName' to VM '$vmName'."
-        $identityIds = $assignedIdentityIds + $id.Id
+        $identityIds = $assignedIdentityIds + $identityResourceId
         $identityType = 'UserAssigned'
         if ($vm.Identity.Type -match 'SystemAssigned')
         {

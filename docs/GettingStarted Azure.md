@@ -102,6 +102,8 @@ Resource-provider registration and feature registration are distinct. During VM 
 
 Registration errors with no identifiable feature/provider, authorization failures, and unrelated deployment failures remain terminal. Feature registration may require Microsoft approval: a timeout reports the last state and advises Azure Support rather than provisioning without the feature or waiting indefinitely. After approval, rerun bootstrap. If the retry still fails, inspect the failed Azure deployment operations and contact Azure Support; automatic registration cannot override subscription restrictions.
 
+Managed-identity assignment verifies the active Azure tenant and subscription for each environment before accessing resources. Identity lookup and creation use the existing `Az.Resources` ARM cmdlets instead of the pinned AutoRest managed-identity cmdlets, whose `DefaultProfile` parameter is nonfunctional. The returned identity resource ID must match the selected subscription, resource group, and identity name before assignment. This avoids depending on that module's authentication handling across tenant switches; authorization failures remain terminal.
+
 After a failure, rerun `lab/Start Azure Lab.ps1` to resume automatically. Successful checkpoints are retained even after a fully completed run. A new GitHub commit no longer repeats successful application registration or other cloud provisioning just because code changed.
 
 | Phase | Behavior on resume with the same deployment configuration |

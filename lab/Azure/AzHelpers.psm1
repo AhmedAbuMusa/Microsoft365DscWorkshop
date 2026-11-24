@@ -404,7 +404,8 @@ function Initialize-M365DscResourceProvider
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
         [string[]]$ProviderNamespace,
-        [string]$SubscriptionId
+        [string]$SubscriptionId,
+        [switch]$ForceRegistration
     )
 
     $context = Get-AzContext -ErrorAction Stop
@@ -424,7 +425,7 @@ function Initialize-M365DscResourceProvider
         {
             throw "Azure did not return a registration state for provider '$namespace' in subscription '$subscription'."
         }
-        if ($provider.RegistrationState -eq 'Registered') { continue }
+        if ($provider.RegistrationState -eq 'Registered' -and -not $ForceRegistration) { continue }
         Write-Host "[Subscription: $subscription] Registering required provider '$namespace' (state: '$($provider.RegistrationState)')."
         if ($provider.RegistrationState -ne 'Registering')
         {
@@ -445,6 +446,82 @@ function Initialize-M365DscResourceProvider
             Start-Sleep -Seconds 5
         }
         Write-Host "[Subscription: $subscription] Required provider '$namespace' is registered."
+    }
+}
+
+function Invoke-M365DscResourceGroupDeployment
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$DeploymentParameters,
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$SubscriptionId
+    )
+
+    $context = Get-AzContext -ErrorAction Stop
+    if ($context.Subscription.Id -ne $SubscriptionId)
+    {
+        throw "The active Azure subscription '$($context.Subscription.Id)' does not match the requested subscription '$SubscriptionId'."
+    }
+    for ($deploymentAttempt = 1; $deploymentAttempt -le 2; $deploymentAttempt++)
+    {
+        try
+        {
+            return New-AzResourceGroupDeployment @DeploymentParameters -ErrorAction Stop
+        }
+        catch
+        {
+            if ($deploymentAttempt -eq 2)
+            {
+                Write-Warning "Deployment still failed after registration recovery in subscription '$SubscriptionId'. Inspect the failed deployment operations; Azure Support may be required."
+                throw
+            }
+            $errorText = "$($_.Exception.Message)`n$($_.ErrorDetails.Message)"
+            $featureMatch = [regex]::Match($errorText, 'feature\s+[''"]?(?<namespace>Microsoft\.[A-Za-z0-9.]+)/(?<feature>[A-Za-z0-9_.-]+)')
+            $providerMatch = [regex]::Match($errorText, 'namespace\s+[''"](?<namespace>Microsoft\.[A-Za-z0-9.]+)[''"]')
+            if ($errorText -match '\bSubscriptionNotRegisteredForFeature\b' -and $featureMatch.Success)
+            {
+                $namespace = $featureMatch.Groups['namespace'].Value
+                $featureName = $featureMatch.Groups['feature'].Value
+                Write-Warning "[Subscription: $SubscriptionId] Deployment requires feature '$namespace/$featureName'. Requesting registration before one deployment retry."
+                $feature = Get-AzProviderFeature -ProviderNamespace $namespace -FeatureName $featureName -ErrorAction Stop
+                if (-not $feature.RegistrationState)
+                {
+                    throw "Azure did not return a registration state for feature '$namespace/$featureName' in subscription '$SubscriptionId'. Check feature availability and registration permissions."
+                }
+                if ($feature.RegistrationState -notin 'Registered', 'Registering', 'Pending')
+                {
+                    Register-AzProviderFeature -ProviderNamespace $namespace -FeatureName $featureName -ErrorAction Stop | Out-Null
+                }
+                for ($probe = 1; $feature.RegistrationState -ne 'Registered' -and $probe -le 60; $probe++)
+                {
+                    $feature = Get-AzProviderFeature -ProviderNamespace $namespace -FeatureName $featureName -ErrorAction Stop
+                    if ($feature.RegistrationState -eq 'Registered') { break }
+                    if ($probe -eq 60)
+                    {
+                        throw "Feature '$namespace/$featureName' did not reach Registered in subscription '$SubscriptionId' after 60 probes (last state: '$($feature.RegistrationState)'). Pending may require Microsoft approval; contact Azure Support if registration remains pending or unavailable, then rerun bootstrap."
+                    }
+                    if ($probe -eq 1 -or $probe % 6 -eq 0)
+                    {
+                        Write-Host "[Subscription: $SubscriptionId] Waiting for feature '$namespace/$featureName' (state: '$($feature.RegistrationState)', probe $probe/60)."
+                    }
+                    Start-Sleep -Seconds 5
+                }
+                Initialize-M365DscResourceProvider -SubscriptionId $SubscriptionId -ProviderNamespace $namespace -ForceRegistration -ErrorAction Stop
+            }
+            elseif ($errorText -match '\b(MissingSubscriptionRegistration|SubscriptionNotRegistered|NoRegisteredProviderFound)\b' -and $providerMatch.Success)
+            {
+                $namespace = $providerMatch.Groups['namespace'].Value
+                Write-Warning "[Subscription: $SubscriptionId] Deployment reported missing provider '$namespace'. Refreshing registration before one deployment retry."
+                Initialize-M365DscResourceProvider -SubscriptionId $SubscriptionId -ProviderNamespace $namespace -ForceRegistration -ErrorAction Stop
+            }
+            else
+            {
+                throw
+            }
+        }
     }
 }
 

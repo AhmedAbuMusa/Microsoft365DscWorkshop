@@ -136,11 +136,11 @@ foreach ($envName in $environments)
             } -ErrorAction Stop | Out-Null
         }
 
-        $deployment = New-AzResourceGroupDeployment `
-            -Name "build-agent-$envName" `
-            -ResourceGroupName $resourceGroupName `
-            -TemplateFile $PSScriptRoot\..\templates\buildAgent.bicep `
-            -TemplateParameterObject @{
+        $deployment = Invoke-M365DscResourceGroupDeployment -SubscriptionId $environment.AzSubscriptionId -DeploymentParameters @{
+            Name = "build-agent-$envName"
+            ResourceGroupName = $resourceGroupName
+            TemplateFile = "$PSScriptRoot\..\templates\buildAgent.bicep"
+            TemplateParameterObject = @{
                 location      = $location
                 vmName        = $vmName
                 vmSize        = $datum.Global.ProjectSettings.BuildAgents.AzureRoleSize
@@ -152,13 +152,13 @@ foreach ($envName in $environments)
                     Environment = [string]$envName
                     ManagedBy   = 'Bicep'
                 }
-            } `
-            -Tag @{
+            }
+            Tag = @{
                 Project     = $projectName
                 Environment = [string]$envName
                 ManagedBy   = 'Bicep'
-            } `
-            -ErrorAction Stop
+            }
+        } -ErrorAction Stop
 
         if ($deployment.ProvisioningState -ne 'Succeeded')
         {

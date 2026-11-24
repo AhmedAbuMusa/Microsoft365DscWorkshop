@@ -140,6 +140,11 @@ Describe 'Subscription resource provider readiness' {
         Should -Invoke Register-AzResourceProvider -Times 0
         Should -Invoke Get-AzResourceProvider -Times 2 -Exactly
     }
+    It 'Refreshes a registered provider when a deployment error or feature registration requires it' {
+        Initialize-M365DscResourceProvider -SubscriptionId 'synthetic-subscription' -ProviderNamespace 'Microsoft.Network' -ForceRegistration
+        Should -Invoke Register-AzResourceProvider -Times 1 -Exactly -ParameterFilter { $ProviderNamespace -eq 'Microsoft.Network' }
+        Should -Invoke Get-AzResourceProvider -Times 2 -Exactly
+    }
     It 'Reports a bounded registration timeout instead of proceeding with resource provisioning' {
         Mock Get-AzResourceProvider { @{ RegistrationState = 'Registering' } }
         { Initialize-M365DscResourceProvider -ProviderNamespace 'Microsoft.Network' } |
@@ -168,6 +173,158 @@ Describe 'Subscription resource provider readiness' {
     }
 }
 
+Describe 'Deployment registration exception recovery' {
+    BeforeAll {
+        $ast = Read-ProvisioningAst "$PSScriptRoot\..\..\lab\Azure\AzHelpers.psm1"
+        $function = $ast.EndBlock.Statements | Where-Object {
+            $_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -eq 'Invoke-M365DscResourceGroupDeployment'
+        }
+        . ([scriptblock]::Create($function.Extent.Text))
+        function Get-AzContext { [CmdletBinding()]param() }
+        function Get-AzProviderFeature { [CmdletBinding()]param($ProviderNamespace, $FeatureName) }
+        function Register-AzProviderFeature { [CmdletBinding()]param($ProviderNamespace, $FeatureName) }
+        function Initialize-M365DscResourceProvider { [CmdletBinding()]param($SubscriptionId, $ProviderNamespace, [switch]$ForceRegistration) }
+        function New-AzResourceGroupDeployment { [CmdletBinding()]param($Name, $ResourceGroupName, $TemplateFile, $TemplateParameterObject, $Tag) }
+    }
+    BeforeEach {
+        $parameters = @{
+            Name = 'build-agent-Prod'; ResourceGroupName = 'synthetic-rg'; TemplateFile = 'synthetic.bicep'
+            TemplateParameterObject = @{ vmName = 'synthetic-vm'; adminPassword = 'synthetic-test-value' }
+            Tag = @{ Environment = 'Prod' }
+        }
+        $featureError = 'Subscription /subscriptions/synthetic-subscription/resourceGroups//providers/Microsoft.Network/subscriptions/ is not registered for feature Microsoft.Network/AllowBringYourOwnPublicIpAddress required to carry out the requested operation. (Code: SubscriptionNotRegisteredForFeature)'
+        Mock Get-AzContext { @{ Subscription = @{ Id = 'synthetic-subscription' } } }
+        Mock Get-AzProviderFeature { @{ RegistrationState = 'Registered' } }
+        Mock Register-AzProviderFeature {}
+        Mock Initialize-M365DscResourceProvider {}
+        Mock New-AzResourceGroupDeployment { @{ ProvisioningState = 'Succeeded' } }
+        Mock Start-Sleep {}
+        Mock Write-Host {}
+        Mock Write-Warning {}
+    }
+    It 'Returns a successful deployment without changing registrations' {
+        (Invoke-M365DscResourceGroupDeployment -SubscriptionId 'synthetic-subscription' -DeploymentParameters $parameters).ProvisioningState |
+            Should -Be 'Succeeded'
+        Should -Invoke Get-AzProviderFeature -Times 0
+        Should -Invoke Initialize-M365DscResourceProvider -Times 0
+        Should -Invoke New-AzResourceGroupDeployment -Times 1 -Exactly
+    }
+    It 'Registers the exact feature reported in error details, awaits readiness, refreshes its provider and retries the same deployment' {
+        $states = [Collections.Generic.Queue[string]]::new()
+        foreach ($state in 'NotRegistered', 'Registering', 'Registered') { $states.Enqueue($state) }
+        Mock Get-AzProviderFeature { @{ RegistrationState = $states.Dequeue() } }
+        $attempts = [Collections.Generic.List[string]]::new()
+        Mock New-AzResourceGroupDeployment {
+            $attempts.Add($Name)
+            $ResourceGroupName | Should -Be $parameters.ResourceGroupName
+            $TemplateParameterObject | Should -Be $parameters.TemplateParameterObject
+            $TemplateFile | Should -Be $parameters.TemplateFile
+            $Tag | Should -Be $parameters.Tag
+            if ($attempts.Count -eq 1) {
+                $record = [Management.Automation.ErrorRecord]::new(
+                    [InvalidOperationException]::new('Deployment failed'), 'DeploymentFailed',
+                    [Management.Automation.ErrorCategory]::InvalidOperation, $null)
+                $record.ErrorDetails = [Management.Automation.ErrorDetails]::new($featureError)
+                throw $record
+            }
+            @{ ProvisioningState = 'Succeeded' }
+        }
+        Mock Initialize-M365DscResourceProvider {
+            $states.Count | Should -Be 0
+            $attempts.Count | Should -Be 1
+        }
+        (Invoke-M365DscResourceGroupDeployment -SubscriptionId 'synthetic-subscription' -DeploymentParameters $parameters).ProvisioningState |
+            Should -Be 'Succeeded'
+        Should -Invoke Register-AzProviderFeature -Times 1 -Exactly -ParameterFilter {
+            $ProviderNamespace -eq 'Microsoft.Network' -and $FeatureName -eq 'AllowBringYourOwnPublicIpAddress'
+        }
+        Should -Invoke Initialize-M365DscResourceProvider -Times 1 -Exactly -ParameterFilter {
+            $SubscriptionId -eq 'synthetic-subscription' -and $ProviderNamespace -eq 'Microsoft.Network' -and $ForceRegistration
+        }
+        Should -Invoke New-AzResourceGroupDeployment -Times 2 -Exactly
+        Should -Invoke Start-Sleep -Times 1 -Exactly
+    }
+    It 'Awaits in-progress features without registering again' -TestCases @(
+        @{ State = 'Registering' }, @{ State = 'Pending' }, @{ State = 'Registered' }
+    ) {
+        param($State)
+        $states = [Collections.Generic.Queue[string]]::new()
+        $states.Enqueue($State)
+        $states.Enqueue('Registered')
+        Mock Get-AzProviderFeature { @{ RegistrationState = $states.Dequeue() } }
+        $attempts = [Collections.Generic.List[int]]::new()
+        Mock New-AzResourceGroupDeployment {
+            $attempts.Add(1)
+            if ($attempts.Count -eq 1) { throw $featureError }
+            @{ ProvisioningState = 'Succeeded' }
+        }
+        Invoke-M365DscResourceGroupDeployment -SubscriptionId 'synthetic-subscription' -DeploymentParameters $parameters
+        Should -Invoke Register-AzProviderFeature -Times 0
+        Should -Invoke Initialize-M365DscResourceProvider -Times 1 -Exactly
+    }
+    It 'Stops with approval guidance after a bounded pending-feature timeout without retrying deployment' {
+        Mock New-AzResourceGroupDeployment { throw $featureError }
+        Mock Get-AzProviderFeature { @{ RegistrationState = 'Pending' } }
+        { Invoke-M365DscResourceGroupDeployment -SubscriptionId 'synthetic-subscription' -DeploymentParameters $parameters } |
+            Should -Throw '*60 probes*Pending*Azure Support*'
+        Should -Invoke Get-AzProviderFeature -Times 61 -Exactly
+        Should -Invoke Start-Sleep -Times 59 -Exactly
+        Should -Invoke Register-AzProviderFeature -Times 0
+        Should -Invoke Initialize-M365DscResourceProvider -Times 0
+        Should -Invoke New-AzResourceGroupDeployment -Times 1 -Exactly
+    }
+    It 'Propagates feature registration authorization errors without a deployment retry' {
+        Mock New-AzResourceGroupDeployment { throw $featureError }
+        Mock Get-AzProviderFeature { @{ RegistrationState = 'NotRegistered' } }
+        Mock Register-AzProviderFeature { throw 'Synthetic AuthorizationFailed' }
+        { Invoke-M365DscResourceGroupDeployment -SubscriptionId 'synthetic-subscription' -DeploymentParameters $parameters } |
+            Should -Throw '*AuthorizationFailed*'
+        Should -Invoke New-AzResourceGroupDeployment -Times 1 -Exactly
+        Should -Invoke Initialize-M365DscResourceProvider -Times 0
+    }
+    It 'Refreshes only the namespace reported by a provider registration error and retries once' {
+        $attempts = [Collections.Generic.List[int]]::new()
+        Mock New-AzResourceGroupDeployment {
+            $attempts.Add(1)
+            if ($attempts.Count -eq 1) { throw "MissingSubscriptionRegistration: The subscription is not registered to use namespace 'Microsoft.Network'." }
+            @{ ProvisioningState = 'Succeeded' }
+        }
+        Invoke-M365DscResourceGroupDeployment -SubscriptionId 'synthetic-subscription' -DeploymentParameters $parameters
+        Should -Invoke Initialize-M365DscResourceProvider -Times 1 -Exactly -ParameterFilter {
+            $SubscriptionId -eq 'synthetic-subscription' -and $ProviderNamespace -eq 'Microsoft.Network' -and $ForceRegistration
+        }
+        Should -Invoke Get-AzProviderFeature -Times 0
+        Should -Invoke New-AzResourceGroupDeployment -Times 2 -Exactly
+    }
+    It 'Does not keep retrying when the same feature error remains after recovery' {
+        Mock New-AzResourceGroupDeployment { throw $featureError }
+        { Invoke-M365DscResourceGroupDeployment -SubscriptionId 'synthetic-subscription' -DeploymentParameters $parameters } |
+            Should -Throw '*SubscriptionNotRegisteredForFeature*'
+        Should -Invoke Initialize-M365DscResourceProvider -Times 1 -Exactly
+        Should -Invoke New-AzResourceGroupDeployment -Times 2 -Exactly
+        Should -Invoke Write-Warning -Times 1 -Exactly -ParameterFilter { $Message -like '*still failed*Azure Support*' }
+    }
+    It 'Preserves unrelated or unidentifiable errors without registration changes' -TestCases @(
+        @{ Message = 'AuthorizationFailed: permission denied' },
+        @{ Message = 'SubscriptionNotRegisteredForFeature: no feature identified' },
+        @{ Message = 'InvalidTemplate: invalid namespace Microsoft.Network' }
+    ) {
+        param($Message)
+        Mock New-AzResourceGroupDeployment { throw $Message }
+        { Invoke-M365DscResourceGroupDeployment -SubscriptionId 'synthetic-subscription' -DeploymentParameters $parameters } |
+            Should -Throw "*$Message*"
+        Should -Invoke Get-AzProviderFeature -Times 0
+        Should -Invoke Initialize-M365DscResourceProvider -Times 0
+        Should -Invoke New-AzResourceGroupDeployment -Times 1 -Exactly
+    }
+    It 'Rejects a different active subscription before attempting deployment or registration' {
+        { Invoke-M365DscResourceGroupDeployment -SubscriptionId 'other-subscription' -DeploymentParameters $parameters } |
+            Should -Throw '*does not match*'
+        Should -Invoke New-AzResourceGroupDeployment -Times 0
+        Should -Invoke Get-AzProviderFeature -Times 0
+    }
+}
+
 Describe 'Worker VM provisioning backend isolation' {
     BeforeAll {
         $ast = Read-ProvisioningAst "$PSScriptRoot\..\..\lab\Azure\30 Create Agent VMs.ps1"
@@ -191,6 +348,9 @@ Describe 'Worker VM provisioning backend isolation' {
         function Get-AzSnapshot { [CmdletBinding()]param($ResourceGroupName) }
         function New-AzSnapshotConfig { [CmdletBinding()]param($SourceResourceId, $Location, $CreateOption, $SkuName, $Tag) }
         function New-AzSnapshot { [CmdletBinding()]param($ResourceGroupName, $SnapshotName, $Snapshot) }
+        function bicep {}
+        function Get-AzResourceGroup { [CmdletBinding()]param() }
+        function Invoke-M365DscResourceGroupDeployment { [CmdletBinding()]param($SubscriptionId, $DeploymentParameters) }
     }
     BeforeEach {
         $datum = @{ Global = @{
@@ -250,6 +410,20 @@ Describe 'Worker VM provisioning backend isolation' {
         Should -Invoke Get-M365DscAgentVm -Times 0
         Should -Invoke Get-AzVM -Times 0
         Should -Invoke New-AzSnapshot -Times 0
+    }
+    It 'Uses registration recovery for new VM deployments and continues only after success' {
+        Mock Get-M365DscAgentVm { $null }
+        Mock Get-AzResourceGroup { @{ ResourceGroupName = 'synthetic-rg' } }
+        Mock Invoke-M365DscResourceGroupDeployment { @{ ProvisioningState = 'Succeeded' } }
+        & $provision
+        Should -Invoke Invoke-M365DscResourceGroupDeployment -Times 1 -Exactly -ParameterFilter {
+            $SubscriptionId -eq 'synthetic-subscription' -and
+            $DeploymentParameters.Name -eq 'build-agent-Dev' -and
+            $DeploymentParameters.ResourceGroupName -eq 'synthetic-rg' -and
+            $DeploymentParameters.TemplateFile -like '*buildAgent.bicep' -and
+            $DeploymentParameters.TemplateParameterObject.vmName -eq 'synthetic-vm'
+        }
+        Should -Invoke New-AzSnapshot -Times 1 -Exactly
     }
     It 'Keeps Key Vault network initialization for the Key Vault workflow' {
         $datum.Global.ProjectSettings.SecretStorage = 'KeyVault'

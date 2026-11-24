@@ -605,7 +605,7 @@ Describe 'Agent setup identity tenant isolation' {
         function Get-M365DscAgentIdentityName { param($ProjectName, $EnvironmentName) "identity-$EnvironmentName" }
         function Get-M365DscAgentVm { param($ProjectName, $EnvironmentName) @{ ResourceGroupName = "rg-$EnvironmentName" } }
         function Get-AzVM { [CmdletBinding()]param($ResourceGroupName, $Name) }
-        function Get-AzResource { [CmdletBinding()]param($ResourceGroupName, $ResourceType, $ApiVersion, [switch]$ExpandProperties) }
+        function Get-AzResource { [CmdletBinding()]param($ResourceGroupName, $ResourceType, $ResourceId, $ApiVersion, [switch]$ExpandProperties) }
         function Get-AzUserAssignedIdentity { [CmdletBinding()]param($ResourceGroupName) }
         function Resolve-M365DscKeyVaultName { param($ProjectName, $EnvironmentName, $TenantId, $SubscriptionId) 'synthetic-vault' }
         function Get-AzKeyVault { [CmdletBinding()]param() }
@@ -643,10 +643,19 @@ Describe 'Agent setup identity tenant isolation' {
             @{ ResourceGroupName = $ResourceGroupName; Identity = @{ UserAssignedIdentities = @{ $identities[$name].ResourceId = @{} } } }
         }
         Mock Get-AzResource {
-            $name = $ResourceGroupName.Replace('rg-', '')
+            if ($ResourceId) {
+                $name = ($ResourceId -split '/')[-1].Replace('identity-', '')
+                $ApiVersion | Should -Be '2023-01-31'
+                $ExpandProperties | Should -BeTrue
+            }
+            else {
+                if ($ApiVersion -or $ExpandProperties) { throw 'InvalidApiVersionParameter: resource lists use the Microsoft.Resources API.' }
+                $name = $ResourceGroupName.Replace('rg-', '')
+            }
             $activeContext.Tenant.Id | Should -Be $datum.Global.Azure.Environments[$name].AzTenantId
             $activeContext.Subscription.Id | Should -Be $datum.Global.Azure.Environments[$name].AzSubscriptionId
-            $identities[$name]
+            if ($ResourceId) { $identities[$name] }
+            else { @{ Name = $identities[$name].Name; ResourceId = $identities[$name].ResourceId } }
         }
         Mock Get-AzUserAssignedIdentity { throw 'Unexpected stale AutoRest token path' }
         Mock Get-AzKeyVault { @{ VaultName = 'synthetic-vault'; ResourceId = 'synthetic-vault-id' } }
@@ -655,7 +664,10 @@ Describe 'Agent setup identity tenant isolation' {
     It 'Switches from the previous Prod context and reads Dev and Test identities using expanded ARM properties' {
         & $prepareAgent
         Should -Invoke Get-AzResource -Times 2 -Exactly -ParameterFilter {
-            $ResourceType -eq 'Microsoft.ManagedIdentity/userAssignedIdentities' -and $ApiVersion -eq '2023-01-31' -and $ExpandProperties
+            $ResourceType -eq 'Microsoft.ManagedIdentity/userAssignedIdentities' -and -not $ApiVersion -and -not $ExpandProperties
+        }
+        Should -Invoke Get-AzResource -Times 2 -Exactly -ParameterFilter {
+            $ResourceId -in @($identities.Dev.ResourceId, $identities.Test.ResourceId) -and $ApiVersion -eq '2023-01-31' -and $ExpandProperties
         }
         Should -Invoke Get-AzUserAssignedIdentity -Times 0
         Should -Invoke Ensure-M365DscKeyVaultRoleAssignment -Times 0
@@ -698,6 +710,12 @@ Describe 'Agent setup identity tenant isolation' {
     It 'Rejects an identity not assigned to the selected VM' {
         Mock Get-AzVM { @{ Identity = @{ UserAssignedIdentities = @{} } } }
         { & $prepareAgent } | Should -Throw '*not assigned to VM*'
+        Should -Invoke Ensure-M365DscKeyVaultRoleAssignment -Times 0
+    }
+    It 'Propagates a failed identity detail read without granting permissions' {
+        $secretBackend = 'KeyVault'
+        Mock Get-AzResource { throw 'Synthetic identity detail access denied' } -ParameterFilter { $ResourceId }
+        { & $prepareAgent } | Should -Throw '*identity detail access denied*'
         Should -Invoke Ensure-M365DscKeyVaultRoleAssignment -Times 0
     }
 }

@@ -289,7 +289,7 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
     $buildAgentIdentityName = Get-M365DscAgentIdentityName -ProjectName $projectName -EnvironmentName $envName
     $buildAgentIdentities = @(
         Get-AzResource -ResourceGroupName $resourceGroupName -ResourceType 'Microsoft.ManagedIdentity/userAssignedIdentities' `
-            -ApiVersion '2023-01-31' -ExpandProperties -ErrorAction Stop |
+            -ErrorAction Stop |
             Where-Object Name -EQ $buildAgentIdentityName
     )
     if ($buildAgentIdentities.Count -ne 1)
@@ -302,6 +302,8 @@ foreach ($envName in $datum.Global.Azure.Environments.Keys)
     {
         throw "Managed identity '$buildAgentIdentityName' did not return the expected resource ID '$identityResourceId'. Agent setup was not attempted."
     }
+    $buildAgentIdentity = Get-AzResource -ResourceId $identityResourceId -ApiVersion '2023-01-31' `
+        -ExpandProperties -ErrorAction Stop
     if (-not $buildAgentIdentity.Properties.clientId -or -not $buildAgentIdentity.Properties.principalId)
     {
         throw "Managed identity '$buildAgentIdentityName' did not return its client ID and principal ID. Agent setup was not attempted."

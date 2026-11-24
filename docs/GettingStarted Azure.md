@@ -254,7 +254,7 @@ It creates one VM per configured environment, using the editable [Bicep template
 
 Use Azure VM Run Command to install and configure the Azure DevOps agent on each VM:
 
-Agent setup validates the environment's active tenant/subscription and reads the assigned identity through `Az.Resources`, avoiding the same AutoRest cross-tenant authentication path as VM provisioning. It verifies the identity resource ID and retrieves its client/principal IDs from the expanded ARM properties. Key Vault role assignment and worker `AZURE_CLIENT_ID` configuration use those verified values.
+Agent setup validates the environment's active tenant/subscription and reads the assigned identity through `Az.Resources`, avoiding the same AutoRest cross-tenant authentication path as VM provisioning. Resource-list discovery uses the cmdlet's default listing API; after verifying the identity resource ID, a separate resource-ID read uses the managed-identity API to retrieve expanded client/principal properties. Key Vault role assignment and worker `AZURE_CLIENT_ID` configuration use those verified values.
 
 ```powershell
 & '.\lab\Azure\31 Agent Setup.ps1'
